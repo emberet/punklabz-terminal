@@ -14,6 +14,8 @@ export interface AuthUser {
   walletAddress: string | null;
   displayName: string;
   isAdmin: boolean;
+  sessionCreatedAt: number;
+  sessionAuthMethod: string;
 }
 
 /**
@@ -44,11 +46,11 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
-export function createSession(db: DB, userId: number): string {
+export function createSession(db: DB, userId: number, authMethod: 'email' | 'wallet' = 'email'): string {
   const token = randomBytes(32).toString('base64url');
   const now = Date.now();
-  db.prepare('INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
-    .run(hashToken(token), userId, now, now + SESSION_TTL_MS);
+  db.prepare('INSERT INTO sessions (token_hash, user_id, created_at, expires_at, auth_method) VALUES (?, ?, ?, ?, ?)')
+    .run(hashToken(token), userId, now, now + SESSION_TTL_MS, authMethod);
   return token;
 }
 
@@ -61,12 +63,13 @@ export function userFromSession(db: DB, token: string | undefined): AuthUser | n
   const now = Date.now();
   const row = db
     .prepare(
-      `SELECT u.id, u.email, u.wallet_address, u.display_name, u.is_admin, s.expires_at, s.token_hash
+      `SELECT u.id, u.email, u.wallet_address, u.display_name, u.is_admin, s.created_at,
+              s.expires_at, s.token_hash, s.auth_method
        FROM sessions s JOIN users u ON u.id = s.user_id
        WHERE s.token_hash = ? AND s.expires_at > ?`,
     )
     .get(hashToken(token), now) as
-    | { id: number; email: string | null; wallet_address: string | null; display_name: string; is_admin: number; expires_at: number; token_hash: string }
+    | { id: number; email: string | null; wallet_address: string | null; display_name: string; is_admin: number; created_at: number; expires_at: number; token_hash: string; auth_method: string }
     | undefined;
   if (!row) return null;
   // sliding expiry: extend when past halfway
@@ -80,6 +83,8 @@ export function userFromSession(db: DB, token: string | undefined): AuthUser | n
     displayName: row.display_name,
     // derived from the bound wallet, not from row.is_admin
     isAdmin: isAdminWallet(row.wallet_address),
+    sessionCreatedAt: row.created_at,
+    sessionAuthMethod: row.auth_method,
   };
 }
 

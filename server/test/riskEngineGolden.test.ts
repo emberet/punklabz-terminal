@@ -31,7 +31,8 @@ function seedDb(): DB {
   db.prepare(`INSERT INTO users (email, display_name, created_at) VALUES ('g@x.com','g',1)`).run();
   db.prepare(`INSERT INTO bots (name, kind, strategy_type, config_json, created_at) VALUES ('G','house','momentum','{}',1)`).run();
   setLiveMode(db, 'shadow', 'golden');
-  setCapitalStage(db, 1, 'golden');
+  getLiveConfig(db);
+  db.prepare(`UPDATE live_config SET capital_stage=1 WHERE id=1`).run();
   return db;
 }
 

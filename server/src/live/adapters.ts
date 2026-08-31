@@ -1,5 +1,6 @@
 import type { Instrument, VenueHealth } from '@punklabz/shared';
 import type { TradingSigner } from './signing/signer.js';
+import type { DB } from '../db/db.js';
 import { ROBINHOOD_VENUE } from './instruments.js';
 import { ZeroXRobinhoodAdapter } from './adapters/zeroXRobinhood.js';
 
@@ -26,6 +27,7 @@ export interface AdapterOrderResult {
   /** true when the order is live at the venue but not yet resolved */
   pending?: boolean;
   error?: string;
+  transactionId?: number;
 }
 
 export interface AdapterBalance {
@@ -45,6 +47,19 @@ export interface AdapterOrderStatus {
   executedPrice?: number;
   feeUsd?: number;
   detail: string;
+  txRef?: string;
+  confirmations?: number;
+  blockNumber?: number;
+  blockHash?: string;
+  gasUsedWei?: string;
+  assetDeltas?: { asset: string; qtyDelta: number; logIndex: number }[];
+}
+
+export interface FundingTransfer {
+  asset: string;
+  qty: number;
+  txRef: string;
+  logIndex: number;
 }
 
 export interface ReconciliationResult {
@@ -58,6 +73,10 @@ export interface ExecutionAdapter {
   readonly venue: string;
   health(): Promise<VenueHealth>;
   getQuote(inst: Instrument): Promise<AdapterQuote | null>;
+  /** firm, taker-bound quote used for launch/reference checks; never signed */
+  getExecutableQuote?(inst: Instrument): Promise<AdapterQuote | null>;
+  /** conservative executable liquidation price for an exact base-asset quantity */
+  getExecutableSellQuote?(inst: Instrument, quantity: number): Promise<AdapterQuote | null>;
   /**
    * Submit an order. `minReceive` is slippage protection that a real adapter
    * MUST encode into the transaction itself before signing — checking slippage
@@ -67,7 +86,16 @@ export interface ExecutionAdapter {
     inst: Instrument,
     side: 'buy' | 'sell',
     notionalUsd: number,
-    opts?: { minReceive?: number; intentId?: string },
+    opts?: {
+      minReceive?: number;
+      intentId?: string;
+      orderId?: number;
+      accountId?: number;
+      maxSlippageBps?: number;
+      expectedPrice?: number;
+      grossEdgeBps?: number;
+      safetyBufferBps?: number;
+    },
   ): Promise<AdapterOrderResult>;
   /** poll a submitted order until it resolves */
   getOrderStatus?(venueOrderId: string): Promise<AdapterOrderStatus>;
@@ -76,6 +104,10 @@ export interface ExecutionAdapter {
   getPositions?(): Promise<AdapterPosition[]>;
   /** authoritative venue state for the reconciler */
   reconcile?(): Promise<ReconciliationResult>;
+  recoverTransactions?(): Promise<{ recovered: number; unresolved: number }>;
+  getFundingTransfers?(txHash: string, walletAddress: string): Promise<FundingTransfer[]>;
+  verifyCoreAssets?(): Promise<{ ok: boolean; failures: string[] }>;
+  estimateGasReserveEth?(transactionCount: number): Promise<number>;
 }
 
 export class NotConfiguredAdapter implements ExecutionAdapter {
@@ -173,6 +205,7 @@ export class ShadowAdapter implements ExecutionAdapter {
 export function buildAdapters(
   markOf: (s: string) => number | undefined,
   signer?: TradingSigner,
+  db?: DB,
 ): Map<string, ExecutionAdapter> {
   const adapters = new Map<string, ExecutionAdapter>();
   const shadow = new ShadowAdapter(markOf);
@@ -191,7 +224,7 @@ export function buildAdapters(
     adapters.set(ROBINHOOD_VENUE, new ZeroXRobinhoodAdapter({
       apiKey: zeroXKey,
       signer,
-      maxSlippageBps: Number(process.env.MAX_SLIPPAGE_BPS ?? 100),
+      db,
     }));
   } else {
     adapters.set(ROBINHOOD_VENUE, new NotConfiguredAdapter(

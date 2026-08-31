@@ -39,7 +39,7 @@ export function Explore() {
         <div>
           <h1 className="page-title">Black Market</h1>
           <div className="page-sub">
-            Clone another quant's bot for $10 — every dollar goes to its creator.
+            Clone another quant's bot for 10 demo credits; the creator receives those credits.
           </div>
         </div>
       </div>

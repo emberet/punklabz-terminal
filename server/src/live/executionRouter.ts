@@ -16,6 +16,10 @@ export interface RouteRequest {
   /** the mode decides which adapters are even eligible */
   mode: 'simulation' | 'shadow' | 'canary' | 'live';
   intentId?: string;
+  orderId?: number;
+  accountId?: number;
+  grossEdgeBps?: number;
+  safetyBufferBps?: number;
   /** present when this order spends a delegated wallet rather than the house book */
   delegation?: { grantId: number; isExit: boolean };
 }
@@ -138,6 +142,12 @@ export class ExecutionRouter {
     const result = await decision.adapter.placeOrder(decision.instrument, req.side, req.notionalUsd, {
       minReceive,
       intentId: req.intentId,
+      orderId: req.orderId,
+      accountId: req.accountId,
+      maxSlippageBps: req.maxSlippageBps,
+      expectedPrice,
+      grossEdgeBps: req.grossEdgeBps,
+      safetyBufferBps: req.safetyBufferBps,
     });
     if (!result.accepted) {
       return { ...result, slippageBps: 0, minReceive };

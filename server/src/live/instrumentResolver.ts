@@ -11,8 +11,8 @@ import { ROBINHOOD_VENUE, SETTLEMENT, findInstrument } from './instruments.js';
 // asset. A live instrument is only ever reached through an EXPLICIT mapping
 // that names the chain, the exact contract addresses and their decimals.
 //
-// Nothing is mapped in this build. Every lookup returns "unmapped", which is
-// what keeps the live path closed.
+// Only ETHUSDT is mapped in this build, and only to the exact WETH/USDG pair on
+// Robinhood Chain. Every other lookup remains closed.
 
 export interface LiveTokenSpec {
   chainId: number;
@@ -40,7 +40,7 @@ export interface ResolutionResult {
 }
 
 /**
- * Operator-configured mappings. Empty by design.
+ * Explicit live mappings. Keep this list deliberately tiny.
  *
  * A real entry names everything needed to build a transaction without guessing:
  *

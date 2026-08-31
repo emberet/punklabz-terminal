@@ -72,6 +72,9 @@ export async function runEpoch(
   queue: PayoutQueue,
   opts: { periodStart?: number; periodEnd?: number } = {},
 ): Promise<EpochRunResult> {
+  if (!config.payoutsEnabled) {
+    throw new Error('real payouts are disabled; paper trades cannot fund treasury distributions');
+  }
   const periodEnd = opts.periodEnd ?? Date.now();
   const lastEpoch = db
     .prepare('SELECT MAX(period_end) AS ts FROM payout_epochs')
@@ -209,6 +212,7 @@ async function narrate(
  * tamper-proof gate between narration and money.
  */
 export async function approveEpoch(db: DB, epochId: number, adminUserId: number, queue: PayoutQueue): Promise<void> {
+  if (!config.payoutsEnabled) throw new Error('payouts are disabled in this deployment');
   const epoch = db
     .prepare(`SELECT id, status, total_profit_micro, snapshot_id FROM payout_epochs WHERE id = ?`)
     .get(epochId) as { id: number; status: string; total_profit_micro: number; snapshot_id: number } | undefined;

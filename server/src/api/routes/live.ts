@@ -5,14 +5,16 @@ import type { AppContext } from '../context.js';
 import { requireUser } from './auth.js';
 import { fromMicro } from '../../money.js';
 import {
-  getLiveConfig, haltNetwork, promotionEvidence, resumeNetwork, setCapitalStage,
+  getLiveConfig, haltNetwork, promotionEvidence, setCapitalStage,
   setLiveMode, stageCapUsd, updateLimits,
 } from '../../live/riskEngine.js';
 import { ROBINHOOD_VENUE, SETTLEMENT, allInstruments, searchInstruments } from '../../live/instruments.js';
 import { runPreflight, preflightLines } from '../../live/preflight.js';
-import { accountBook, accountForMode, listAccounts } from '../../live/accounts.js';
+import {
+  accountBook, accountForMode, custodyHoldings, listAccounts, recordFunding, setBotAllocation,
+} from '../../live/accounts.js';
 import { reconcileAll } from '../../live/reconciler.js';
-import { mappedSymbols } from '../../live/instrumentResolver.js';
+import { mappedSymbols, resolveLiveInstrument } from '../../live/instrumentResolver.js';
 import { buildResearchExport } from '../../research/export.js';
 import { closeNow, currentWindow, openWindow } from '../../research/window.js';
 
@@ -26,8 +28,34 @@ function requireAdmin(app: AppContext, request: any, reply: any) {
   return user;
 }
 
+function requireFreshAdmin(app: AppContext, request: any, reply: any) {
+  const user = requireAdmin(app, request, reply);
+  if (!user) return null;
+  if (user.sessionAuthMethod !== 'wallet' || Date.now() - user.sessionCreatedAt > 5 * 60_000) {
+    reply.code(401).send({ error: 'fresh operator wallet authentication required' });
+    return null;
+  }
+  if (request.headers['x-requested-with'] !== 'punklabz') {
+    reply.code(403).send({ error: 'CSRF protection header missing' });
+    return null;
+  }
+  const origin = request.headers.origin as string | undefined;
+  if (origin) {
+    try {
+      if (new URL(origin).host !== request.headers.host) {
+        reply.code(403).send({ error: 'request origin does not match host' });
+        return null;
+      }
+    } catch {
+      reply.code(403).send({ error: 'invalid request origin' });
+      return null;
+    }
+  }
+  return user;
+}
+
 export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
-  server.get('/api/live/status', async (): Promise<LiveStatusView> => {
+  const detailedStatus = async (): Promise<LiveStatusView> => {
     const cfg = getLiveConfig(app.db);
     const stageCap = stageCapUsd(cfg.capitalStage);
     const dayStart = Math.floor(Date.now() / 86_400_000) * 86_400_000;
@@ -35,7 +63,30 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     // NAV/drawdown are scoped to the account this mode books to — shadow P&L
     // never leaks into a live account's figures
     const account = accountForMode(app.db, cfg.mode);
-    const book = accountBook(app.db, account.id, stageCap);
+    const traderAccount = accountForMode(app.db, 'canary', ROBINHOOD_VENUE);
+    const book = accountBook(app.db, traderAccount.id, stageCap);
+    const boundary = await executionBoundary(app);
+    let wethMark = 0;
+    if (boundary.baseAssetBalance !== null && boundary.baseAssetBalance > 0) {
+      const resolved = resolveLiveInstrument('ETHUSDT');
+      const adapter = app.adapters.get(ROBINHOOD_VENUE);
+      try {
+        const liquidation = resolved.instrument && adapter?.getExecutableSellQuote
+          ? await adapter.getExecutableSellQuote(resolved.instrument, boundary.baseAssetBalance)
+          : null;
+        wethMark = liquidation?.price ?? 0;
+      } catch {
+        // Unliquidatable exposure contributes zero to authorized NAV.
+        wethMark = 0;
+      }
+    }
+    const walletNav = boundary.settlementBalance !== null && boundary.baseAssetBalance !== null
+      ? boundary.settlementBalance + boundary.baseAssetBalance * wethMark
+      : 0;
+    const authorizedCapital = Math.min(stageCap, walletNav);
+    const deployed = (boundary.baseAssetBalance ?? 0) * wethMark + book.deployedUsd;
+    const reserve = (authorizedCapital * cfg.limits.minCashReservePct) / 100;
+    const available = Math.max(0, Math.min(boundary.settlementBalance ?? 0, authorizedCapital - deployed - reserve));
 
     const counts = app.db
       .prepare(
@@ -58,10 +109,10 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
       stageCapUsd: stageCap,
       limits: cfg.limits,
       nav: {
-        totalUsd: book.navUsd,
-        deployedUsd: book.deployedUsd,
-        availableUsd: Math.max(0, book.navUsd - book.deployedUsd),
-        reserveUsd: (stageCap * cfg.limits.minCashReservePct) / 100,
+        totalUsd: walletNav,
+        deployedUsd: deployed,
+        availableUsd: available,
+        reserveUsd: reserve,
       },
       today: { netPnlUsd: book.todayPnlUsd, feesUsd: book.feesUsd, drawdownPct: book.drawdownPct },
       throughput: {
@@ -88,8 +139,63 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
         detail: signerReady.detail,
       },
       walletAddress: signerReady.address,
-      ...(await executionBoundary(app)),
+      authorizedCapitalUsd: authorizedCapital,
+      promotion: promotionEvidence(app.db),
+      ...boundary,
     };
+  };
+
+  server.get('/api/live/status', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async () => {
+    // Public polling never calls Privy, 0x, or the RPC. It serves coarse state
+    // plus delayed aggregates from local records, so it cannot be used to burn
+    // provider quotas or inspect the execution wallet by timing responses.
+    const cfg = getLiveConfig(app.db);
+    const stageCap = stageCapUsd(cfg.capitalStage);
+    const cutoff = Date.now() - 15 * 60_000;
+    const dayStart = Math.floor(cutoff / 86_400_000) * 86_400_000;
+    const trader = app.db.prepare(`SELECT id FROM execution_accounts WHERE name='ROBINHOOD_TRADER_01'`)
+      .get() as { id: number } | undefined;
+    const delayed = trader ? app.db.prepare(
+      `SELECT COALESCE(SUM(realized_pnl_micro-fee_micro-gas_micro),0) pnl,
+              COALESCE(SUM(fee_micro+gas_micro),0) fees,
+              COUNT(*) fills
+       FROM live_ledger WHERE execution_account_id=? AND ts BETWEEN ? AND ?`,
+    ).get(trader.id, dayStart, cutoff) as { pnl: number; fees: number; fills: number }
+      : { pnl: 0, fees: 0, fills: 0 };
+    const venue = app.db.prepare(
+      `SELECT status FROM venue_health WHERE venue=? ORDER BY updated_at DESC LIMIT 1`,
+    ).get(ROBINHOOD_VENUE) as { status: string } | undefined;
+    return {
+      mode: cfg.mode,
+      halted: cfg.halted,
+      haltReason: cfg.halted ? 'operator attention required' : null,
+      capitalStage: cfg.capitalStage,
+      stageCapUsd: stageCap,
+      network: 'robinhood',
+      chainId: ROBINHOOD_MAINNET_CHAIN_ID,
+      settlementSymbol: SETTLEMENT.symbol,
+      authorizedCapitalUsd: stageCap,
+      nav: {
+        totalUsd: stageCap,
+        deployedUsd: 0,
+        availableUsd: 0,
+        reserveUsd: 0,
+      },
+      today: {
+        netPnlUsd: fromMicro(delayed.pnl), feesUsd: fromMicro(delayed.fees), drawdownPct: 0,
+      },
+      throughput: {
+        marketsWatched: allInstruments().length,
+        signals: 0, approved: 0, executed: delayed.fills, rejected: 0,
+      },
+      adapterStatus: venue?.status === 'online' ? 'online' : 'unavailable',
+      delayedAsOf: cutoff,
+    };
+  });
+
+  server.get('/api/admin/live/status', async (request, reply) => {
+    if (!requireAdmin(app, request, reply)) return;
+    return detailedStatus();
   });
 
   /**
@@ -103,6 +209,7 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     let adapterStatus = 'not registered';
     let settlementBalance: number | null = null;
     let ethGasBalance: number | null = null;
+    let baseAssetBalance: number | null = null;
 
     if (adapter) {
       try {
@@ -116,15 +223,17 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
           const balances = await adapter.getBalances();
           settlementBalance = balances.find((b) => b.asset.toUpperCase() === SETTLEMENT.symbol.toUpperCase())?.qty ?? 0;
           ethGasBalance = balances.find((b) => b.asset.toUpperCase() === 'ETH')?.qty ?? 0;
+          baseAssetBalance = balances.find((b) => b.asset.toUpperCase() === 'WETH')?.qty ?? 0;
         } catch {
           // leave null: "we could not read it" is not the same as "it is zero"
         }
       }
     }
 
+    const trader = accountForMode(app.db, 'canary', ROBINHOOD_VENUE);
     const recon = app.db
-      .prepare(`SELECT ts, within_tolerance FROM balance_snapshots ORDER BY id DESC LIMIT 1`)
-      .get() as { ts: number; within_tolerance: number } | undefined;
+      .prepare(`SELECT completed_at ts, status FROM reconciliation_runs WHERE execution_account_id=? ORDER BY id DESC LIMIT 1`)
+      .get(trader.id) as { ts: number; status: string } | undefined;
     const preflight = app.db
       .prepare(`SELECT ts, target_mode, passed FROM preflight_runs ORDER BY id DESC LIMIT 1`)
       .get() as { ts: number; target_mode: string; passed: number } | undefined;
@@ -133,8 +242,12 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
       adapterStatus,
       settlementBalance,
       ethGasBalance,
+      baseAssetBalance,
+      pendingTransactions: (app.db.prepare(
+        `SELECT COUNT(*) n FROM execution_transactions WHERE state IN ('prepared','signed','broadcast','unknown')`,
+      ).get() as { n: number }).n,
       lastReconciliation: recon
-        ? { at: recon.ts, clean: recon.within_tolerance === 1 }
+        ? { at: recon.ts, clean: recon.status === 'clean' }
         : null,
       preflightStatus: preflight
         ? { at: preflight.ts, mode: preflight.target_mode, passed: preflight.passed === 1 }
@@ -155,8 +268,8 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
   /** Open / inspect / close the research window. */
   server.get('/api/live/window', async () => currentWindow(app.db));
 
-  server.post('/api/live/window', async (request, reply) => {
-    const user = requireAdmin(app, request, reply);
+  server.post('/api/live/window', { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
     if (!user) return;
     const body = z.object({
       hours: z.number().min(0.5).max(168),
@@ -172,39 +285,42 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     }
   });
 
-  server.delete('/api/live/window', async (request, reply) => {
-    const user = requireAdmin(app, request, reply);
+  server.delete('/api/live/window', { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
     if (!user) return;
     return closeNow(app.db, `user:${user.id}`);
   });
 
   // GLOBAL PROCESS: the funnel, every number measured
   server.get('/api/live/process', async () => {
-    const dayStart = Math.floor(Date.now() / 86_400_000) * 86_400_000;
-    const hourAgo = Date.now() - 3_600_000;
+    const cfg = getLiveConfig(app.db);
+    const realMoney = cfg.mode === 'canary' || cfg.mode === 'live';
+    const asOf = Date.now() - (realMoney ? 15 * 60_000 : 0);
+    const dayStart = Math.floor(asOf / 86_400_000) * 86_400_000;
+    const hourAgo = asOf - 3_600_000;
 
-    const lastPass = app.db.prepare(`SELECT * FROM scan_passes ORDER BY id DESC LIMIT 1`).get() as any;
+    const lastPass = app.db.prepare(`SELECT * FROM scan_passes WHERE ts <= ? ORDER BY id DESC LIMIT 1`).get(asOf) as any;
     const window = app.db
       .prepare(
         `SELECT COALESCE(SUM(markets_observed),0) obs, COALESCE(SUM(candidates),0) c,
                 COALESCE(SUM(signals),0) s, COALESCE(SUM(high_confidence),0) h,
                 COUNT(*) passes, COALESCE(AVG(duration_ms),0) avg_ms,
                 COALESCE(MAX(markets_observed),0) universe
-         FROM scan_passes WHERE ts >= ?`,
+         FROM scan_passes WHERE ts BETWEEN ? AND ?`,
       )
-      .get(hourAgo) as any;
+      .get(hourAgo, asOf) as any;
     const rejected = app.db
-      .prepare(`SELECT COUNT(*) n FROM opportunities WHERE state = 'rejected' AND ts >= ?`)
-      .get(hourAgo) as { n: number };
+      .prepare(`SELECT COUNT(*) n FROM opportunities WHERE state = 'rejected' AND ts BETWEEN ? AND ?`)
+      .get(hourAgo, asOf) as { n: number };
     const orders = app.db
       .prepare(
         `SELECT
            SUM(CASE WHEN state IN ('risk_approved','submitting','open','partial','filled') THEN 1 ELSE 0 END) approved,
            SUM(CASE WHEN state IN ('submitting','open','partial','filled') THEN 1 ELSE 0 END) routed,
            SUM(CASE WHEN state = 'filled' THEN 1 ELSE 0 END) executed
-         FROM live_orders WHERE created_at >= ?`,
+         FROM live_orders WHERE created_at BETWEEN ? AND ?`,
       )
-      .get(dayStart) as any;
+      .get(dayStart, asOf) as any;
 
     return {
       live: app.opportunities?.counts() ?? null,
@@ -224,6 +340,7 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
       },
       passesLastHour: window.passes,
       avgPassMs: Math.round(window.avg_ms),
+      delayedAsOf: realMoney ? asOf : null,
       note: 'scanner opportunities are advisory — only a machine committing capital reaches execution',
     };
   });
@@ -234,11 +351,15 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
       limit: z.coerce.number().min(1).max(80).default(30),
       state: z.enum(['all', 'high_confidence', 'rejected']).default('all'),
     }).parse(request.query);
-    const where = q.state === 'all' ? '' : `WHERE state = '${q.state}'`;
+    const cfg = getLiveConfig(app.db);
+    const realMoney = cfg.mode === 'canary' || cfg.mode === 'live';
+    const asOf = Date.now() - (realMoney ? 15 * 60_000 : 0);
+    const stateClause = q.state === 'all' ? '' : `AND state = '${q.state}'`;
     const rows = app.db
-      .prepare(`SELECT * FROM opportunities ${where} ORDER BY id DESC LIMIT ?`)
-      .all(q.limit) as any[];
+      .prepare(`SELECT * FROM opportunities WHERE ts <= ? ${stateClause} ORDER BY id DESC LIMIT ?`)
+      .all(asOf, q.limit) as any[];
     return {
+      delayedAsOf: realMoney ? asOf : null,
       opportunities: rows.map((o) => ({
         id: o.id, ts: o.ts, scanner: o.scanner, universe: o.universe,
         symbol: o.symbol, direction: o.direction, confidence: o.confidence,
@@ -252,7 +373,8 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     };
   });
 
-  server.get('/api/live/orders', async (request) => {
+  server.get('/api/admin/live/orders', async (request, reply) => {
+    if (!requireAdmin(app, request, reply)) return;
     const q = z.object({ limit: z.coerce.number().min(1).max(100).default(40) }).parse(request.query);
     const orders = (app.db
       .prepare(`SELECT * FROM live_orders ORDER BY id DESC LIMIT ?`)
@@ -274,13 +396,20 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
         slippageBps: o.slippage_bps,
         feeUsd: fromMicro(o.fee_micro),
         rejectReason: o.reject_reason,
+        txRef: o.tx_ref,
+        confirmations: o.tx_ref ? ((app.db.prepare(
+          `SELECT confirmations FROM execution_transactions WHERE order_id=? AND purpose='swap' ORDER BY id DESC LIMIT 1`,
+        ).get(o.id) as { confirmations: number } | undefined)?.confirmations ?? 0) : 0,
+        cleanFill: o.clean_fill === 1,
+        forced: !!o.forced_by,
         ts: o.created_at,
       }));
     return { orders };
   });
 
   // dry-run the gate for any mode without changing anything
-  server.get('/api/live/preflight', async (request) => {
+  server.get('/api/admin/live/preflight', async (request, reply) => {
+    if (!requireAdmin(app, request, reply)) return;
     const q = z.object({
       mode: z.enum(['simulation', 'shadow', 'canary', 'live']).default('live'),
     }).parse(request.query);
@@ -289,11 +418,53 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
         ethUsd: app.executor.getMark('ETHUSDT') ?? null },
       q.mode,
       'dry-run',
+      { persist: false },
     );
     return { ...result, lines: preflightLines(result), mappedSymbols: mappedSymbols() };
   });
 
-  server.get('/api/live/accounts', async () => {
+  server.post('/api/admin/live/preflight', { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
+    if (!user) return;
+    const body = z.object({
+      mode: z.enum(['shadow', 'canary', 'live']),
+      stage: z.number().int().min(0).max(4).optional(),
+    }).parse(request.body);
+    const result = await runPreflight(
+      { db: app.db, signer: app.signer, adapters: app.adapters, feedStatus: app.feedStatus,
+        ethUsd: app.executor.getMark('ETHUSDT') ?? null },
+      body.mode, `admin:${user.id}`, { targetStage: body.stage },
+    );
+    return { ...result, lines: preflightLines(result), mappedSymbols: mappedSymbols() };
+  });
+
+  server.post('/api/admin/live/funding/import', { config: { rateLimit: { max: 5, timeWindow: '5 minutes' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
+    if (!user) return;
+    const body = z.object({ txHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/) }).parse(request.body);
+    const account = accountForMode(app.db, 'canary', ROBINHOOD_VENUE);
+    const wallet = await app.signer.getAddress();
+    if (!wallet || !account.walletAddress || wallet.toLowerCase() !== account.walletAddress.toLowerCase()) {
+      return reply.code(409).send({ error: 'signer and trader execution account are not bound to the same wallet' });
+    }
+    const adapter = app.adapters.get(ROBINHOOD_VENUE);
+    if (!adapter?.getFundingTransfers) return reply.code(503).send({ error: 'Robinhood adapter cannot decode funding transfers' });
+    try {
+      const decoded = (await adapter.getFundingTransfers(body.txHash, wallet))
+        .filter((e) => e.asset === 'USDG' || e.asset === 'ETH');
+      if (decoded.length === 0) return reply.code(400).send({ error: 'transaction contains no USDG or ETH transfer into the trader wallet' });
+      const inserted = recordFunding(app.db, account.id, decoded.map((e) => ({
+        asset: e.asset, qty: e.qty, txRef: e.txRef, logIndex: e.logIndex,
+        note: 'verified Robinhood Chain funding import',
+      })), `admin:${user.id}`);
+      return { ok: true, inserted, transfers: decoded.map((e) => ({ asset: e.asset, qty: e.qty, txRef: e.txRef })) };
+    } catch (error) {
+      return reply.code(409).send({ error: String(error instanceof Error ? error.message : error) });
+    }
+  });
+
+  server.get('/api/admin/live/accounts', async (request, reply) => {
+    if (!requireAdmin(app, request, reply)) return;
     const cfg = getLiveConfig(app.db);
     const stageCap = stageCapUsd(cfg.capitalStage);
     return {
@@ -302,16 +473,65 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
         book: accountBook(app.db, a.id, a.mode === cfg.mode ? stageCap : a.fundedUsd),
       })),
       promotion: promotionEvidence(app.db),
+      allocations: app.db.prepare(
+        `SELECT m.bot_id botId, b.name botName, m.allocated_usdg allocatedUsdg,
+                m.active, m.actor, m.updated_at updatedAt
+         FROM manager_capital_allocations m JOIN bots b ON b.id=m.bot_id
+         WHERE m.execution_account_id=? ORDER BY b.name`,
+      ).all(accountForMode(app.db, 'canary', ROBINHOOD_VENUE).id),
+      bots: app.db.prepare(
+        `SELECT id, name, status FROM bots WHERE status IN ('running','paused') ORDER BY name`,
+      ).all(),
     };
   });
 
-  server.post('/api/live/reconcile', async (request, reply) => {
-    const user = requireAdmin(app, request, reply);
+  server.get('/api/admin/live/audit', async (request, reply) => {
+    if (!requireAdmin(app, request, reply)) return;
+    const q = z.object({ limit: z.coerce.number().min(1).max(200).default(100) }).parse(request.query);
+    const rows = app.db.prepare(
+      `SELECT id, ts, actor, action, payload_json, prev_hash, hash
+       FROM audit_log
+       WHERE action LIKE 'live_%' OR action LIKE 'capital_%' OR action LIKE 'manager_capital_%'
+          OR action IN ('preflight','account_funding','order_approved','order_rejected','reconciliation_failure')
+       ORDER BY id DESC LIMIT ?`,
+    ).all(q.limit) as any[];
+    return {
+      events: rows.map((row) => ({
+        id: row.id, ts: row.ts, actor: row.actor, action: row.action,
+        details: row.payload_json ? JSON.parse(row.payload_json) : null,
+        prevHash: row.prev_hash, hash: row.hash,
+      })),
+    };
+  });
+
+  server.post('/api/admin/live/allocations', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
+    if (!user) return;
+    const body = z.object({
+      botId: z.number().int().positive(),
+      allocatedUsdg: z.number().min(0).max(100),
+    }).parse(request.body);
+    const account = accountForMode(app.db, 'canary', ROBINHOOD_VENUE);
+    const cfg = getLiveConfig(app.db);
+    const reconciledUsdg = custodyHoldings(app.db, account.id).get('USDG') ?? 0;
+    const authorized = Math.min(stageCapUsd(cfg.capitalStage), reconciledUsdg);
+    try {
+      setBotAllocation(app.db, account.id, body.botId, body.allocatedUsdg,
+        `admin:${user.id}`, authorized);
+      return { ok: true, botId: body.botId, allocatedUsdg: body.allocatedUsdg, authorizedCapitalUsd: authorized };
+    } catch (error) {
+      return reply.code(409).send({ error: String(error instanceof Error ? error.message : error) });
+    }
+  });
+
+  server.post('/api/admin/live/reconcile', { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
     if (!user) return;
     return { passes: await reconcileAll(app.db, app.hub, app.adapters) };
   });
 
-  server.get('/api/live/venues', async () => {
+  server.get('/api/admin/live/venues', async (request, reply) => {
+    if (!requireAdmin(app, request, reply)) return;
     const rows = app.db.prepare(`SELECT * FROM venue_health ORDER BY venue`).all() as any[];
     return {
       venues: rows.map((r) => ({
@@ -327,10 +547,19 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
   });
 
   // ── operator controls (admin, audited; agents have no path to these) ──
-  server.post('/api/live/mode', async (request, reply) => {
-    const user = requireAdmin(app, request, reply);
+  server.post('/api/admin/live/mode', { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
     if (!user) return;
-    const body = z.object({ mode: z.enum(['simulation', 'shadow', 'canary', 'live']) }).parse(request.body);
+    const body = z.object({ mode: z.enum(['simulation', 'shadow']) }).parse(request.body);
+    if (body.mode === 'shadow' && getLiveConfig(app.db).halted) {
+      if (!app.supervisor) return reply.code(503).send({ error: 'autonomous supervisor not available' });
+      try {
+        const preflight = await app.supervisor.armShadow(`admin:${user.id}`);
+        return { ok: true, mode: 'shadow', preflight };
+      } catch (error) {
+        return reply.code(409).send({ error: String(error instanceof Error ? error.message : error) });
+      }
+    }
     const preflight = await runPreflight(
       { db: app.db, signer: app.signer, adapters: app.adapters, feedStatus: app.feedStatus,
         ethUsd: app.executor.getMark('ETHUSDT') ?? null },
@@ -346,8 +575,8 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     return { ok: true, mode: body.mode };
   });
 
-  server.post('/api/live/halt', async (request, reply) => {
-    const user = requireAdmin(app, request, reply);
+  server.post('/api/admin/live/halt', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
     if (!user) return;
     const body = z.object({ reason: z.string().max(200).default('operator halt') }).parse(request.body ?? {});
     haltNetwork(app.db, body.reason, `admin:${user.id}`);
@@ -355,12 +584,23 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     return { ok: true };
   });
 
-  server.post('/api/live/resume', async (request, reply) => {
-    const user = requireAdmin(app, request, reply);
+  server.post('/api/admin/live/arm', { config: { rateLimit: { max: 3, timeWindow: '5 minutes' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
     if (!user) return;
-    resumeNetwork(app.db, `admin:${user.id}`);
-    app.hub.publish('live', { event: 'resumed' });
-    return { ok: true };
+    if (!app.supervisor) return reply.code(503).send({ error: 'autonomous supervisor not available' });
+    const body = z.object({
+      mode: z.enum(['canary', 'live']),
+      stage: z.number().int().min(1).max(4),
+      confirmation: z.string(),
+    }).parse(request.body);
+    const expected = `ARM ROBINHOOD 4663 $${stageCapUsd(body.stage)}`;
+    if (body.confirmation !== expected) return reply.code(400).send({ error: `confirmation must equal: ${expected}` });
+    try {
+      const preflight = await app.supervisor.arm(body.mode, body.stage, `admin:${user.id}`);
+      return { ok: true, mode: body.mode, stage: body.stage, preflight };
+    } catch (error) {
+      return reply.code(409).send({ error: String(error instanceof Error ? error.message : error) });
+    }
   });
 
   // OPERATOR FORCE — the one way to put a trade through without a strategy.
@@ -371,8 +611,8 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
   // (confidence, net edge) and NONE of the gates that protect funds. The
   // override is written into the order's risk_json and the audit log, so a
   // forced fill can never later be read as a strategy's success.
-  server.post('/api/live/force-trade', async (request, reply) => {
-    const user = requireAdmin(app, request, reply);
+  server.post('/api/admin/live/force-trade', { config: { rateLimit: { max: 2, timeWindow: '5 minutes' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
     if (!user) return;
     if (!app.liveNetwork) {
       reply.code(503);
@@ -391,6 +631,7 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
         // the risk engine. Stating it here too means an operator typo is
         // refused at the door rather than clamped silently.
         notionalUsd: z.number().min(0.5).max((stageCapUsd(cfg.capitalStage) * cfg.limits.maxPerTradePct) / 100),
+        idempotencyKey: z.string().min(12).max(100).regex(/^[a-zA-Z0-9:_-]+$/),
       })
       .parse(request.body ?? {});
 
@@ -398,8 +639,8 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     return { ok: result.state === 'filled' || result.state === 'pending', ...result };
   });
 
-  server.post('/api/live/limits', async (request, reply) => {
-    const user = requireAdmin(app, request, reply);
+  server.post('/api/admin/live/limits', { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
     if (!user) return;
     const body = z.object({
       maxPerTradePct: z.number().min(0.5).max(10).optional(),
@@ -414,15 +655,20 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     return { ok: true, limits };
   });
 
-  server.post('/api/live/stage', async (request, reply) => {
-    const user = requireAdmin(app, request, reply);
+  server.post('/api/admin/live/stage', { config: { rateLimit: { max: 3, timeWindow: '5 minutes' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
     if (!user) return;
     const body = z.object({
       stage: z.number().int().min(0).max(4),
-      force: z.boolean().optional(),
     }).parse(request.body);
     try {
-      setCapitalStage(app.db, body.stage, `admin:${user.id}`, body.force ?? false);
+      const current = getLiveConfig(app.db);
+      if (body.stage > current.capitalStage) {
+        if (!app.supervisor) return reply.code(503).send({ error: 'autonomous supervisor not available' });
+        const preflight = await app.supervisor.promoteStage(body.stage, `admin:${user.id}`);
+        return { ok: true, stage: body.stage, preflight };
+      }
+      setCapitalStage(app.db, body.stage, `admin:${user.id}`);
     } catch (e: any) {
       return reply.code(400).send({ error: e.message });
     }

@@ -78,7 +78,7 @@ export function registerAuthRoutes(server: FastifyInstance, app: AppContext) {
     const body = z.object({ address: z.string(), signature: z.string() }).parse(request.body);
     try {
       const userId = await verifyWallet(app.db, body.address, body.signature);
-      const token = createSession(app.db, userId);
+      const token = createSession(app.db, userId, 'wallet');
       reply.setCookie(COOKIE, token, cookieOpts);
       return { ok: true };
     } catch (e) {
@@ -133,7 +133,7 @@ export function registerAuthRoutes(server: FastifyInstance, app: AppContext) {
 
   server.get('/api/me', async (request) => {
     const user = currentUser(app, request);
-    if (!user) return { user: null, operatorWallet: config.adminWallet };
+    if (!user) return { user: null };
     awardDailyLogin(app.db, user.id); // idempotent per UTC day
     return {
       user: {
@@ -144,7 +144,7 @@ export function registerAuthRoutes(server: FastifyInstance, app: AppContext) {
       },
       // shown so an operator can see WHICH wallet grants clearance without
       // guessing why the Control Room is missing
-      operatorWallet: config.adminWallet,
+      operatorWallet: user.isAdmin ? config.adminWallet : undefined,
     };
   });
 

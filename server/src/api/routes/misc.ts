@@ -20,6 +20,34 @@ const WINDOWS: Record<string, number | null> = {
   all: null,
 };
 
+function requireFreshManagerAdmin(app: AppContext, request: any, reply: any) {
+  const user = requireUser(app, request, reply);
+  if (!user) return null;
+  if (!user.isAdmin) {
+    reply.code(403).send({ error: 'admin only' });
+    return null;
+  }
+  if (user.sessionAuthMethod !== 'wallet' || Date.now() - user.sessionCreatedAt > 5 * 60_000) {
+    reply.code(401).send({ error: 'fresh operator wallet authentication required' });
+    return null;
+  }
+  if (request.headers['x-requested-with'] !== 'punklabz') {
+    reply.code(403).send({ error: 'CSRF protection header missing' });
+    return null;
+  }
+  const origin = request.headers.origin as string | undefined;
+  try {
+    if (origin && new URL(origin).host !== request.headers.host) {
+      reply.code(403).send({ error: 'request origin does not match host' });
+      return null;
+    }
+  } catch {
+    reply.code(403).send({ error: 'invalid request origin' });
+    return null;
+  }
+  return user;
+}
+
 export function registerMiscRoutes(server: FastifyInstance, app: AppContext) {
   const markOf = (s: string) => app.executor.getMark(s);
 
@@ -85,6 +113,8 @@ export function registerMiscRoutes(server: FastifyInstance, app: AppContext) {
     return {
       balanceUsd: fromMicro(balanceMicro(app.db, `user:${user.id}`)),
       platformUsd: user.isAdmin ? fromMicro(balanceMicro(app.db, 'platform')) : undefined,
+      unit: 'demo_credits',
+      realMoney: false,
     };
   });
 
@@ -100,14 +130,20 @@ export function registerMiscRoutes(server: FastifyInstance, app: AppContext) {
   });
 
   // ── manager ──
-  server.get('/api/manager/epochs', async () => {
+  server.get('/api/admin/manager/epochs', async (request, reply) => {
+    const user = requireUser(app, request, reply);
+    if (!user) return;
+    if (!user.isAdmin) return reply.code(403).send({ error: 'admin only' });
     const epochs = (app.db
       .prepare(`SELECT * FROM payout_epochs ORDER BY id DESC LIMIT 50`)
       .all() as any[]).map(epochView(app));
     return { epochs };
   });
 
-  server.get('/api/manager/epochs/:id', async (request, reply) => {
+  server.get('/api/admin/manager/epochs/:id', async (request, reply) => {
+    const user = requireUser(app, request, reply);
+    if (!user) return;
+    if (!user.isAdmin) return reply.code(403).send({ error: 'admin only' });
     const { id } = z.object({ id: z.coerce.number() }).parse(request.params);
     const epoch = app.db.prepare('SELECT * FROM payout_epochs WHERE id = ?').get(id) as any;
     if (!epoch) return reply.code(404).send({ error: 'epoch not found' });
@@ -120,10 +156,11 @@ export function registerMiscRoutes(server: FastifyInstance, app: AppContext) {
     return { epoch: epochView(app)(epoch), items };
   });
 
-  server.post('/api/manager/epochs/:id/approve', async (request, reply) => {
-    const user = requireUser(app, request, reply);
+  server.post('/api/admin/manager/epochs/:id/approve', {
+    config: { rateLimit: { max: 3, timeWindow: '5 minutes' } },
+  }, async (request, reply) => {
+    const user = requireFreshManagerAdmin(app, request, reply);
     if (!user) return;
-    if (!user.isAdmin) return reply.code(403).send({ error: 'admin only' });
     const { id } = z.object({ id: z.coerce.number() }).parse(request.params);
     await approveEpoch(app.db, id, user.id, app.payoutQueue);
     app.hub.publish('manager', { event: 'epoch_approved', epochId: id });
@@ -131,16 +168,20 @@ export function registerMiscRoutes(server: FastifyInstance, app: AppContext) {
   });
 
   // manual epoch trigger (admin) — used for testing and demos
-  server.post('/api/manager/epochs/run', async (request, reply) => {
-    const user = requireUser(app, request, reply);
+  server.post('/api/admin/manager/epochs/run', {
+    config: { rateLimit: { max: 2, timeWindow: '10 minutes' } },
+  }, async (request, reply) => {
+    const user = requireFreshManagerAdmin(app, request, reply);
     if (!user) return;
-    if (!user.isAdmin) return reply.code(403).send({ error: 'admin only' });
     const result = await runEpoch(app.db, app.holderSource, app.payoutQueue);
     app.hub.publish('manager', { event: 'epoch_closed', epochId: result.epochId });
     return result;
   });
 
-  server.get('/api/manager/audit', async () => {
+  server.get('/api/admin/manager/audit', async (request, reply) => {
+    const user = requireUser(app, request, reply);
+    if (!user) return;
+    if (!user.isAdmin) return reply.code(403).send({ error: 'admin only' });
     const rows = app.db
       .prepare('SELECT id, ts, actor, action, prev_hash, hash FROM audit_log ORDER BY id DESC LIMIT 100')
       .all();

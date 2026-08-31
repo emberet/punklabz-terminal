@@ -4,12 +4,11 @@ import { MAJOR_SYMBOLS, USDG, type Instrument } from '@punklabz/shared';
 export const ROBINHOOD_VENUE = 'evm:robinhood';
 
 /**
- * The settlement asset. Configurable because it is NOT USDC here — it is USDG
- * with six decimals, and code that assumed the usual eighteen would misprice
- * every settlement leg by a factor of a trillion.
+ * The sole settlement asset is pinned in code. USDG has six decimals; code
+ * that assumes eighteen would misprice every settlement leg by a trillion.
  */
 export const SETTLEMENT = {
-  symbol: process.env.LIVE_SETTLEMENT_SYMBOL ?? USDG.symbol,
+  symbol: USDG.symbol,
   address: USDG.address,
   decimals: USDG.decimals,
 };

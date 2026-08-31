@@ -160,7 +160,7 @@ export interface AllowedToken {
 /**
  * PURE. Both legs of the pair must be on the grant's whitelist, at the right
  * role, on the grant's chain. Checking only the base is how a grant that
- * authorised USDC gets spent out of a different quote token.
+ * authorised USDG gets spent out of a different quote token.
  */
 export function checkTokens(
   spec: LiveInstrumentSpec,

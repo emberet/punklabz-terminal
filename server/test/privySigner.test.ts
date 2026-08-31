@@ -1,6 +1,6 @@
 import { generateKeyPairSync, createVerify } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { PrivySigner, canonicalize, type PrivyConfig } from '../src/live/signing/privySigner.js';
+import { PrivySigner, canonicalize, privyConfigFromEnv, type PrivyConfig } from '../src/live/signing/privySigner.js';
 import { NoSigner, buildSigner } from '../src/live/signing/signer.js';
 
 const WALLET = '0xD5788b6694a05366FaaeEfEff35c7a5913D02Ff9';
@@ -148,14 +148,19 @@ describe('the signer refuses on its own account', () => {
   it('refuses a native value over the ceiling', async () => {
     const signer = readySigner({ maxNativeValueWei: 1000n });
     await expect(signer.signTransaction({ ...intent, value: 1001n }))
-      .rejects.toThrow(/exceeds the signer ceiling/);
+      .rejects.toThrow(/native value .* forbidden/);
   });
 
-  it('allows a value exactly at the ceiling', async () => {
-    const signer = readySigner({ maxNativeValueWei: 1000n });
-    // gets past the guards and fails at the network, which is the next step
-    await expect(signer.signTransaction({ ...intent, value: 1000n }))
+  it('allows zero native value and reaches the signing service', async () => {
+    const signer = readySigner({ maxNativeValueWei: 0n });
+    await expect(signer.signTransaction({ ...intent, value: 0n }))
       .rejects.toThrow(/privy POST|fetch failed|ENOTFOUND|ECONNREFUSED|getaddrinfo/);
+  });
+
+  it('refuses the wrong chain before contacting Privy', async () => {
+    const signer = readySigner({ maxNativeValueWei: 0n });
+    await expect(signer.signTransaction({ ...intent, chainId: 1 }))
+      .rejects.toThrow(/not Robinhood mainnet 4663/);
   });
 
   it('refuses a signature with no intent id — every one must be attributable', async () => {
@@ -192,6 +197,22 @@ describe('buildSigner', () => {
     process.env.SIGNER_PROVIDER = 'turnkey';
     expect(() => buildSigner()).toThrow(/not implemented in this build/);
     process.env.SIGNER_PROVIDER = previous;
+  });
+
+  it('forbids putting the Privy authorization private key directly in production env', () => {
+    const priorNodeEnv = process.env.NODE_ENV;
+    const priorInline = process.env.PRIVY_AUTHORIZATION_KEY;
+    const priorFile = process.env.PRIVY_AUTHORIZATION_KEY_FILE;
+    try {
+      process.env.NODE_ENV = 'production';
+      process.env.PRIVY_AUTHORIZATION_KEY = 'inline-private-key';
+      delete process.env.PRIVY_AUTHORIZATION_KEY_FILE;
+      expect(() => privyConfigFromEnv()).toThrow(/forbidden in production/);
+    } finally {
+      if (priorNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = priorNodeEnv;
+      if (priorInline === undefined) delete process.env.PRIVY_AUTHORIZATION_KEY; else process.env.PRIVY_AUTHORIZATION_KEY = priorInline;
+      if (priorFile === undefined) delete process.env.PRIVY_AUTHORIZATION_KEY_FILE; else process.env.PRIVY_AUTHORIZATION_KEY_FILE = priorFile;
+    }
   });
 });
 

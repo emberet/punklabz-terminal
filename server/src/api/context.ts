@@ -11,6 +11,7 @@ import type { OpportunityEngine } from '../live/opportunityEngine.js';
 import type { TradingSigner } from '../live/signing/signer.js';
 import type { ExecutionAdapter } from '../live/adapters.js';
 import type { LiveNetwork } from '../live/liveNetwork.js';
+import type { AutonomousSupervisor } from '../live/supervisor.js';
 
 export interface AppContext {
   db: DB;
@@ -29,4 +30,5 @@ export interface AppContext {
   adapters: Map<string, ExecutionAdapter>;
   /** present once the live pipeline is wired; the force-trade route needs it */
   liveNetwork?: LiveNetwork;
+  supervisor?: AutonomousSupervisor;
 }

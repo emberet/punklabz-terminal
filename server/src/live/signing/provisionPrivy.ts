@@ -19,6 +19,7 @@ const PRIVY_API = 'https://api.privy.io/v1';
 
 /** USDG has SIX decimals. $25 = 25_000_000 = 0x17D7840. */
 export const USDG_ADDRESS = '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168';
+export const WETH_ADDRESS = '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73';
 export const ZEROX_ALLOWANCE_HOLDER = '0x0000000000001ff3684f28c67538d4d072c22734';
 
 export function usdgCapHex(dollars: number): string {
@@ -33,9 +34,9 @@ export function usdgCapHex(dollars: number): string {
  * rule copied verbatim from the docs would match nothing at all and enforce
  * nothing while appearing configured.
  *
- * The cap is on the APPROVAL, not the swap. A swap's dollar amount lives
- * inside 0x calldata that the policy engine cannot decode; the approval is the
- * chokepoint, because 0x can only ever pull what it has been approved for.
+ * The policy bounds both layers: exact ERC-20 approval spender/amount and the
+ * AllowanceHolder exec token/amount. The application independently decodes the
+ * nested Settler call, recipient, output token, and minimum received.
  */
 /**
  * A calldata condition must carry the ABI of the function it decodes — the
@@ -55,8 +56,26 @@ const ERC20_APPROVE_ABI = [
   },
 ];
 
+const ALLOWANCE_HOLDER_EXEC_ABI = [{
+  inputs: [
+    { internalType: 'address', name: 'operator', type: 'address' },
+    { internalType: 'address', name: 'token', type: 'address' },
+    { internalType: 'uint256', name: 'amount', type: 'uint256' },
+    { internalType: 'address payable', name: 'target', type: 'address' },
+    { internalType: 'bytes', name: 'data', type: 'bytes' },
+  ],
+  name: 'exec',
+  outputs: [{ internalType: 'bytes', name: 'result', type: 'bytes' }],
+  stateMutability: 'payable',
+  type: 'function',
+}];
+
 export function buildPolicy(capUsd: number, chainId: number) {
   const cap = usdgCapHex(capUsd);
+  // Hard signer ceiling for exits. This assumes no WETH is acquired below a
+  // $1,000 reference floor; the application applies the tighter live quote
+  // limit. If that floor is no longer conservative, halt and replace policy.
+  const wethCap = `0x${(BigInt(Math.round(capUsd)) * 1_000_000_000_000_000n).toString(16).toUpperCase()}`;
   // Privy caps both policy and rule names at 50 characters.
   return {
     version: '1.0',
@@ -72,6 +91,13 @@ export function buildPolicy(capUsd: number, chainId: number) {
           { field_source: 'ethereum_transaction', field: 'to', operator: 'eq', value: USDG_ADDRESS },
           {
             field_source: 'ethereum_calldata',
+            field: 'approve.spender',
+            abi: ERC20_APPROVE_ABI,
+            operator: 'eq',
+            value: ZEROX_ALLOWANCE_HOLDER,
+          },
+          {
+            field_source: 'ethereum_calldata',
             field: 'approve.amount',
             abi: ERC20_APPROVE_ABI,
             operator: 'lte',
@@ -80,13 +106,56 @@ export function buildPolicy(capUsd: number, chainId: number) {
         ],
       },
       {
-        name: 'Swaps only via 0x AllowanceHolder',
+        name: 'WETH approval for exits',
+        method: 'eth_signTransaction',
+        action: 'ALLOW',
+        conditions: [
+          { field_source: 'ethereum_transaction', field: 'chain_id', operator: 'eq', value: String(chainId) },
+          { field_source: 'ethereum_transaction', field: 'to', operator: 'eq', value: WETH_ADDRESS },
+          {
+            field_source: 'ethereum_calldata', field: 'approve.spender', abi: ERC20_APPROVE_ABI,
+            operator: 'eq', value: ZEROX_ALLOWANCE_HOLDER,
+          },
+          {
+            field_source: 'ethereum_calldata', field: 'approve.amount', abi: ERC20_APPROVE_ABI,
+            operator: 'lte', value: wethCap,
+          },
+        ],
+      },
+      {
+        name: 'USDG swaps via 0x',
         method: 'eth_signTransaction',
         action: 'ALLOW',
         conditions: [
           { field_source: 'ethereum_transaction', field: 'chain_id', operator: 'eq', value: String(chainId) },
           { field_source: 'ethereum_transaction', field: 'to', operator: 'eq', value: ZEROX_ALLOWANCE_HOLDER },
           { field_source: 'ethereum_transaction', field: 'value', operator: 'eq', value: '0x0' },
+          {
+            field_source: 'ethereum_calldata', field: 'exec.token', abi: ALLOWANCE_HOLDER_EXEC_ABI,
+            operator: 'eq', value: USDG_ADDRESS,
+          },
+          {
+            field_source: 'ethereum_calldata', field: 'exec.amount', abi: ALLOWANCE_HOLDER_EXEC_ABI,
+            operator: 'lte', value: cap,
+          },
+        ],
+      },
+      {
+        name: 'WETH exits via 0x',
+        method: 'eth_signTransaction',
+        action: 'ALLOW',
+        conditions: [
+          { field_source: 'ethereum_transaction', field: 'chain_id', operator: 'eq', value: String(chainId) },
+          { field_source: 'ethereum_transaction', field: 'to', operator: 'eq', value: ZEROX_ALLOWANCE_HOLDER },
+          { field_source: 'ethereum_transaction', field: 'value', operator: 'eq', value: '0x0' },
+          {
+            field_source: 'ethereum_calldata', field: 'exec.token', abi: ALLOWANCE_HOLDER_EXEC_ABI,
+            operator: 'eq', value: WETH_ADDRESS,
+          },
+          {
+            field_source: 'ethereum_calldata', field: 'exec.amount', abi: ALLOWANCE_HOLDER_EXEC_ABI,
+            operator: 'lte', value: wethCap,
+          },
         ],
       },
     ],
@@ -171,7 +240,7 @@ export async function provisionPrivyWallet(opts: {
   };
 
   if (!ctx.authorizationKey) {
-    note('authorization key', false, 'PRIVY_AUTHORIZATION_KEY not set — nothing to attach as owner');
+    note('authorization key', false, 'Privy authorization key not loaded — nothing to attach as owner');
     return { ok: false, steps, policyId: null, ownerId: null };
   }
 

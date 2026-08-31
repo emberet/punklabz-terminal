@@ -15,7 +15,11 @@ export interface ExecutionAccount {
   currency: string;
   fundedUsd: number;
   active: boolean;
+  chainId: number | null;
+  settlementAsset: string | null;
 }
+
+export const ROBINHOOD_TRADER_ACCOUNT = 'ROBINHOOD_TRADER_01';
 
 function row(r: any): ExecutionAccount {
   return {
@@ -27,6 +31,8 @@ function row(r: any): ExecutionAccount {
     currency: r.currency,
     fundedUsd: r.funded_usd,
     active: r.active === 1,
+    chainId: r.chain_id ?? null,
+    settlementAsset: r.settlement_asset ?? null,
   };
 }
 
@@ -41,19 +47,44 @@ export function getAccount(db: DB, id: number): ExecutionAccount | null {
 
 /** the account a given execution mode books to; created on demand */
 export function accountForMode(db: DB, mode: ExecutionMode, venue = 'shadow'): ExecutionAccount {
-  const name =
-    mode === 'shadow' ? 'SHADOW_BOOK'
-      : mode === 'simulation' ? 'SIMULATION_BOOK'
-      : `${mode.toUpperCase()}_${venue.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+  const realMoney = mode === 'canary' || mode === 'live';
+  const name = realMoney
+    ? ROBINHOOD_TRADER_ACCOUNT
+    : mode === 'shadow' ? 'SHADOW_BOOK' : 'SIMULATION_BOOK';
   const existing = db.prepare(`SELECT * FROM execution_accounts WHERE name = ?`).get(name);
   if (existing) return row(existing);
   const info = db
     .prepare(
-      `INSERT INTO execution_accounts (name, mode, venue, currency, funded_usd, active, created_at)
-       VALUES (?, ?, ?, 'USDC', 0, 1, ?)`,
+      `INSERT INTO execution_accounts
+         (name, mode, venue, currency, funded_usd, active, created_at, chain_id, settlement_asset)
+       VALUES (?, ?, ?, ?, 0, 1, ?, ?, ?)`,
     )
-    .run(name, mode, venue, Date.now());
+    .run(name, realMoney ? 'canary' : mode, realMoney ? 'evm:robinhood' : venue,
+      realMoney ? 'USDG' : 'USDC', Date.now(), realMoney ? 4663 : null, realMoney ? 'USDG' : null);
   return getAccount(db, Number(info.lastInsertRowid))!;
+}
+
+/** Bind the one physical execution wallet. A different address is a refusal. */
+export function bindTraderWallet(db: DB, walletAddress: string): ExecutionAccount {
+  const account = accountForMode(db, 'canary', 'evm:robinhood');
+  if (account.walletAddress && account.walletAddress.toLowerCase() !== walletAddress.toLowerCase()) {
+    throw new Error(`trader account is bound to ${account.walletAddress}, signer reports ${walletAddress}`);
+  }
+  db.prepare(`UPDATE execution_accounts SET wallet_address = ? WHERE id = ?`)
+    .run(walletAddress.toLowerCase(), account.id);
+  return getAccount(db, account.id)!;
+}
+
+export function assertTraderWallet(db: DB, walletAddress: string): ExecutionAccount {
+  const account = db.prepare(`SELECT * FROM execution_accounts WHERE name = ?`)
+    .get(ROBINHOOD_TRADER_ACCOUNT);
+  if (!account) throw new Error('trader execution account is missing');
+  const parsed = row(account);
+  if (!parsed.walletAddress) throw new Error('trader execution account is not bound to a wallet');
+  if (parsed.walletAddress.toLowerCase() !== walletAddress.toLowerCase()) {
+    throw new Error(`trader account is bound to ${parsed.walletAddress}, signer reports ${walletAddress}`);
+  }
+  return parsed;
 }
 
 export interface AccountBook {
@@ -130,6 +161,7 @@ export interface FundingEntry {
   qty: number;
   txRef?: string | null;
   note?: string | null;
+  logIndex?: number | null;
 }
 
 /**
@@ -149,21 +181,86 @@ export function recordFunding(
   actor: string,
 ): number {
   const ts = Date.now();
-  const hash = appendAudit(db, actor, 'account_funding', { accountId, entries });
+  const account = getAccount(db, accountId);
+  if (!account) throw new Error(`execution account ${accountId} not found`);
+  if (account.venue === 'evm:robinhood') {
+    for (const entry of entries) {
+      if (!entry.txRef || !Number.isInteger(entry.logIndex)) {
+        throw new Error('real funding must include its decoded transaction hash and log index');
+      }
+    }
+  }
   const stmt = db.prepare(
     `INSERT INTO execution_account_funding
-       (execution_account_id, asset, qty, tx_ref, actor, note, audit_hash, ts)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (execution_account_id, asset, qty, tx_ref, actor, note, audit_hash, ts, log_index)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const assetStmt = db.prepare(
+    `INSERT INTO execution_asset_ledger
+       (execution_account_id, asset, qty_delta, event_type, tx_ref, log_index, ts)
+     VALUES (?, ?, ?, 'funding', ?, ?, ?)`,
   );
   return db.transaction(() => {
+    const hash = appendAudit(db, actor, 'account_funding', { accountId, entries });
     let n = 0;
     for (const e of entries) {
       if (!Number.isFinite(e.qty) || e.qty === 0) continue;
-      stmt.run(accountId, e.asset, e.qty, e.txRef ?? null, actor, e.note ?? null, hash, ts);
+      const asset = e.asset.toUpperCase();
+      stmt.run(accountId, asset, e.qty, e.txRef ?? null, actor, e.note ?? null, hash, ts, e.logIndex ?? null);
+      assetStmt.run(accountId, asset, String(e.qty), e.txRef ?? null, e.logIndex ?? null, ts);
       n++;
     }
     return n;
   })();
+}
+
+/** Exact asset quantities the immutable custody ledger says the wallet holds. */
+export function custodyHoldings(db: DB, accountId: number): Map<string, number> {
+  const out = new Map<string, number>();
+  const rows = db.prepare(
+    `SELECT asset, qty_delta FROM execution_asset_ledger
+     WHERE execution_account_id = ? ORDER BY id`,
+  ).all(accountId) as { asset: string; qty_delta: string }[];
+  for (const entry of rows) {
+    out.set(entry.asset.toUpperCase(), (out.get(entry.asset.toUpperCase()) ?? 0) + Number(entry.qty_delta));
+  }
+  return out;
+}
+
+export function allocatedUsdg(db: DB, accountId: number): number {
+  const r = db.prepare(
+    `SELECT COALESCE(SUM(allocated_usdg), 0) n FROM manager_capital_allocations
+     WHERE execution_account_id = ? AND active = 1`,
+  ).get(accountId) as { n: number };
+  return r.n;
+}
+
+export function setBotAllocation(
+  db: DB,
+  accountId: number,
+  botId: number,
+  allocated: number,
+  actor: string,
+  authorizedCapital: number,
+): void {
+  if (!Number.isFinite(allocated) || allocated < 0) throw new Error('allocation must be a non-negative USDG amount');
+  const other = db.prepare(
+    `SELECT COALESCE(SUM(allocated_usdg),0) n FROM manager_capital_allocations
+     WHERE execution_account_id = ? AND bot_id <> ? AND active = 1`,
+  ).get(accountId, botId) as { n: number };
+  if (other.n + allocated > authorizedCapital + 1e-9) {
+    throw new Error(`allocation would exceed authorized capital ${authorizedCapital} USDG`);
+  }
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO manager_capital_allocations
+       (execution_account_id, bot_id, allocated_usdg, active, actor, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(execution_account_id, bot_id) DO UPDATE SET
+       allocated_usdg = excluded.allocated_usdg, active = excluded.active, actor = excluded.actor,
+       updated_at = excluded.updated_at`,
+  ).run(accountId, botId, allocated, allocated > 0 ? 1 : 0, actor, now, now);
+  appendAudit(db, actor, 'manager_capital_allocation', { accountId, botId, allocatedUsdg: allocated });
 }
 
 /** What has been attested as funded for this account, per asset. */

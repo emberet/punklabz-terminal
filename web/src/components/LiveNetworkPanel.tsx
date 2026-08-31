@@ -41,21 +41,26 @@ interface Preflight {
   blockers: string[];
 }
 
+interface CapitalControls {
+  allocations: { botId: number; botName: string; allocatedUsdg: number; active: number }[];
+  bots: { id: number; name: string; status: string }[];
+}
+
 const NETWORK_MAP = `                [ PUNKLABZ ]
                      │
                [ RISK CORE ]
                      │
              [ ORDER ROUTER ]
-             /       |       \\
-         SHADOW   EVM:BASE   SOLANA
-            │        │          │
-         (fills)   [stub]    [stub]
-                     │
-                 [ BROKER ]     [ POLYMARKET ]
-                   [stub]          [stub]`;
+                /           \\
+            SHADOW     ROBINHOOD 4663
+              │          │       │
+          THEORETICAL   0x     PRIVY
+                         │
+                    WETH / USDG`;
 
 export function LiveNetworkPanel() {
   const { user } = useAuth();
+  const isAdmin = !!user?.isAdmin;
   const [status, setStatus] = useState<LiveStatusView | null>(null);
   const [orders, setOrders] = useState<LiveOrder[]>([]);
   const [venues, setVenues] = useState<Venue[]>([]);
@@ -64,12 +69,20 @@ export function LiveNetworkPanel() {
   const [expanded, setExpanded] = useState<number | null>(null);
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
+  const [capital, setCapital] = useState<CapitalControls>({ allocations: [], bots: [] });
+  const [allocationBot, setAllocationBot] = useState('');
+  const [allocationUsd, setAllocationUsd] = useState('0.50');
 
   const load = () => {
-    void api.get<LiveStatusView>('/api/live/status').then(setStatus).catch(() => {});
-    void api.get<{ orders: LiveOrder[] }>('/api/live/orders').then((r) => setOrders(r.orders)).catch(() => {});
-    void api.get<{ venues: Venue[] }>('/api/live/venues').then((r) => setVenues(r.venues)).catch(() => {});
-    void api.get<Preflight>(`/api/live/preflight?mode=${pfMode}`).then(setPreflight).catch(() => {});
+    void api.get<LiveStatusView>(isAdmin ? '/api/admin/live/status' : '/api/live/status').then(setStatus).catch(() => {});
+    if (!isAdmin) return;
+    void api.get<{ orders: LiveOrder[] }>('/api/admin/live/orders').then((r) => setOrders(r.orders)).catch(() => {});
+    void api.get<{ venues: Venue[] }>('/api/admin/live/venues').then((r) => setVenues(r.venues)).catch(() => {});
+    void api.get<Preflight>(`/api/admin/live/preflight?mode=${pfMode}`).then(setPreflight).catch(() => {});
+    void api.get<CapitalControls>('/api/admin/live/accounts').then((r) => {
+      setCapital(r);
+      setAllocationBot((current) => current || String(r.bots[0]?.id ?? ''));
+    }).catch(() => {});
   };
 
   useEffect(() => {
@@ -80,7 +93,7 @@ export function LiveNetworkPanel() {
       un();
       clearInterval(t);
     };
-  }, [pfMode]);
+  }, [pfMode, isAdmin]);
 
   const act = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -96,13 +109,11 @@ export function LiveNetworkPanel() {
   };
 
   if (!status) return null;
-  const isAdmin = !!user?.isAdmin;
-
   return (
     <>
       <Panel
         title="LIVE NETWORK"
-        sub="execution safety spine — top mode in this build is SHADOW (nothing is ever submitted)"
+        sub="Robinhood Chain mainnet — USDG trading cash, ETH gas, WETH/USDG execution"
         noPad
         right={
           <span className={`chip ${status.halted ? 'chip-stopped' : status.mode === 'simulation' ? 'chip-paused' : 'chip-running'}`}>
@@ -116,26 +127,50 @@ export function LiveNetworkPanel() {
               <div className="label">Stage capital</div>
               <div className="value">${fmtUsd(status.stageCapUsd, 0)}</div>
             </div>
-            <div className="stat-tile">
-              <div className="label">NAV</div>
+            {isAdmin && <div className="stat-tile">
+              <div className="label">Wallet NAV</div>
               <div className="value">$<NumberTicker value={status.nav.totalUsd} format={(n) => n.toFixed(2)} /></div>
-            </div>
-            <div className="stat-tile">
+            </div>}
+            {isAdmin && <div className="stat-tile">
+              <div className="label">USDG cash</div>
+              <div className="value">${fmtUsd(status.settlementBalance ?? 0)}</div>
+            </div>}
+            {isAdmin && <div className="stat-tile">
+              <div className="label">ETH gas</div>
+              <div className="value">{(status.ethGasBalance ?? 0).toFixed(5)}</div>
+            </div>}
+            {isAdmin && <div className="stat-tile">
+              <div className="label">WETH exposure</div>
+              <div className="value">{(status.baseAssetBalance ?? 0).toFixed(6)}</div>
+            </div>}
+            {isAdmin && <div className="stat-tile">
+              <div className="label">Pending tx</div>
+              <div className="value">{status.pendingTransactions ?? 0}</div>
+            </div>}
+            {isAdmin && <div className="stat-tile">
+              <div className="label">Clean fills</div>
+              <div className="value">{status.promotion?.cleanFills ?? 0} / 10</div>
+            </div>}
+            {isAdmin && <div className={`stat-tile ${status.promotion?.reconciliationClean ? 'pos' : 'neg'}`}>
+              <div className="label">Reconciliation</div>
+              <div className="value">{status.promotion?.reconciliationClean ? 'CLEAN' : 'BLOCKED'}</div>
+            </div>}
+            {isAdmin && <div className="stat-tile">
               <div className="label">Deployed</div>
               <div className="value">${fmtUsd(status.nav.deployedUsd)}</div>
-            </div>
+            </div>}
             <div className={`stat-tile ${status.today.netPnlUsd > 0 ? 'pos' : status.today.netPnlUsd < 0 ? 'neg' : ''}`}>
-              <div className="label">Today</div>
+              <div className="label">{isAdmin ? 'Today' : 'Delayed P&L'}</div>
               <div className="value">{status.today.netPnlUsd >= 0 ? '+' : '−'}${fmtUsd(Math.abs(status.today.netPnlUsd))}</div>
             </div>
-            <div className={`stat-tile ${status.today.drawdownPct > 5 ? 'neg' : ''}`}>
+            {isAdmin && <div className={`stat-tile ${status.today.drawdownPct > 5 ? 'neg' : ''}`}>
               <div className="label">Drawdown</div>
               <div className="value">−{status.today.drawdownPct.toFixed(1)}%</div>
-            </div>
+            </div>}
           </div>
 
           <div className="row" style={{ gap: 18, flexWrap: 'wrap', fontSize: 11 }} >
-            <span className="dim">THROUGHPUT TODAY:</span>
+            <span className="dim">{isAdmin ? 'THROUGHPUT TODAY:' : 'DELAYED AGGREGATES:'}</span>
             <span className="soft">WATCHED <b className="phos">{status.throughput.marketsWatched}</b></span>
             <span className="soft">SIGNALS <b className="phos">{status.throughput.signals}</b></span>
             <span className="soft">APPROVED <b className="phos">{status.throughput.approved}</b></span>
@@ -155,63 +190,123 @@ export function LiveNetworkPanel() {
               <button
                 className={status.mode === 'shadow' ? 'primary' : ''}
                 disabled={busy}
-                onClick={() => act(() => api.post('/api/live/mode', { mode: status.mode === 'shadow' ? 'simulation' : 'shadow' }))}
+                onClick={() => act(() => api.post('/api/admin/live/mode', {
+                  mode: status.halted ? 'shadow' : status.mode === 'shadow' ? 'simulation' : 'shadow',
+                }))}
               >
-                {status.mode === 'shadow' ? 'DISABLE SHADOW' : 'ENABLE SHADOW MODE'}
+                {status.halted ? 'RUN SHADOW' : status.mode === 'shadow' ? 'DISABLE SHADOW' : 'ENABLE SHADOW MODE'}
               </button>
-              <button
-                disabled={busy}
-                onClick={() => act(() => api.post('/api/live/stage', { stage: status.capitalStage === 0 ? 1 : 0 }))}
-              >
-                STAGE: {status.capitalStage} (${status.stageCapUsd}) → {status.capitalStage === 0 ? '1 ($5)' : '0 ($0)'}
-              </button>
+              {status.capitalStage > 0 && status.capitalStage < 4 && (
+                <button
+                  disabled={busy}
+                  onClick={() => act(() => api.post('/api/admin/live/stage', { stage: status.capitalStage + 1 }))}
+                >
+                  PROMOTE CAPITAL STAGE
+                </button>
+              )}
               {!status.halted ? (
-                <button className="danger" disabled={busy} onClick={() => act(() => api.post('/api/live/halt', { reason: 'operator halt' }))}>
+                <button className="danger" disabled={busy} onClick={() => act(() => api.post('/api/admin/live/halt', { reason: 'operator halt' }))}>
                   ■ HALT LIVE NETWORK
                 </button>
               ) : (
-                <button className="primary" disabled={busy} onClick={() => act(() => api.post('/api/live/resume'))}>
-                  RESUME NETWORK
+                <button className="primary" disabled={busy} onClick={() => {
+                  const phrase = `ARM ROBINHOOD 4663 $${Math.max(5, status.stageCapUsd)}`;
+                  const confirmation = window.prompt(`Type ${phrase}`);
+                  if (confirmation) void act(() => api.post('/api/admin/live/arm', {
+                    mode: status.mode === 'live' ? 'live' : 'canary',
+                    stage: Math.max(1, status.capitalStage),
+                    confirmation,
+                  }));
+                }}>
+                  ARM MAINNET
                 </button>
               )}
+              <button disabled={busy} onClick={() => void act(() => api.post('/api/admin/live/reconcile'))}>
+                RUN RECONCILIATION
+              </button>
+              <button disabled={busy} onClick={() => {
+                const txHash = window.prompt('Robinhood Chain funding transaction hash');
+                if (txHash) void act(() => api.post('/api/admin/live/funding/import', { txHash }));
+              }}>
+                IMPORT FUNDING TX
+              </button>
               <span className="dim" style={{ fontSize: 10 }}>
-                Canary/live open only when preflight passes — {preflight?.blockers.length ?? '…'} prerequisite(s) missing today. Confidence gate {status.limits.confidenceThreshold}/100.
+                Canary/live opens only after recovery, reconciliation, and preflight. Composite score gate {status.limits?.confidenceThreshold ?? 90}/100; this is not a win probability.
               </span>
             </div>
           )}
         </div>
       </Panel>
 
-      <Panel
-        title="LIVE PREFLIGHT"
-        sub="the gate is evidence, not an assertion — every prerequisite is checked"
-        noPad
-        right={
-          <span className="tabs" style={{ display: 'inline-flex' }}>
-            {['shadow', 'canary', 'live'].map((m) => (
-              <button key={m} className={m === pfMode ? 'active' : ''} onClick={() => setPfMode(m)}>{m}</button>
-            ))}
-          </span>
-        }
-      >
-        {preflight && (
-          <>
-            <div className={`banner ${preflight.passed ? 'ok' : 'bad'}`}>
-              {preflight.passed
-                ? `✓ ${preflight.targetMode.toUpperCase()} PREREQUISITES MET`
-                : `✗ ${preflight.targetMode.toUpperCase()} BLOCKED — ${preflight.blockers.length} PREREQUISITE(S) MISSING`}
+      {isAdmin && (
+        <Panel title="MANAGER ALLOCATIONS" sub="bounded USDG authority per autonomous bot" noPad>
+          <div className="panel-body">
+            <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+              <select value={allocationBot} onChange={(event) => setAllocationBot(event.target.value)}>
+                {capital.bots.map((bot) => <option key={bot.id} value={bot.id}>{bot.name} [{bot.status}]</option>)}
+              </select>
+              <input
+                type="number" min="0" max={status.authorizedCapitalUsd ?? status.stageCapUsd} step="0.10"
+                value={allocationUsd} onChange={(event) => setAllocationUsd(event.target.value)}
+                aria-label="USDG allocation"
+              />
+              <button
+                className="primary"
+                disabled={busy || !allocationBot || !Number.isFinite(Number(allocationUsd))}
+                onClick={() => void act(() => api.post('/api/admin/live/allocations', {
+                  botId: Number(allocationBot), allocatedUsdg: Number(allocationUsd),
+                }))}
+              >
+                SET ALLOCATION
+              </button>
+              <span className="dim">AUTHORIZED ${fmtUsd(status.authorizedCapitalUsd ?? 0)}</span>
             </div>
-            <div className="syslog" style={{ whiteSpace: 'pre-wrap' }}>
-              {preflight.lines.map((l, i) => {
-                const verdict = l.includes(' PASS ') ? 'phos' : l.includes(' WARN ') ? 'amber' : 'red';
-                return <div key={i} className={verdict}>{l}</div>;
-              })}
+            <div className="tape" style={{ maxHeight: 180 }}>
+              {capital.allocations.length === 0 && <div className="tape-row dim">no live USDG allocations</div>}
+              {capital.allocations.map((allocation) => (
+                <div className="tape-row" key={allocation.botId}>
+                  <span className="phos">{allocation.botName}</span>
+                  <span className="mono">${fmtUsd(allocation.allocatedUsdg)} USDG</span>
+                  <span className={allocation.active ? 'phos' : 'dim'}>{allocation.active ? 'ACTIVE' : 'OFF'}</span>
+                </div>
+              ))}
             </div>
-          </>
-        )}
-      </Panel>
+          </div>
+        </Panel>
+      )}
 
-      <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', gap: 12, alignItems: 'start' }}>
+      {isAdmin && (
+        <Panel
+          title="LIVE PREFLIGHT"
+          sub="the gate is evidence, not an assertion — every prerequisite is checked"
+          noPad
+          right={
+            <span className="tabs" style={{ display: 'inline-flex' }}>
+              {['shadow', 'canary', 'live'].map((m) => (
+                <button key={m} className={m === pfMode ? 'active' : ''} onClick={() => setPfMode(m)}>{m}</button>
+              ))}
+            </span>
+          }
+        >
+          {preflight && (
+            <>
+              <div className={`banner ${preflight.passed ? 'ok' : 'bad'}`}>
+                {preflight.passed
+                  ? `✓ ${preflight.targetMode.toUpperCase()} PREREQUISITES MET`
+                  : `✗ ${preflight.targetMode.toUpperCase()} BLOCKED — ${preflight.blockers.length} PREREQUISITE(S) MISSING`}
+              </div>
+              <div className="syslog" style={{ whiteSpace: 'pre-wrap' }}>
+                {preflight.lines.map((l, i) => {
+                  const verdict = l.includes(' PASS ') ? 'phos' : l.includes(' WARN ') ? 'amber' : 'red';
+                  return <div key={i} className={verdict}>{l}</div>;
+                })}
+              </div>
+            </>
+          )}
+        </Panel>
+      )}
+
+      <div className="grid" style={{ gridTemplateColumns: isAdmin ? '1fr 1fr' : '1fr', gap: 12, alignItems: 'start' }}>
         <Panel title="NETWORK MAP" term noPad>
           <pre className="ascii-art" style={{ padding: '10px 14px', color: 'var(--text-soft)' }}>{NETWORK_MAP}</pre>
           <div className="panel-body" style={{ paddingTop: 0 }}>
@@ -227,9 +322,9 @@ export function LiveNetworkPanel() {
           </div>
         </Panel>
 
-        <Panel title="ORDER PIPELINE" sub="every intent, every verdict" noPad>
+        {isAdmin && <Panel title="ORDER PIPELINE" sub="every intent, every verdict" noPad>
           <div className="tape" style={{ maxHeight: 300 }}>
-            {orders.length === 0 && <div className="tape-row dim">no live-pipeline orders yet — enable shadow mode</div>}
+            {orders.length === 0 && <div className="tape-row dim">no execution orders recorded</div>}
             {orders.map((o) => (
               <div key={o.id}>
                 <div
@@ -263,7 +358,7 @@ export function LiveNetworkPanel() {
               </div>
             ))}
           </div>
-        </Panel>
+        </Panel>}
       </div>
     </>
   );

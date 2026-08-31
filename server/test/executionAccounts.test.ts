@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { openTestDb, type DB } from '../src/db/db.js';
-import { accountBook, accountForMode, listAccounts } from '../src/live/accounts.js';
+import { accountBook, accountForMode, listAccounts, recordFunding } from '../src/live/accounts.js';
 import { ExecutionRouter } from '../src/live/executionRouter.js';
 import { buildAdapters, NotConfiguredAdapter } from '../src/live/adapters.js';
 import { runPreflight } from '../src/live/preflight.js';
@@ -170,10 +170,16 @@ describe('mode + stage gating', () => {
 
   it('stage promotion requires evidence; demotion is always allowed', () => {
     const db = openTestDb();
-    setCapitalStage(db, 1, 'test'); // first real-capital step needs no fills
+    const account = accountForMode(db, 'canary', 'evm:robinhood');
+    recordFunding(db, account.id, [{ asset: 'USDG', qty: 20, txRef: '0xfunding', logIndex: 0 }], 'test');
+    db.prepare(
+      `INSERT INTO reconciliation_runs (execution_account_id, started_at, completed_at, status, actor)
+       VALUES (?, 1, 2, 'clean', 'test')`,
+    ).run(account.id);
+    setCapitalStage(db, 1, 'test');
     expect(getLiveConfig(db).capitalStage).toBe(1);
 
-    // stage 2 wants 20 clean fills — we have none
+    // stage 2 wants 10 reconciled clean fills — we have none
     expect(() => setCapitalStage(db, 2, 'test')).toThrow(/clean fill/);
 
     // stepping back down is never blocked
@@ -202,6 +208,27 @@ describe('boot recovery', () => {
     // an unknown in-flight order is a reason to stop, not to guess
     expect(getLiveConfig(db).halted).toBe(true);
     expect(getLiveConfig(db).haltReason).toMatch(/unresolved/);
+  });
+
+  it('treats a reverted real transaction as an unresolved halt, not a recovered order', async () => {
+    const db = openTestDb();
+    const acct = accountForMode(db, 'canary', 'evm:robinhood');
+    db.prepare(
+      `INSERT INTO live_orders (intent_id, execution_account_id, instrument_id, venue, side,
+         requested_notional_micro, mode, state, venue_order_id, created_at, updated_at)
+       VALUES ('reverted', ?, 'x', 'evm:robinhood', 'buy', 500000, 'canary', 'pending', '0xdead', 1, 1)`,
+    ).run(acct.id);
+    const adapter = {
+      venue: 'evm:robinhood',
+      async health() { return { venue: this.venue, status: 'online', latencyMs: 1, errorRate: 0, lastOkAt: 1, note: null }; },
+      async getQuote() { return null; }, async placeOrder() { return { accepted: false }; },
+      async getOrderStatus() { return { state: 'failed', filledQty: 0, detail: 'receipt reverted' }; },
+    };
+
+    const result = await recoverPendingOrders(db, null, new Map([['evm:robinhood', adapter as any]]));
+    expect(result).toEqual({ recovered: 0, unresolved: 1 });
+    expect(getLiveConfig(db).halted).toBe(true);
+    expect(getLiveConfig(db).haltReason).toMatch(/ended failed/);
   });
 
   it('a duplicate intent id cannot create a second order', () => {

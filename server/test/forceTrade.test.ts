@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { openTestDb, type DB } from '../src/db/db.js';
-import { evaluateIntent, setCapitalStage, updateLimits } from '../src/live/riskEngine.js';
+import { evaluateIntent, updateLimits } from '../src/live/riskEngine.js';
 import type { OrderIntent } from '@punklabz/shared';
 
 // THE OPERATOR FORCE.
@@ -13,7 +13,7 @@ import type { OrderIntent } from '@punklabz/shared';
 
 function armed(db: DB) {
   db.prepare(`UPDATE live_config SET mode = 'canary', halted = 0 WHERE id = 1`).run();
-  setCapitalStage(db, 3, 'test', true);
+  db.prepare(`UPDATE live_config SET capital_stage=3 WHERE id=1`).run();
   updateLimits(db, { confidenceThreshold: 65 }, 'test');
 }
 

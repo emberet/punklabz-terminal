@@ -59,7 +59,6 @@ export function WalletPanel() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [chainId, setChainId] = useState<number | null>(null);
-  const [operatorWallet, setOperatorWallet] = useState<string | null>(null);
   /** which button is mid-handshake, so only that one shows as waiting */
   const [pending, setPending] = useState<ConnectorKind | null>(null);
 
@@ -85,9 +84,6 @@ export function WalletPanel() {
     // a WalletConnect session survives a reload; pick it back up before asking
     // the chain anything, or we read the extension's chain instead of the phone's
     void restoreConnector().then(() => currentChainId().then(setChainId));
-    api.get<{ operatorWallet: string }>('/api/me')
-      .then((r) => setOperatorWallet(r.operatorWallet))
-      .catch(() => {});
   }, [user]);
 
   const connect = async (kind: ConnectorKind) => {
@@ -186,10 +182,9 @@ export function WalletPanel() {
                 {isOperator ? 'OPERATOR — Control Room unlocked' : 'standard operator account'}
               </span>
             </div>
-            {!isOperator && operatorWallet && (
+            {!isOperator && (
               <div className="soft" style={{ marginBottom: 8 }}>
-                The Control Room is bound to {shortAddress(operatorWallet)}. Any other wallet signs
-                in normally and sees everything else.
+                Control Room access requires the separately configured human operator wallet.
               </div>
             )}
             {wrongChain && (

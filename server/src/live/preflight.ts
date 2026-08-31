@@ -3,11 +3,14 @@ import type { DB } from '../db/db.js';
 import type { ExecutionAdapter } from './adapters.js';
 import type { TradingSigner } from './signing/signer.js';
 import { mappedSymbols, validateMappings } from './instrumentResolver.js';
-import { accountForMode } from './accounts.js';
+import { accountForMode, assertTraderWallet, custodyHoldings } from './accounts.js';
 import { appendAudit } from '../audit/auditLog.js';
 import { ROBINHOOD_MAINNET_CHAIN_ID } from '@punklabz/shared';
 import { probeEndpoints } from '../chain/rhChain.js';
 import { ROBINHOOD_VENUE, SETTLEMENT } from './instruments.js';
+import { resolveLiveInstrument } from './instrumentResolver.js';
+import { stageCapUsd } from './riskEngine.js';
+import { config } from '../config.js';
 import { delegationCeiling } from './delegation/delegationPolicy.js';
 import { buildDelegationProvider } from './delegation/provider.js';
 import { revocationCache } from './delegation/revocationCache.js';
@@ -52,6 +55,7 @@ export async function runPreflight(
   deps: PreflightDeps,
   targetMode: ExecutionMode,
   actor = 'system',
+  options: { persist?: boolean; targetStage?: number } = {},
 ): Promise<PreflightResult> {
   const { db, signer, adapters, feedStatus } = deps;
   const checks: PreflightCheck[] = [];
@@ -81,18 +85,62 @@ export async function runPreflight(
   add('no_unresolved_orders', stuck.n === 0,
     stuck.n === 0 ? 'no orders awaiting an outcome' : `${stuck.n} order(s) still unresolved — recover them first`,
     needsVenue);
+  const unresolvedTx = db.prepare(
+    `SELECT COUNT(*) n FROM execution_transactions WHERE state IN ('prepared','signed','broadcast','unknown')`,
+  ).get() as { n: number };
+  add('no_unresolved_transactions', unresolvedTx.n === 0,
+    unresolvedTx.n === 0 ? 'no durable transactions awaiting an outcome' : `${unresolvedTx.n} transaction(s) unresolved`,
+    needsVenue);
+  add('operator_alerts', config.isDev || !!config.operatorAlertWebhook,
+    config.operatorAlertWebhook ? 'operator alert webhook configured' : 'OPERATOR_ALERT_WEBHOOK_URL is not configured',
+    needsVenue);
+
+  if (needsVenue) {
+    const shadow = db.prepare(`SELECT shadow_armed_at started FROM live_config WHERE id=1`)
+      .get() as { started: number | null } | undefined;
+    const started = shadow?.started ?? null;
+    const failed = started === null ? 0 : (db.prepare(
+      `SELECT COUNT(*) n FROM live_orders
+       WHERE mode='shadow' AND created_at >= ?
+         AND state IN ('submitting','submitted','pending','open','partial','reconciling','failed')`,
+    ).get(started) as { n: number }).n;
+    const elapsed = started === null ? 0 : Date.now() - started;
+    const cleanShadow = started !== null && elapsed >= 24 * 60 * 60_000 && failed === 0;
+    add('shadow_observation', cleanShadow,
+      started === null
+        ? 'no shadow observation window has been armed'
+        : `${(elapsed / 3_600_000).toFixed(1)}h observed, ${failed} failed/unresolved shadow order(s); 24 clean hours required`);
+  }
 
   if (!needsVenue) {
     const passed = checks.filter((c) => c.blocking).every((c) => c.pass);
-    return record(db, targetMode, passed, checks, actor);
+    return record(db, targetMode, passed, checks, actor, options.persist !== false);
   }
 
   // ── only for modes that can move real funds ──
   const readiness = await signer.isReady();
   add('signer', readiness.ready, readiness.detail);
+  const guards = signer.guards?.();
+  add('signer_policy', !!guards?.fullyGuarded,
+    guards?.fullyGuarded
+      ? `owner ${guards.ownerId} and ${guards.policyCount} approved policy(ies) enforced`
+      : 'external signer owner/authorization key/approved policy ids are not all enforced');
 
   const address = await signer.getAddress();
   add('wallet_address', !!address, address ? `trading wallet ${address}` : 'no trading wallet address available');
+  if (address) {
+    try {
+      const account = assertTraderWallet(db, address);
+      const separateFromAdmin = !config.adminWallet || address.toLowerCase() !== config.adminWallet.toLowerCase();
+      add('wallet_isolation', account.chainId === ROBINHOOD_MAINNET_CHAIN_ID
+        && account.settlementAsset === 'USDG' && separateFromAdmin,
+      separateFromAdmin
+        ? `${account.name} bound to ${account.walletAddress} on chain ${account.chainId}, settlement ${account.settlementAsset}`
+        : 'trader execution wallet must not be the human admin/treasury wallet');
+    } catch (error) {
+      add('wallet_isolation', false, String(error));
+    }
+  } else add('wallet_isolation', false, 'trader execution account cannot be bound without a signer address');
 
   const mappings = validateMappings();
   const symbols = mappedSymbols();
@@ -111,16 +159,25 @@ export async function runPreflight(
   }
   add('execution_adapter', online.length > 0,
     online.length ? `online: ${online.join(', ')}` : 'no real execution adapter reports online');
+  const rhAdapter = adapters.get(ROBINHOOD_VENUE);
+  if (rhAdapter?.verifyCoreAssets) {
+    const assets = await rhAdapter.verifyCoreAssets();
+    add('core_asset_contracts', assets.ok,
+      assets.ok ? 'USDG and WETH addresses, bytecode, symbols, and decimals verified' : assets.failures.join('; '));
+  } else {
+    add('core_asset_contracts', false, 'Robinhood adapter cannot verify core token contracts');
+  }
 
   // ── settlement + gas, from the chain ──
   //
-  // Settlement is NOT assumed to be USDC. On Robinhood Chain it is USDG at six
-  // decimals, and it is configurable, because a hardcoded settlement symbol is
-  // how a balance check silently passes against the wrong asset.
+  // Settlement is not assumed to be USDC. On Robinhood Chain it is pinned to
+  // six-decimal USDG so configuration cannot redirect accounting to another
+  // token while the transaction path still spends the approved contract.
   let funded = false;
   let fundedDetail = 'no adapter able to report balances';
   let gasEth = 0;
   let gasDetail = 'no adapter able to report a gas balance';
+  let gasForTwenty: number | null = null;
 
   // Ask the venue we would actually trade on. Iterating every adapter and
   // letting the last one win the message is how "no USDG balance" ends up
@@ -140,6 +197,9 @@ export async function runPreflight(
         gasEth = eth.qty;
         gasDetail = `${settlementVenue}: ${eth.qty} ETH`;
       }
+      if (balanceAdapter.estimateGasReserveEth) {
+        gasForTwenty = await balanceAdapter.estimateGasReserveEth(20);
+      }
     } catch (e) {
       fundedDetail = `${settlementVenue}: balance query failed (${String(e).slice(0, 60)})`;
     }
@@ -149,6 +209,13 @@ export async function runPreflight(
       : 'no online venue to read a balance from';
   }
   add('funded_balance', funded, fundedDetail);
+  const targetStage = options.targetStage ?? getLiveConfig(db).capitalStage;
+  const stageCapital = stageCapUsd(targetStage);
+  add('stage_collateralized', funded && (() => {
+    const account = accountForMode(db, targetMode, ROBINHOOD_VENUE);
+    const held = custodyHoldings(db, account.id).get('USDG') ?? 0;
+    return held >= stageCapital && (stageCapital < 100 || held >= 100);
+  })(), `stage $${stageCapital} requires at least ${stageCapital} recorded and reconciled USDG`);
 
   // Gas is ETH on this chain and it is a hard trading precondition: a wallet
   // that cannot pay for a transaction cannot exit a position either.
@@ -158,16 +225,44 @@ export async function runPreflight(
   const ethUsd = deps.ethUsd ?? null;
   const gasUsd = ethUsd !== null ? gasEth * ethUsd : null;
   add('gas_reserve',
-    gasUsd !== null ? gasUsd >= gasFloorUsd : gasEth > 0,
+    gasUsd !== null && gasUsd >= gasFloorUsd && gasForTwenty !== null
+      && gasEth >= Math.max(0.005, gasForTwenty),
     gasUsd !== null
-      ? `${gasEth.toFixed(6)} ETH ≈ $${gasUsd.toFixed(2)} against a $${gasFloorUsd} floor`
-      : `${gasDetail} (no ETH/USD mark to price it against)`);
+      ? `${gasEth.toFixed(6)} ETH ≈ $${gasUsd.toFixed(2)}; requires ≥${Math.max(0.005, gasForTwenty ?? Infinity).toFixed(6)} ETH for 20 transactions and ≥$${gasFloorUsd}`
+      : `${gasDetail} (no ETH/USD mark — cannot price reserve)`);
+
+  const weth = resolveLiveInstrument('ETHUSDT').instrument;
+  let pegPass = false;
+  let pegDetail = 'cannot derive USDG reference price';
+  if (weth && rhAdapter && ethUsd && ethUsd > 0) {
+    const q = rhAdapter.getExecutableQuote
+      ? await rhAdapter.getExecutableQuote(weth).catch(() => null)
+      : null;
+    if (q && Date.now() - q.ts <= 15_000) {
+      const deviation = Math.abs(q.price / ethUsd - 1);
+      pegPass = deviation <= 0.01;
+      pegDetail = `0x WETH/USDG ${q.price.toFixed(2)} vs reference ETH/USD ${ethUsd.toFixed(2)} (${(deviation * 100).toFixed(2)}%)`;
+    } else pegDetail = '0x firm taker quote is missing or stale';
+  }
+  add('usdg_reference', pegPass, pegDetail);
+
+  const account = accountForMode(db, targetMode, ROBINHOOD_VENUE);
+  const lastRecon = db.prepare(
+    `SELECT status, completed_at FROM reconciliation_runs
+     WHERE execution_account_id=? ORDER BY id DESC LIMIT 1`,
+  ).get(account.id) as { status: string; completed_at: number | null } | undefined;
+  add('reconciliation', lastRecon?.status === 'clean', lastRecon?.status === 'clean'
+    ? `clean at ${new Date(lastRecon.completed_at!).toISOString()}`
+    : 'no clean reconciliation for the trader account');
 
   // ── RPC: Robinhood Chain, and BOTH endpoints must report 4663 ──
-  const chainId = cfg.mode === 'live' || cfg.mode === 'canary'
-    ? ((db.prepare(`SELECT primary_chain_id c FROM live_config WHERE id = 1`).get() as { c: number } | undefined)?.c
-        ?? ROBINHOOD_MAINNET_CHAIN_ID)
-    : ROBINHOOD_MAINNET_CHAIN_ID;
+  const configuredChainId = (db.prepare(`SELECT primary_chain_id c FROM live_config WHERE id = 1`)
+    .get() as { c: number } | undefined)?.c ?? ROBINHOOD_MAINNET_CHAIN_ID;
+  add('chain_configuration', configuredChainId === ROBINHOOD_MAINNET_CHAIN_ID,
+    configuredChainId === ROBINHOOD_MAINNET_CHAIN_ID
+      ? `execution chain pinned to ${ROBINHOOD_MAINNET_CHAIN_ID}`
+      : `configured chain ${configuredChainId}, required ${ROBINHOOD_MAINNET_CHAIN_ID}`);
+  const chainId = ROBINHOOD_MAINNET_CHAIN_ID;
 
   const endpoints = await probeEndpoints(chainId).catch(() => []);
   const named = endpoints.filter((e) => e.label !== 'public');
@@ -187,6 +282,15 @@ export async function runPreflight(
       : 'RPC_ROBINHOOD_SECONDARY not set — single point of failure',
     false);
 
+  const bestBlock = Math.max(...endpoints.filter((e) => e.ok && e.blockNumber !== null).map((e) => e.blockNumber!), -1);
+  const primaryLag = primary?.ok && primary.blockNumber !== null && bestBlock >= 0
+    ? bestBlock - primary.blockNumber
+    : Infinity;
+  add('rpc_freshness', Number.isFinite(primaryLag) && primaryLag <= 3,
+    Number.isFinite(primaryLag)
+      ? `primary is ${primaryLag} block(s) behind the freshest reachable Robinhood endpoint`
+      : 'cannot compare primary RPC height to a reachable Robinhood endpoint');
+
   // An endpoint that answers on the WRONG chain is worse than one that is
   // down: it looks healthy and it would sign against a different network.
   const wrongChain = endpoints.filter((e) => e.chainIdReported !== null && e.chainIdReported !== chainId);
@@ -195,18 +299,18 @@ export async function runPreflight(
       ? `every reachable endpoint reports chain ${chainId}`
       : wrongChain.map((e) => `${e.label} reports ${e.chainIdReported}, expected ${chainId}`).join('; '));
 
-  const account = accountForMode(db, targetMode, online[0] ?? 'unconfigured');
-  add('execution_account', !!account, `books to ${account.name}`);
+  const executionAccount = accountForMode(db, targetMode, online[0] ?? 'unconfigured');
+  add('execution_account', !!executionAccount, `books to ${executionAccount.name}`);
 
   // live additionally requires canary evidence: real fills that settled cleanly
   if (targetMode === 'live') {
     const canaryFills = db
       .prepare(
         `SELECT COUNT(*) n FROM live_orders o
-         JOIN execution_accounts a ON a.id = o.execution_account_id
-         WHERE a.mode = 'canary' AND o.state = 'filled'`,
+         WHERE o.execution_account_id = ? AND o.capital_stage = 4
+           AND o.mode = 'canary' AND o.clean_fill = 1 AND o.forced_by IS NULL`,
       )
-      .get() as { n: number };
+      .get(executionAccount.id) as { n: number };
     add('canary_evidence', canaryFills.n >= 10,
       `${canaryFills.n} clean canary fill(s) — 10 required before live`);
   }
@@ -226,7 +330,7 @@ export async function runPreflight(
   add('delegation_provider', delegationProvider.ready, delegationProvider.detail, false);
 
   const passed = checks.filter((c) => c.blocking).every((c) => c.pass);
-  return record(db, targetMode, passed, checks, actor);
+  return record(db, targetMode, passed, checks, actor, options.persist !== false);
 }
 
 /**
@@ -281,12 +385,15 @@ function record(
   passed: boolean,
   checks: PreflightCheck[],
   actor: string,
+  persist = true,
 ): PreflightResult {
   const blockers = checks.filter((c) => c.blocking && !c.pass).map((c) => `${c.name}: ${c.detail}`);
-  db.prepare(
-    `INSERT INTO preflight_runs (ts, target_mode, passed, checks_json, actor) VALUES (?, ?, ?, ?, ?)`,
-  ).run(Date.now(), targetMode, passed ? 1 : 0, JSON.stringify(checks), actor);
-  appendAudit(db, actor, 'preflight', { targetMode, passed, blockers });
+  if (persist) {
+    db.prepare(
+      `INSERT INTO preflight_runs (ts, target_mode, passed, checks_json, actor) VALUES (?, ?, ?, ?, ?)`,
+    ).run(Date.now(), targetMode, passed ? 1 : 0, JSON.stringify(checks), actor);
+    appendAudit(db, actor, 'preflight', { targetMode, passed, blockers });
+  }
   return { targetMode, passed, checks, blockers };
 }
 

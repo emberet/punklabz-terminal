@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { CompositeConfidence, OrderIntent, TradeView } from '@punklabz/shared';
 import type { DB } from '../db/db.js';
 import type { Engine } from '../engine/engine.js';
@@ -41,8 +41,9 @@ export class LiveNetwork {
     private candles: CandleStore,
     private markOf: (s: string) => number | undefined,
     signer?: TradingSigner,
+    adapters?: Map<string, ExecutionAdapter>,
   ) {
-    this.adapters = buildAdapters(markOf, signer);
+    this.adapters = adapters ?? buildAdapters(markOf, signer, db);
     this.router = new ExecutionRouter(this.adapters);
     this.restoreLots();
   }
@@ -136,6 +137,7 @@ export class LiveNetwork {
     side: 'buy' | 'sell';
     notionalUsd: number;
     actor: string;
+    idempotencyKey: string;
   }): Promise<{ orderId: number | null; state: string; detail: string }> {
     const cfg = getLiveConfig(this.db);
     if (cfg.halted) {
@@ -151,30 +153,36 @@ export class LiveNetwork {
       symbol: params.symbol, side: params.side, notionalUsd: params.notionalUsd, mode: cfg.mode,
     });
 
-    const before = this.db.prepare(`SELECT COALESCE(MAX(id), 0) m FROM live_orders`).get() as { m: number };
+    const account = accountForMode(this.db, cfg.mode, 'evm:robinhood');
+    const sourceId = `operator:${params.idempotencyKey}`;
+    const synthetic: TradeView = {
+      id: 0,
+      botId: 0,
+      symbol: params.symbol,
+      side: params.side,
+      qty: params.notionalUsd / price,
+      price,
+      feeUsd: 0,
+      realizedPnlUsd: 0,
+      ts: Date.now(),
+      reason: `operator force by ${params.actor}`,
+    };
     await this.mirrorTrade(
       {
         // A forced trade has no bot behind it. botId 0 keeps it out of every
         // real machine's lot book and win-rate stats; the order row itself
         // stores NULL, because attributing this to a strategy would be a lie
         // that later reads as evidence.
-        id: 0,
-        botId: 0,
-        symbol: params.symbol,
-        side: params.side,
-        qty: params.notionalUsd / price,
-        price,
-        feeUsd: 0,
-        realizedPnlUsd: 0,
-        ts: Date.now(),
-        reason: `operator force by ${params.actor}`,
+        ...synthetic,
       },
       params.actor,
+      sourceId,
     );
 
+    const intentId = this.intentId(cfg.mode, account.id, synthetic, sourceId);
     const row = this.db
-      .prepare(`SELECT id, state, reject_reason, tx_ref FROM live_orders WHERE id > ? ORDER BY id DESC LIMIT 1`)
-      .get(before.m) as { id: number; state: string; reject_reason: string | null; tx_ref: string | null } | undefined;
+      .prepare(`SELECT id, state, reject_reason, tx_ref FROM live_orders WHERE intent_id = ?`)
+      .get(intentId) as { id: number; state: string; reject_reason: string | null; tx_ref: string | null } | undefined;
     if (!row) return { orderId: null, state: 'no_order', detail: 'nothing was recorded — the signal never reached the risk engine' };
     return {
       orderId: row.id,
@@ -183,7 +191,35 @@ export class LiveNetwork {
     };
   }
 
-  private async mirrorTrade(trade: TradeView, forcedBy?: string): Promise<void> {
+  private intentId(mode: string, accountId: number, trade: TradeView, sourceId?: string): string {
+    const digest = createHash('sha256')
+      .update([mode, accountId, trade.botId, trade.symbol, trade.side, sourceId ?? trade.id].join(':'))
+      .digest('hex').slice(0, 24);
+    return `plz_${mode}_${digest}`;
+  }
+
+  /** Position truth comes from confirmed ledger fills, including fills posted by the supervisor. */
+  private ledgerLot(accountId: number, botId: number, instrumentId: string): Lot | null {
+    const fills = this.db.prepare(
+      `SELECT side, qty, executed_price FROM live_ledger
+       WHERE execution_account_id=? AND bot_id IS ? AND instrument_id=? ORDER BY id`,
+    ).all(accountId, botId, instrumentId) as { side: string; qty: number; executed_price: number }[];
+    let qty = 0;
+    let cost = 0;
+    for (const fill of fills) {
+      if (fill.side === 'buy') {
+        cost += fill.qty * fill.executed_price;
+        qty += fill.qty;
+      } else if (qty > 0) {
+        const sold = Math.min(qty, fill.qty);
+        cost -= sold * (cost / qty);
+        qty -= sold;
+      }
+    }
+    return qty > 1e-9 ? { qty, avgPrice: cost / qty } : null;
+  }
+
+  private async mirrorTrade(trade: TradeView, forcedBy?: string, sourceId?: string): Promise<void> {
     const cfg = getLiveConfig(this.db);
     if (cfg.mode === 'simulation') return; // live pipeline off
 
@@ -197,6 +233,10 @@ export class LiveNetwork {
     // mode that books theoretical fills against paper market data. Anything
     // that can move funds must resolve.
     const realMoney = cfg.mode === 'canary' || cfg.mode === 'live';
+    if (realMoney && Date.now() - trade.ts > 60_000) {
+      this.recordUnroutable(trade, cfg.mode, 'signal is older than 60 seconds', forcedBy);
+      return;
+    }
     let inst;
     if (realMoney) {
       const resolution = resolveLiveInstrument(trade.symbol);
@@ -214,6 +254,9 @@ export class LiveNetwork {
     const account = accountForMode(this.db, cfg.mode, inst.venue);
     const conf = this.confidenceFor(trade);
     const stageCap = stageCapUsd(cfg.capitalStage);
+    const lotKey = `${account.id}:${trade.botId}:${instrumentId}`;
+    const lot = this.ledgerLot(account.id, trade.botId, instrumentId) ?? this.lots.get(lotKey);
+    const closingLot = trade.side === 'sell' && !!lot;
     // scale the paper notional down to live sizing (paper bots run $10k books)
     //
     // A forced trade is NOT scaled: the operator named a real dollar amount,
@@ -221,12 +264,14 @@ export class LiveNetwork {
     // test into $0.03. It is still clamped by the per-trade cap below, which is
     // the gate that actually protects funds.
     const perTradeCap = (stageCap * cfg.limits.maxPerTradePct) / 100;
-    const requested = forcedBy
+    const requested = closingLot
+      ? lot.qty * (this.markOf(trade.symbol) ?? trade.price)
+      : forcedBy
       ? Math.max(0.5, Math.min(perTradeCap, trade.qty * trade.price))
       : Math.max(0.5, Math.min(perTradeCap, trade.qty * trade.price * (stageCap / 10_000)));
 
     const intent: OrderIntent = {
-      intentId: `plz_${cfg.mode}_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}_${randomUUID().slice(0, 8)}`,
+      intentId: this.intentId(cfg.mode, account.id, trade, sourceId),
       botId: forcedBy ? null : trade.botId,
       instrumentId,
       venue: inst.venue,
@@ -244,25 +289,21 @@ export class LiveNetwork {
     const atrPct = a !== null && price > 0 ? (a / price) * 100 : 0;
     const edge = edgeForUniverse('majors', atrPct, 0.5);
 
-    // sells that close an open shadow lot bypass the entry gates (exits are risk-managed, not blocked)
-    const lotKey = `${account.id}:${trade.botId}:${instrumentId}`;
-    const closingLot = trade.side === 'sell' && this.lots.has(lotKey);
-
     const now = Date.now();
     const info = this.db
       .prepare(
-        `INSERT INTO live_orders
+        `INSERT OR IGNORE INTO live_orders
            (intent_id, execution_account_id, bot_id, instrument_id, venue, side,
-            requested_notional_micro, mode, state, confidence, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?)`,
+            requested_notional_micro, mode, state, confidence, capital_stage, forced_by,
+            signal_ts, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?, ?)`,
       )
       .run(intent.intentId, account.id, intent.botId, instrumentId, inst.venue, intent.side,
-        toMicro(requested), cfg.mode, conf.composite, now, now);
+        toMicro(requested), cfg.mode, conf.composite, cfg.capitalStage, forcedBy ?? null, trade.ts, now, now);
+    if (info.changes === 0) return;
     const orderId = Number(info.lastInsertRowid);
 
-    const decision = closingLot
-      ? { approved: true, sizeUsd: 0, rejectionReason: null, checks: [{ name: 'exit', pass: true, detail: 'closing existing shadow lot — exits always allowed' }] }
-      : evaluateIntent(this.db, intent, edge, account.id);
+    const decision = evaluateIntent(this.db, intent, edge, account.id, undefined, { isExit: closingLot });
 
     this.db
       .prepare(`UPDATE live_orders SET state = ?, approved_notional_micro = ?, risk_json = ?, reject_reason = ?, updated_at = ? WHERE id = ?`)
@@ -293,8 +334,10 @@ export class LiveNetwork {
     this.db.prepare(`UPDATE live_orders SET state = 'submitting', expected_price = ?, updated_at = ? WHERE id = ?`)
       .run(expected, Date.now(), orderId);
 
-    const lot = this.lots.get(lotKey);
-    const notional = closingLot && lot ? lot.qty * expected : decision.sizeUsd;
+    // Route exactly the amount the risk engine approved. A large exit may need
+    // several bounded transactions; using the whole lot here would silently
+    // undo the per-transaction cap applied above.
+    const notional = decision.sizeUsd;
     const routeReq = {
       instrumentId,
       side: trade.side,
@@ -302,6 +345,10 @@ export class LiveNetwork {
       maxSlippageBps: cfg.limits.maxSlippageBps ?? 35,
       mode: cfg.mode,
       intentId: intent.intentId,
+      orderId,
+      accountId: account.id,
+      grossEdgeBps: forcedBy ? undefined : edge.grossEdgeBps,
+      safetyBufferBps: Math.max(10, edge.bufferBps),
     };
     const routed = this.router.route(routeReq);
     const result = await this.router.execute(routed, routeReq, expected);
@@ -309,6 +356,14 @@ export class LiveNetwork {
     if (!result.accepted) {
       this.db.prepare(`UPDATE live_orders SET state = 'failed', reject_reason = ?, updated_at = ? WHERE id = ?`)
         .run(result.error ?? 'adapter refused', Date.now(), orderId);
+      const transaction = this.db.prepare(
+        `SELECT id, state FROM execution_transactions WHERE order_id=? ORDER BY id DESC LIMIT 1`,
+      ).get(orderId) as { id: number; state: string } | undefined;
+      if (realMoney && transaction && transaction.state !== 'confirmed') {
+        haltNetwork(this.db,
+          `order ${orderId} has ${transaction.state} transaction ${transaction.id}: ${result.error ?? 'adapter failure'}`,
+          'live-network');
+      }
       this.hub.publish('live', { event: 'order_failed', orderId, reason: result.error });
       return;
     }

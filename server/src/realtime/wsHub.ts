@@ -33,6 +33,11 @@ export class WsHub {
 
   /** immediate fan-out */
   publish(channel: string, data: unknown): void {
+    // The socket is unauthenticated. Never publish live-execution timing or
+    // payloads here; public/admin screens poll their appropriately scoped HTTP
+    // endpoints instead. This also prevents a generic refresh pulse from
+    // becoming a side channel for the exact moment an order was broadcast.
+    if (channel === 'live') return;
     const frame = JSON.stringify({ channel, data });
     for (const [ws, channels] of this.subs) {
       if (channels.has(channel) && ws.readyState === WebSocket.OPEN) ws.send(frame);

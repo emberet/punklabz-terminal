@@ -13,9 +13,63 @@ import { reconcileAccount } from '../src/live/reconciler.js';
 import { accountForMode, fundingFor, recordFunding } from '../src/live/accounts.js';
 import { NoSigner } from '../src/live/signing/signer.js';
 import { PrivySigner } from '../src/live/signing/privySigner.js';
+import { encodeFunctionData } from 'viem';
 
 const CHAIN = ROBINHOOD_MAINNET_CHAIN_ID;
 const TAKER = '0xD5788b6694a05366FaaeEfEff35c7a5913D02Ff9';
+const SIGNER_TARGETS = [USDG.address, WETH_ROBINHOOD.address, ZEROX_ALLOWANCE_HOLDER];
+const ALLOWANCE_HOLDER_ABI = [{
+  name: 'exec', type: 'function', stateMutability: 'payable',
+  inputs: [
+    { name: 'operator', type: 'address' }, { name: 'token', type: 'address' },
+    { name: 'amount', type: 'uint256' }, { name: 'target', type: 'address' },
+    { name: 'data', type: 'bytes' },
+  ],
+  outputs: [{ name: 'result', type: 'bytes' }],
+}] as const;
+const SETTLER_ABI = [{
+  name: 'execute', type: 'function', stateMutability: 'payable',
+  inputs: [
+    {
+      name: 'slippage', type: 'tuple', components: [
+        { name: 'recipient', type: 'address' }, { name: 'buyToken', type: 'address' },
+        { name: 'minAmountOut', type: 'uint256' },
+      ],
+    },
+    { name: 'actions', type: 'bytes[]' }, { name: 'zidAndAffiliate', type: 'bytes32' },
+  ],
+  outputs: [{ type: 'bool' }],
+}] as const;
+
+const allowanceCalldata = (over: {
+  operator?: string; token?: string; amount?: bigint; target?: string;
+  recipient?: string; buyToken?: string; minAmountOut?: bigint;
+} = {}) => {
+  const inner = encodeFunctionData({
+    abi: SETTLER_ABI,
+    functionName: 'execute',
+    args: [
+      {
+        recipient: (over.recipient ?? TAKER) as `0x${string}`,
+        buyToken: (over.buyToken ?? WETH_ROBINHOOD.address) as `0x${string}`,
+        minAmountOut: over.minAmountOut ?? 1_980_000_000_000_000n,
+      },
+      ['0x1234'],
+      `0x${'00'.repeat(32)}`,
+    ],
+  });
+  return encodeFunctionData({
+    abi: ALLOWANCE_HOLDER_ABI,
+    functionName: 'exec',
+    args: [
+      (over.operator ?? TAKER) as `0x${string}`,
+      (over.token ?? USDG.address) as `0x${string}`,
+      over.amount ?? 5_000_000n,
+      (over.target ?? TAKER) as `0x${string}`,
+      inner,
+    ],
+  });
+};
 
 /** a quote shaped exactly like a good one, so each test can spoil ONE field */
 const goodQuote = (over: Partial<ZeroXQuote> = {}): ZeroXQuote => ({
@@ -26,10 +80,11 @@ const goodQuote = (over: Partial<ZeroXQuote> = {}): ZeroXQuote => ({
   buyAmount: '2000000000000000',  // 0.002 WETH at eighteen
   minBuyAmount: '1980000000000000',
   to: ZEROX_ALLOWANCE_HOLDER,
-  data: '0x1234567890abcdef',
+  data: allowanceCalldata(),
   value: '0',
   gas: '250000',
   allowanceTarget: ZEROX_ALLOWANCE_HOLDER,
+  quotedAt: Date.now(),
   ...over,
 });
 
@@ -145,7 +200,10 @@ describe('0x quote verification — never sign unexpected calldata', () => {
 
   it('accepts a guarantee TIGHTER than the ceiling', () => {
     const v = verifyQuote({
-      quote: goodQuote({ minBuyAmount: '1999000000000000' }),
+      quote: goodQuote({
+        minBuyAmount: '1999000000000000',
+        data: allowanceCalldata({ minAmountOut: 1_999_000_000_000_000n }),
+      }),
       expect: expectFor({ maxSlippageBps: 100 }),
     });
     expect(v.ok).toBe(true);
@@ -155,7 +213,10 @@ describe('0x quote verification — never sign unexpected calldata', () => {
     // 0x returned a minBuyAmount 2118 wei below our own recomputation of the
     // same figure: one part in a trillion, and the old check refused it.
     const v = verifyQuote({
-      quote: goodQuote({ buyAmount: '2023620376960000', minBuyAmount: '2003384173190400' }),
+      quote: goodQuote({
+        buyAmount: '2023620376960000', minBuyAmount: '2003384173190400',
+        data: allowanceCalldata({ minAmountOut: 2_003_384_173_190_400n }),
+      }),
       expect: expectFor({ maxSlippageBps: 100 }),
     });
     expect(v.ok).toBe(true);
@@ -174,6 +235,48 @@ describe('0x quote verification — never sign unexpected calldata', () => {
   it('rejects missing or malformed calldata', () => {
     expect(verifyQuote({ quote: goodQuote({ data: '' }), expect: expectFor() }).ok).toBe(false);
     expect(verifyQuote({ quote: goodQuote({ data: '0x1' }), expect: expectFor() }).ok).toBe(false);
+  });
+
+  it('rejects a stale firm quote before signing', () => {
+    const v = verifyQuote({ quote: goodQuote({ quotedAt: Date.now() - 15_001 }), expect: expectFor() });
+    expect(v.ok).toBe(false);
+    expect(v.failures.join(' ')).toMatch(/timestamp .* stale/);
+  });
+
+  it('decodes calldata and rejects a different token, amount, or operator', () => {
+    const token = verifyQuote({
+      quote: goodQuote({ data: allowanceCalldata({ token: WETH_ROBINHOOD.address }) }), expect: expectFor(),
+    });
+    expect(token.failures.join(' ')).toMatch(/calldata token/);
+
+    const amount = verifyQuote({
+      quote: goodQuote({ data: allowanceCalldata({ amount: 50_000_000n }) }), expect: expectFor(),
+    });
+    expect(amount.failures.join(' ')).toMatch(/calldata amount/);
+
+    const operator = verifyQuote({
+      quote: goodQuote({ data: allowanceCalldata({ operator: '0x1111111111111111111111111111111111111111' }) }),
+      expect: expectFor(),
+    });
+    expect(operator.failures.join(' ')).toMatch(/operator .* does not match target/);
+  });
+
+  it('rejects altered settlement recipient, buy token, or minimum output', () => {
+    const recipient = verifyQuote({
+      quote: goodQuote({ data: allowanceCalldata({ recipient: '0x1111111111111111111111111111111111111111' }) }),
+      expect: expectFor(),
+    });
+    expect(recipient.failures.join(' ')).toMatch(/calldata recipient/);
+
+    const buyToken = verifyQuote({
+      quote: goodQuote({ data: allowanceCalldata({ buyToken: USDG.address }) }), expect: expectFor(),
+    });
+    expect(buyToken.failures.join(' ')).toMatch(/calldata buy token/);
+
+    const minimum = verifyQuote({
+      quote: goodQuote({ data: allowanceCalldata({ minAmountOut: 1n }) }), expect: expectFor(),
+    });
+    expect(minimum.failures.join(' ')).toMatch(/calldata minimum/);
   });
 
   it('reports EVERY failure, not just the first', () => {
@@ -299,13 +402,13 @@ describe('the signer reports what the enclave actually enforces', () => {
     const signer = new PrivySigner({
       appId: 'app', appSecret: 'secret', walletId: 'w1',
       expectedAddress: TAKER, authorizationKey: 'a-key-that-is-set',
-      allowedTargets: [], maxNativeValueWei: 0n,
+      allowedTargets: SIGNER_TARGETS, maxNativeValueWei: 0n,
     });
     // Privy answers, address matches, but owner_id is null
     (signer as any).call = async () => ({ id: 'w1', address: TAKER, owner_id: null, policy_ids: [] });
 
     const r = await signer.isReady();
-    expect(r.ready).toBe(true);
+    expect(r.ready).toBe(false);
     // the bug this guards: "authorization key active" purely because the env
     // var existed, while Privy required no authorization signature at all
     expect(r.detail).not.toMatch(/active/);
@@ -318,7 +421,8 @@ describe('the signer reports what the enclave actually enforces', () => {
   it('reports both walls when the enclave really has them', async () => {
     const signer = new PrivySigner({
       appId: 'app', appSecret: 'secret', walletId: 'w1',
-      expectedAddress: TAKER, allowedTargets: [], maxNativeValueWei: 0n,
+      expectedAddress: TAKER, authorizationKey: 'configured-for-readiness',
+      expectedPolicyIds: ['pol_1'], allowedTargets: SIGNER_TARGETS, maxNativeValueWei: 0n,
     });
     (signer as any).call = async () => ({ id: 'w1', address: TAKER, owner_id: 'quorum_1', policy_ids: ['pol_1'] });
 
@@ -371,14 +475,14 @@ describe('external funding vs reconciliation', () => {
 
   it('recording what was actually deposited makes it reconcile', () => {
     recordFunding(db, accountId, [
-      { asset: 'ETH', qty: 0.00283351, note: 'bridge' },
-      { asset: 'USDG', qty: 4.999992, note: 'bridge' },
+      { asset: 'ETH', qty: 0.00283351, note: 'bridge', txRef: '0xdeposit', logIndex: -1 },
+      { asset: 'USDG', qty: 4.999992, note: 'bridge', txRef: '0xdeposit', logIndex: 0 },
     ], 'operator:test');
     expect(fundingFor(db, accountId).get('USDG')).toBeCloseTo(4.999992, 6);
   });
 
   it('AND STILL CATCHES REAL DRIFT — funding is not a blanket excuse', async () => {
-    recordFunding(db, accountId, [{ asset: 'USDG', qty: 5 }], 'operator:test');
+    recordFunding(db, accountId, [{ asset: 'USDG', qty: 5, txRef: '0xdrift', logIndex: 0 }], 'operator:test');
     // the chain says most of it left; nothing in the ledger explains that
     const pass = await reconcileAccount(db, null, accountId, chainHolding([
       { asset: 'USDG', qty: 1 },
@@ -388,7 +492,7 @@ describe('external funding vs reconciliation', () => {
   });
 
   it('an operator who attests the WRONG amount does not get a clean pass', async () => {
-    recordFunding(db, accountId, [{ asset: 'USDG', qty: 50 }], 'operator:test'); // claimed 50
+    recordFunding(db, accountId, [{ asset: 'USDG', qty: 50, txRef: '0xwrong', logIndex: 0 }], 'operator:test'); // claimed 50
     const pass = await reconcileAccount(db, null, accountId, chainHolding([
       { asset: 'USDG', qty: 5 },                                                // chain has 5
     ]) as any);
@@ -396,7 +500,7 @@ describe('external funding vs reconciliation', () => {
   });
 
   it('every funding record is audited and attributable', () => {
-    recordFunding(db, accountId, [{ asset: 'USDG', qty: 5, txRef: '0xabc' }], 'operator:ember');
+    recordFunding(db, accountId, [{ asset: 'USDG', qty: 5, txRef: '0xabc', logIndex: 0 }], 'operator:ember');
     const row = db.prepare(`SELECT * FROM execution_account_funding`).get() as any;
     expect(row.actor).toBe('operator:ember');
     expect(row.tx_ref).toBe('0xabc');
@@ -405,9 +509,16 @@ describe('external funding vs reconciliation', () => {
   });
 
   it('a withdrawal is a negative entry, not a deletion', () => {
-    recordFunding(db, accountId, [{ asset: 'USDG', qty: 5 }], 'operator:test');
-    recordFunding(db, accountId, [{ asset: 'USDG', qty: -2 }], 'operator:test');
+    recordFunding(db, accountId, [{ asset: 'USDG', qty: 5, txRef: '0xin', logIndex: 0 }], 'operator:test');
+    recordFunding(db, accountId, [{ asset: 'USDG', qty: -2, txRef: '0xout', logIndex: 0 }], 'operator:test');
     expect(fundingFor(db, accountId).get('USDG')).toBeCloseTo(3, 6);
     expect((db.prepare(`SELECT COUNT(*) n FROM execution_account_funding`).get() as any).n).toBe(2);
+  });
+
+  it('cannot import the same onchain funding transfer twice', () => {
+    const entry = { asset: 'USDG', qty: 5, txRef: '0xonce', logIndex: 7 };
+    recordFunding(db, accountId, [entry], 'operator:test');
+    expect(() => recordFunding(db, accountId, [entry], 'operator:test')).toThrow(/UNIQUE/);
+    expect((db.prepare(`SELECT COUNT(*) n FROM execution_asset_ledger WHERE event_type='funding'`).get() as any).n).toBe(1);
   });
 });

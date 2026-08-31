@@ -2,10 +2,16 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { OrderIntent } from '@punklabz/shared';
 import { openTestDb, type DB } from '../src/db/db.js';
 import {
-  evaluateIntent, getLiveConfig, haltNetwork, resumeNetwork,
+  evaluateIntent, getLiveConfig, haltNetwork,
   setCapitalStage, setLiveMode, updateLimits,
 } from '../src/live/riskEngine.js';
 import { toMicro } from '../src/money.js';
+import { accountForMode, recordFunding } from '../src/live/accounts.js';
+
+function setTestStage(db: DB, stage: number) {
+  getLiveConfig(db);
+  db.prepare(`UPDATE live_config SET capital_stage=? WHERE id=1`).run(stage);
+}
 
 function intent(over: Partial<OrderIntent> = {}): OrderIntent {
   return {
@@ -44,9 +50,15 @@ describe('risk engine', () => {
   });
 
   it('capital stages above 1 need real fills as evidence', () => {
-    expect(() => setCapitalStage(db, 2, 'test')).toThrow(/clean fill/);
+    const account = accountForMode(db, 'canary', 'evm:robinhood');
+    recordFunding(db, account.id, [{ asset: 'USDG', qty: 20, txRef: '0xfunding', logIndex: 0 }], 'test');
+    db.prepare(
+      `INSERT INTO reconciliation_runs (execution_account_id, started_at, completed_at, status, actor)
+       VALUES (?, 1, 2, 'clean', 'test')`,
+    ).run(account.id);
     setCapitalStage(db, 1, 'test');
     expect(getLiveConfig(db).capitalStage).toBe(1);
+    expect(() => setCapitalStage(db, 2, 'test')).toThrow(/clean fill/);
   });
 
   it('shadow at stage 0 rejects on capital; stage 1 approves within caps', () => {
@@ -55,11 +67,12 @@ describe('risk engine', () => {
     expect(d0.approved).toBe(false);
     expect(d0.checks.find((c) => c.name === 'capital_stage')?.pass).toBe(false);
 
-    setCapitalStage(db, 1, 'test');
+    setTestStage(db, 1);
     const d1 = evaluateIntent(db, intent({ notionalUsd: 10 }));
-    expect(d1.approved).toBe(false); // $10 request capped to 5% of $5 = $0.25 < min size
+    expect(d1.approved).toBe(true); // $10 request is capped to 10% of $5 = the $0.50 minimum
+    expect(d1.sizeUsd).toBe(0.5);
     const d2 = evaluateIntent(db, intent({ notionalUsd: 10 }));
-    expect(d2.checks.find((c) => c.name === 'min_size')?.pass).toBe(false);
+    expect(d2.checks.find((c) => c.name === 'min_size')?.pass).toBe(true);
     void d2;
     // widen per-trade cap to make a viable size
     updateLimits(db, { maxPerTradePct: 10, minCashReservePct: 10 }, 'test');
@@ -70,7 +83,7 @@ describe('risk engine', () => {
 
   it('confidence below threshold rejects', () => {
     setLiveMode(db, 'shadow', 'test');
-    setCapitalStage(db, 1, 'test');
+    setTestStage(db, 1);
     const d = evaluateIntent(db, intent({ confidence: 50 }));
     expect(d.approved).toBe(false);
     expect(d.checks.find((c) => c.name === 'confidence')?.pass).toBe(false);
@@ -78,17 +91,35 @@ describe('risk engine', () => {
 
   it('kill switch blocks everything until resumed', () => {
     setLiveMode(db, 'shadow', 'test');
-    setCapitalStage(db, 1, 'test');
+    setTestStage(db, 1);
     updateLimits(db, { maxPerTradePct: 10, minCashReservePct: 10 }, 'test');
     haltNetwork(db, 'test halt', 'test');
     expect(evaluateIntent(db, intent({ notionalUsd: 0.6 })).approved).toBe(false);
-    resumeNetwork(db, 'test');
+    db.prepare(`UPDATE live_config SET halted=0, halt_reason=NULL WHERE id=1`).run();
     expect(evaluateIntent(db, intent({ notionalUsd: 0.6 })).approved).toBe(true);
+  });
+
+  it('an exit may relax entry gates but never bypasses the kill switch', () => {
+    setLiveMode(db, 'shadow', 'test');
+    setTestStage(db, 1);
+    const exit = intent({ side: 'sell', notionalUsd: 1, confidence: 1 });
+    const losingEdge = {
+      grossEdgeBps: 1, feeBps: 10, slippageBps: 10, bufferBps: 10, netEdgeBps: -29, edgeModel: 'test',
+    };
+    const allowed = evaluateIntent(db, exit, losingEdge, undefined, undefined, { isExit: true });
+    expect(allowed.approved).toBe(true);
+    expect(allowed.checks.find((c) => c.name === 'exit')?.pass).toBe(true);
+
+    haltNetwork(db, 'operator halt', 'test');
+    const halted = evaluateIntent(db, { ...exit, intentId: `${exit.intentId}-halted` }, losingEdge,
+      undefined, undefined, { isExit: true });
+    expect(halted.approved).toBe(false);
+    expect(halted.checks.find((c) => c.name === 'kill_switch')?.pass).toBe(false);
   });
 
   it('daily-loss breach rejects new entries', () => {
     setLiveMode(db, 'shadow', 'test');
-    setCapitalStage(db, 1, 'test');
+    setTestStage(db, 1);
     updateLimits(db, { maxPerTradePct: 10, minCashReservePct: 10, maxDailyLossPct: 5 }, 'test');
     // book a shadow loss of $1 today (> 5% of $5)
     db.prepare(
@@ -102,7 +133,7 @@ describe('risk engine', () => {
 
   it('drawdown breach trips the automatic circuit breaker', () => {
     setLiveMode(db, 'shadow', 'test');
-    setCapitalStage(db, 1, 'test');
+    setTestStage(db, 1);
     updateLimits(db, { maxTotalDrawdownPct: 10, maxDailyLossPct: 10, maxPerTradePct: 10, minCashReservePct: 10 }, 'test');
     // stage cap $5; lose $1 => 20% drawdown ≥ 10%
     db.prepare(

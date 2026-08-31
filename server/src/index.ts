@@ -34,7 +34,7 @@ import { registerNetworkRoutes } from './api/routes/network.js';
 import { registerLiveRoutes } from './api/routes/live.js';
 import { registerDelegationRoutes } from './api/routes/delegation.js';
 import { registerInternRoutes } from './api/routes/intern.js';
-import { registerVersionRoutes } from './api/routes/version.js';
+import { assertProductionBuildIdentity, registerVersionRoutes } from './api/routes/version.js';
 import { LiveNetwork } from './live/liveNetwork.js';
 import { buildAdapters } from './live/adapters.js';
 import { buildSigner } from './live/signing/signer.js';
@@ -67,6 +67,7 @@ const HOUSE_BOTS: { name: string; strategyType: string }[] = [
 ];
 
 async function main() {
+  assertProductionBuildIdentity();
   // ── db + house bots ──
   const db = openDb(config.dbPath);
   const seedBots = db.transaction(() => {
@@ -133,7 +134,7 @@ async function main() {
   const signer = buildSigner();
   // the signer is handed to the adapters so the Robinhood venue can actually
   // sign; without it that venue registers as NotConfigured and refuses orders
-  const adapters = buildAdapters((s) => executor.getMark(s), signer);
+  const adapters = buildAdapters((s) => executor.getMark(s), signer, db);
 
   const app: AppContext = {
     db, engine, executor, candles, hub, holderSource, payoutQueue,
@@ -152,7 +153,7 @@ async function main() {
 
   // live-execution safety spine: shadow pipeline + sentinel. canary/live are
   // gated by preflight, not by an assertion — see riskEngine.setLiveMode()
-  const liveNetwork = new LiveNetwork(db, hub, candles, (s) => executor.getMark(s), signer);
+  const liveNetwork = new LiveNetwork(db, hub, candles, (s) => executor.getMark(s), signer, adapters);
   liveNetwork.attach(engine);
   liveNetwork.startSentinel(feedStatus);
   // Routes are registered above but only run per-request, so assigning here is
@@ -165,6 +166,7 @@ async function main() {
   // data is missing.
   const supervisor = new AutonomousSupervisor(db, hub, signer, adapters, feedStatus,
     () => executor.getMark('ETHUSDT') ?? null);
+  app.supervisor = supervisor;
 
   // the busy part: scanners observe every market with real data, continuously
   const opportunities = new OpportunityEngine(db, candles, memeFeed, hub);
@@ -421,15 +423,19 @@ async function main() {
   });
 
   // ── manager epoch cron ──
-  cron.schedule(config.epochCron, async () => {
-    try {
-      const result = await runEpoch(db, holderSource, payoutQueue);
-      hub.publish('manager', { event: 'epoch_closed', epochId: result.epochId });
-      server.log.info(`epoch ${result.epochId} closed: ${result.status}, $${result.profitUsd.toFixed(2)}`);
-    } catch (e) {
-      server.log.error(`epoch cron failed: ${String(e)}`);
-    }
-  });
+  if (config.payoutsEnabled) {
+    cron.schedule(config.epochCron, async () => {
+      try {
+        const result = await runEpoch(db, holderSource, payoutQueue);
+        hub.publish('manager', { event: 'epoch_closed', epochId: result.epochId });
+        server.log.info(`epoch ${result.epochId} closed: ${result.status}, $${result.profitUsd.toFixed(2)}`);
+      } catch (e) {
+        server.log.error(`epoch cron failed: ${String(e)}`);
+      }
+    });
+  } else {
+    server.log.warn('manager payouts disabled; paper P&L cannot create distributions');
+  }
 
   await server.listen({ port: config.port, host: '0.0.0.0' });
   console.log(`PUNKLABZ TERMINAL online :${config.port} [feed=${config.feedMode}]`);

@@ -86,8 +86,8 @@ export function Build() {
         <Panel title="MACHINE LABORATORY" term>
           <p>
             Tell the builder what you want in plain English — "buy bitcoin dips, sell at 5% profit" —
-            and it becomes a live bot competing in the arena. Backtest it first, deploy it for $20,
-            earn $10 every time someone clones it.
+            and it becomes a paper bot competing in the arena. Backtest it first, deploy it for 20
+            demo credits, and earn 10 demo credits every time someone clones it.
           </p>
           <p style={{ marginTop: 10 }}>
             <Link to="/login"><button className="primary">[ CONNECT TO BUILD ]</button></Link>
@@ -285,7 +285,7 @@ export function Build() {
                   ))}
                   <span className="spacer" />
                   <button className="primary" disabled={!draftValid || busy} onClick={deploy}>
-                    DEPLOY MACHINE · $20
+                    DEPLOY MACHINE · 20 CREDITS
                   </button>
                 </div>
                 {afterDeploy !== null && draftValid && (
@@ -330,7 +330,7 @@ export function Build() {
                   </div>
                 )}
                 <div className="dim" style={{ marginTop: 6, fontSize: 11 }}>
-                  Would owe ~${fmtUsd(bt.estimatedTradeTaxUsd, 0)} in trade tax over this period.
+                  Demo-credit trade tax estimate: {fmtUsd(bt.estimatedTradeTaxUsd, 0)} credits.
                 </div>
               </div>
             </Panel>

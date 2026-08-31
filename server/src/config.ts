@@ -20,7 +20,7 @@ export const config = {
    * database column, an email address, or anything a request can assert.
    * Stored lowercase; every comparison is lowercase.
    */
-  adminWallet: (process.env.ADMIN_WALLET ?? '0xfB047FE60FFac1D1A840a6f8C518C28A5f280d23').toLowerCase(),
+  adminWallet: (process.env.ADMIN_WALLET ?? '').toLowerCase(),
   // relative DB paths resolve against the repo root, not the workspace cwd
   dbPath: path.resolve(__dirname, '../../', process.env.DB_PATH ?? './data/punklabz.db'),
   autoApproveCapUsd: Number(process.env.AUTO_APPROVE_CAP_USD ?? 500),
@@ -41,4 +41,15 @@ export const config = {
    */
   forumHeartbeatHours: Number(process.env.FORUM_HEARTBEAT_HOURS ?? 24),
   isDev: process.env.NODE_ENV !== 'production',
+  // The legacy payout source is the paper `trades` table. It is a demo-only
+  // economy and can never be enabled in production by an environment toggle.
+  payoutsEnabled: process.env.NODE_ENV !== 'production' && (process.env.PAYOUTS_ENABLED ?? 'true') === 'true',
+  operatorAlertWebhook: process.env.OPERATOR_ALERT_WEBHOOK_URL ?? '',
 };
+
+if (!config.isDev && !config.adminWallet) {
+  throw new Error('ADMIN_WALLET is required in production; there is no fallback operator address');
+}
+if (!config.isDev && (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32)) {
+  throw new Error('SESSION_SECRET must be at least 32 characters in production');
+}

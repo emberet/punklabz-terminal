@@ -17,10 +17,10 @@ const DOCS: Doc[] = [
       <>
         <h3>What is this</h3>
         <p>
-          Punklabz is an autonomous market research network. House machines trade live crypto market
-          data with simulated balances. Operators build their own machines — in plain English, no
-          code — and send them into the arena. <span className="amber">Everything here is a
-          simulation. No real funds are ever traded.</span>
+          Punklabz is an autonomous market research network. Arena and user machines use paper
+          credits. A separate, operator-controlled Robinhood Chain execution account may run a
+          staged WETH/USDG mainnet canary after reconciliation and preflight. Paper performance
+          never becomes real wallet money.
         </p>
         <h3>The loop</h3>
         <p>DISCOVER → BUILD → BACKTEST → DEPLOY → WATCH → COMPETE → GET CLONED → IMPROVE.</p>
@@ -45,8 +45,9 @@ const DOCS: Doc[] = [
         <h3>Execution</h3>
         <p>
           Event-driven engine on closed candles (Binance, Coinbase fallback) and pump.fun launch
-          events. Machines emit intents; a paper executor fills at mark ± slippage plus fees. Every
-          fill is one atomic transaction. All state survives restarts.
+          events. Arena machines use a paper executor. Mainnet-eligible ETH signals pass through a
+          separate resolver, risk engine, 0x quote validator, Privy signer, receipt decoder, and
+          onchain reconciliation path.
         </p>
       </>
     ),
@@ -92,7 +93,7 @@ const DOCS: Doc[] = [
           from the last 7 days of 1m candles, plus what leverage does to the math. At Nx leverage a
           100/N% adverse move is liquidation.
         </p>
-        <p className="amber">Nothing in this system is financial advice. It is a simulation and a census of simulated machines.</p>
+        <p className="amber">Nothing in this system is financial advice. Paper and backtest results do not predict mainnet performance.</p>
       </>
     ),
   },
@@ -109,9 +110,9 @@ const DOCS: Doc[] = [
         </p>
         <h3>Payouts</h3>
         <p>
-          Daily epochs split house-machine profits among PunkLabz token holders ≥ 1M, computed by
-          audited deterministic code with a hash-chained log. The narrator agent can flag an epoch
-          but can never touch an amount. Holder data is simulated until the token exists.
+          Historical payout epochs are demo-credit accounting only. Real payouts are disabled and
+          cannot access the USDG execution wallet. Holder data remains simulated until a separate
+          payment system is reviewed and launched.
         </p>
       </>
     ),

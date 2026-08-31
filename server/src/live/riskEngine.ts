@@ -10,6 +10,8 @@ import { appendAudit } from '../audit/auditLog.js';
 // sides are hoisted `function` declarations used inside call bodies, never at
 // module-evaluation time. Do not convert either to a `const` arrow.
 import { evaluateDelegation, grantHeadroomUsd } from './delegation/delegationPolicy.js';
+import { accountForMode, custodyHoldings } from './accounts.js';
+import { alertOperator } from '../ops/alerts.js';
 
 // The independent gate. Every proposed order — from any agent, any strategy,
 // any mode above simulation — passes through here. It can always say no, and
@@ -63,20 +65,36 @@ export function setLiveMode(
       );
     }
   }
-  db.prepare(`UPDATE live_config SET mode = ?, updated_at = ? WHERE id = 1`).run(mode, Date.now());
+  db.prepare(
+    `UPDATE live_config SET mode = ?,
+       shadow_armed_at = CASE WHEN ? = 'simulation' THEN NULL ELSE shadow_armed_at END,
+       updated_at = ? WHERE id = 1`,
+  ).run(mode, mode, Date.now());
   appendAudit(db, actor, 'live_mode_change', { mode, preflightPassed: preflight?.passed ?? null });
 }
 
 export function haltNetwork(db: DB, reason: string, actor: string): void {
   getLiveConfig(db); // ensure the config row exists
-  db.prepare(`UPDATE live_config SET halted = 1, halt_reason = ?, updated_at = ? WHERE id = 1`).run(reason, Date.now());
+  db.prepare(
+    `UPDATE live_config SET halted = 1, halt_reason = ?,
+       shadow_armed_at = CASE WHEN mode='shadow' THEN NULL ELSE shadow_armed_at END,
+       updated_at = ? WHERE id = 1`,
+  ).run(reason, Date.now());
   appendAudit(db, actor, 'live_halt', { reason });
+  alertOperator('live_halt', reason);
 }
 
-export function resumeNetwork(db: DB, actor: string): void {
+export function resumeAfterSafetyChecks(
+  db: DB,
+  actor: string,
+  evidence: { transactionsRecovered: boolean; reconciliationClean: boolean; preflightPassed: boolean },
+): void {
+  if (!evidence.transactionsRecovered || !evidence.reconciliationClean || !evidence.preflightPassed) {
+    throw new Error('BLOCKED: resume requires transaction recovery, clean reconciliation, and passing preflight');
+  }
   getLiveConfig(db); // ensure the config row exists
   db.prepare(`UPDATE live_config SET halted = 0, halt_reason = NULL, updated_at = ? WHERE id = 1`).run(Date.now());
-  appendAudit(db, actor, 'live_resume', {});
+  appendAudit(db, actor, 'live_resume', evidence);
 }
 
 export function stageCapUsd(stage: number): number {
@@ -111,6 +129,37 @@ function snapshotPortfolio(
     .all(...acctArgs) as { bot_id: number | null; approved_notional_micro: number | null }[];
   const perBot = new Map<number, number>();
   let deployed = 0;
+  let openPositions = 0;
+
+  // Confirmed fills remain exposure after their order leaves the pending
+  // states. Replay average-cost lots so WETH cannot disappear from risk merely
+  // because its receipt became final.
+  const fills = db.prepare(
+    `SELECT bot_id, instrument_id, side, qty, executed_price FROM live_ledger
+     WHERE 1=1${acctFilter} ORDER BY id`,
+  ).all(...acctArgs) as {
+    bot_id: number | null; instrument_id: string; side: string; qty: number; executed_price: number;
+  }[];
+  const lots = new Map<string, { botId: number | null; qty: number; cost: number }>();
+  for (const fill of fills) {
+    const key = `${fill.bot_id ?? 'none'}:${fill.instrument_id}`;
+    const lot = lots.get(key) ?? { botId: fill.bot_id, qty: 0, cost: 0 };
+    if (fill.side === 'buy') {
+      lot.qty += fill.qty;
+      lot.cost += fill.qty * fill.executed_price;
+    } else if (lot.qty > 0) {
+      const sold = Math.min(lot.qty, fill.qty);
+      lot.cost -= sold * (lot.cost / lot.qty);
+      lot.qty -= sold;
+    }
+    lots.set(key, lot);
+  }
+  for (const lot of lots.values()) {
+    if (lot.qty <= 1e-9) continue;
+    deployed += lot.cost;
+    openPositions++;
+    if (lot.botId !== null) perBot.set(lot.botId, (perBot.get(lot.botId) ?? 0) + lot.cost);
+  }
   for (const o of openStates) {
     const usd = fromMicro(o.approved_notional_micro ?? 0);
     deployed += usd;
@@ -146,7 +195,7 @@ function snapshotPortfolio(
   return {
     deployedUsd: deployed,
     perBotDeployedUsd: perBot,
-    openPositions: openStates.length,
+    openPositions: openPositions + openStates.length,
     todayPnlUsd: fromMicro(today.s),
     peakNavUsd: peak,
     navUsd,
@@ -160,6 +209,11 @@ export interface EdgeInput {
   bufferBps: number;
   netEdgeBps: number;
   edgeModel: string;
+}
+
+export interface RiskEvaluationContext {
+  /** Existing exposure being reduced. Entry-only constraints do not trap it. */
+  isExit?: boolean;
 }
 
 /**
@@ -183,6 +237,7 @@ export function evaluateIntent(
   edge?: EdgeInput,
   accountId?: number,
   delegation?: DelegationContext,
+  context: RiskEvaluationContext = {},
 ): RiskDecision {
   const cfg = getLiveConfig(db);
   const stageCap = stageCapUsd(cfg.capitalStage);
@@ -209,10 +264,11 @@ export function evaluateIntent(
   // force does not touch any of them. If one of those rejects a forced trade,
   // it stays rejected.
   const forced = typeof intent.forcedBy === 'string' && intent.forcedBy.length > 0;
+  const isExit = context.isExit === true;
 
   if (intent.confidence < cfg.limits.confidenceThreshold) {
-    if (forced)
-      pass('confidence', `composite ${intent.confidence} < threshold ${cfg.limits.confidenceThreshold} — OVERRIDDEN by ${intent.forcedBy}`);
+    if (forced || isExit)
+      pass('confidence', `composite ${intent.confidence} < threshold ${cfg.limits.confidenceThreshold} — ${isExit ? 'existing exposure exit' : `OVERRIDDEN by ${intent.forcedBy}`}`);
     else
       fail('confidence', `composite ${intent.confidence} < threshold ${cfg.limits.confidenceThreshold}`);
   } else pass('confidence', `composite ${intent.confidence} ≥ ${cfg.limits.confidenceThreshold}`);
@@ -220,7 +276,7 @@ export function evaluateIntent(
   if (edge) {
     const detail = `edge ${(edge.grossEdgeBps / 100).toFixed(2)}% − fees ${(edge.feeBps / 100).toFixed(2)}% − slippage ${(edge.slippageBps / 100).toFixed(2)}% − buffer ${(edge.bufferBps / 100).toFixed(2)}% = ${(edge.netEdgeBps / 100).toFixed(2)}%`;
     if (edge.netEdgeBps <= 0) {
-      if (forced) pass('net_edge', `${detail} — OVERRIDDEN by ${intent.forcedBy}`);
+      if (forced || isExit) pass('net_edge', `${detail} — ${isExit ? 'existing exposure exit' : `OVERRIDDEN by ${intent.forcedBy}`}`);
       else fail('net_edge', detail);
     } else {
       pass('net_edge', `net ${(edge.netEdgeBps / 100).toFixed(2)}% after costs (${edge.edgeModel})`);
@@ -230,8 +286,11 @@ export function evaluateIntent(
   // Recorded as its own check so a forced order is never mistaken for an
   // earned one when someone reads the risk log a month from now.
   if (forced) pass('operator_force', `signal gates overridden by ${intent.forcedBy}; safety gates unchanged`);
+  if (isExit) pass('exit', 'reducing an existing ledger position; entry-only exposure gates do not apply');
 
   const snap = snapshotPortfolio(db, cfg.limits, stageCap, accountId);
+  // Exits may bypass entry-only portfolio gates, but they still move assets and
+  // remain bounded by the network's per-transaction notional ceiling.
   const maxPerTrade = (stageCap * cfg.limits.maxPerTradePct) / 100;
 
   // A delegated order can never exceed the wallet owner's own remaining
@@ -253,31 +312,64 @@ export function evaluateIntent(
     fail('min_size', `size $${size.toFixed(2)} below the $${MIN_TRADE_USD.toFixed(2)} floor — not worth fees`);
   else pass('min_size', `size $${size.toFixed(2)}`);
 
-  if (snap.openPositions >= cfg.limits.maxSimultaneousPositions)
+  if (isExit) pass('max_positions', 'exit reduces an existing position');
+  else if (snap.openPositions >= cfg.limits.maxSimultaneousPositions)
     fail('max_positions', `${snap.openPositions} open ≥ limit ${cfg.limits.maxSimultaneousPositions}`);
   else pass('max_positions', `${snap.openPositions}/${cfg.limits.maxSimultaneousPositions} positions`);
 
   const reserve = (stageCap * cfg.limits.minCashReservePct) / 100;
-  if (snap.deployedUsd + size > stageCap - reserve)
+  if (isExit) pass('cash_reserve', 'exit returns capital to settlement cash');
+  else if (snap.deployedUsd + size > stageCap - reserve)
     fail('cash_reserve', `would breach ${cfg.limits.minCashReservePct}% reserve (deployed $${snap.deployedUsd.toFixed(2)} + $${size.toFixed(2)} > $${(stageCap - reserve).toFixed(2)})`);
   else pass('cash_reserve', 'reserve intact');
+
+  const realMoney = cfg.mode === 'canary' || cfg.mode === 'live';
+  if (realMoney && accountId !== undefined && intent.side === 'buy' && !isExit) {
+    const cash = custodyHoldings(db, accountId).get('USDG') ?? 0;
+    const commitments = db.prepare(
+      `SELECT COALESCE(SUM(approved_notional_micro),0) n FROM live_orders
+       WHERE execution_account_id=? AND side='buy'
+         AND state IN ('risk_approved','submitting','submitted','pending','open','partial')`,
+    ).get(accountId) as { n: number };
+    const available = cash - fromMicro(commitments.n) - reserve;
+    if (size > available + 1e-9) {
+      fail('available_cash', `reconciled USDG $${cash.toFixed(2)} minus commitments and reserve leaves $${Math.max(0, available).toFixed(2)}`);
+    } else pass('available_cash', `$${available.toFixed(2)} reconciled USDG available after commitments and reserve`);
+  }
 
   if (intent.botId !== null) {
     const botDeployed = snap.perBotDeployedUsd.get(intent.botId) ?? 0;
     const maxPerBot = (stageCap * cfg.limits.maxPerMachinePct) / 100;
-    if (botDeployed + size > maxPerBot)
+    if (isExit) pass('per_machine', 'exit reduces machine exposure');
+    else if (botDeployed + size > maxPerBot)
       fail('per_machine', `machine exposure $${(botDeployed + size).toFixed(2)} > cap $${maxPerBot.toFixed(2)}`);
     else pass('per_machine', `machine exposure ok`);
+
+    if (realMoney && !isExit) {
+      const allocation = db.prepare(
+        `SELECT allocated_usdg FROM manager_capital_allocations
+         WHERE execution_account_id=? AND bot_id=? AND active=1`,
+      ).get(accountId, intent.botId) as { allocated_usdg: number } | undefined;
+      if (!allocation || allocation.allocated_usdg <= 0) {
+        fail('manager_allocation', 'Manager has not allocated real USDG to this bot');
+      } else if (botDeployed + size > allocation.allocated_usdg + 1e-9) {
+        fail('manager_allocation', `machine exposure $${(botDeployed + size).toFixed(2)} exceeds Manager allocation $${allocation.allocated_usdg.toFixed(2)}`);
+      } else {
+        pass('manager_allocation', `$${allocation.allocated_usdg.toFixed(2)} USDG allocated by Manager`);
+      }
+    }
   }
 
   const maxDailyLoss = (stageCap * cfg.limits.maxDailyLossPct) / 100;
-  if (-snap.todayPnlUsd >= maxDailyLoss && maxDailyLoss > 0)
+  if (isExit) pass('daily_loss', 'loss gate permits exposure reduction');
+  else if (-snap.todayPnlUsd >= maxDailyLoss && maxDailyLoss > 0)
     fail('daily_loss', `today ${snap.todayPnlUsd.toFixed(2)} breaches max daily loss $${maxDailyLoss.toFixed(2)}`);
   else pass('daily_loss', `today ${snap.todayPnlUsd >= 0 ? '+' : ''}$${snap.todayPnlUsd.toFixed(2)}`);
 
   const ddPct = snap.peakNavUsd > 0 ? ((snap.peakNavUsd - snap.navUsd) / snap.peakNavUsd) * 100 : 0;
   if (ddPct >= cfg.limits.maxTotalDrawdownPct && stageCap > 0) {
-    fail('drawdown', `drawdown ${ddPct.toFixed(1)}% ≥ kill threshold ${cfg.limits.maxTotalDrawdownPct}% — HALTING`);
+    if (isExit) pass('drawdown', `drawdown ${ddPct.toFixed(1)}% triggered halt; this exit may reduce exposure`);
+    else fail('drawdown', `drawdown ${ddPct.toFixed(1)}% ≥ kill threshold ${cfg.limits.maxTotalDrawdownPct}% — HALTING`);
     haltNetwork(db, `automatic circuit breaker: drawdown ${ddPct.toFixed(1)}%`, 'risk-engine');
   } else pass('drawdown', `drawdown ${ddPct.toFixed(1)}%`);
 
@@ -327,27 +419,39 @@ export interface PromotionEvidence {
   drawdownPct: number;
   reconciliationClean: boolean;
   failedOrders: number;
+  capitalStage: number;
+  collateralizedUsdg: number;
 }
 
 /** what a stage must show before the next one unlocks */
 export function promotionEvidence(db: DB): PromotionEvidence {
-  const fills = db
-    .prepare(`SELECT COUNT(*) n FROM live_orders WHERE state = 'filled' AND mode IN ('canary','live')`)
-    .get() as { n: number };
-  const failed = db
-    .prepare(`SELECT COUNT(*) n FROM live_orders WHERE state IN ('failed','reconciling')`)
-    .get() as { n: number };
-  const lastRecon = db
-    .prepare(`SELECT within_tolerance FROM balance_snapshots ORDER BY id DESC LIMIT 1`)
-    .get() as { within_tolerance: number } | undefined;
   const cfg = getLiveConfig(db);
-  const snap = snapshotPortfolio(db, cfg.limits, stageCapUsd(cfg.capitalStage));
+  const account = accountForMode(db, 'canary', 'evm:robinhood');
+  const fills = db
+    .prepare(
+      `SELECT COUNT(*) n FROM live_orders
+       WHERE execution_account_id=? AND capital_stage=? AND clean_fill=1
+         AND forced_by IS NULL AND mode IN ('canary','live')`,
+    )
+    .get(account.id, cfg.capitalStage) as { n: number };
+  const failed = db
+    .prepare(
+      `SELECT COUNT(*) n FROM live_orders WHERE execution_account_id=?
+       AND state IN ('failed','reconciling','submitting','pending','open','partial')`,
+    )
+    .get(account.id) as { n: number };
+  const lastRecon = db
+    .prepare(`SELECT status FROM reconciliation_runs WHERE execution_account_id=? ORDER BY id DESC LIMIT 1`)
+    .get(account.id) as { status: string } | undefined;
+  const snap = snapshotPortfolio(db, cfg.limits, stageCapUsd(cfg.capitalStage), account.id);
   const dd = snap.peakNavUsd > 0 ? ((snap.peakNavUsd - snap.navUsd) / snap.peakNavUsd) * 100 : 0;
   return {
     cleanFills: fills.n,
     drawdownPct: dd,
-    reconciliationClean: lastRecon ? lastRecon.within_tolerance === 1 : true,
+    reconciliationClean: lastRecon?.status === 'clean',
     failedOrders: failed.n,
+    capitalStage: cfg.capitalStage,
+    collateralizedUsdg: custodyHoldings(db, account.id).get('USDG') ?? 0,
   };
 }
 
@@ -356,27 +460,32 @@ export function promotionEvidence(db: DB): PromotionEvidence {
  * requires evidence from the stage below: real clean fills, controlled
  * drawdown, clean reconciliation and no unresolved orders.
  */
-export function setCapitalStage(db: DB, stage: number, actor: string, force = false): void {
+export function setCapitalStage(db: DB, stage: number, actor: string): void {
   getLiveConfig(db); // ensure the config row exists
   const cfg = getLiveConfig(db);
   const clamped = Math.max(0, Math.min(CAPITAL_STAGES.length - 1, Math.floor(stage)));
 
-  if (clamped > cfg.capitalStage && !force) {
+  if (clamped > cfg.capitalStage) {
+    if (clamped !== cfg.capitalStage + 1) throw new Error('BLOCKED: capital stages must advance one step at a time');
     const ev = promotionEvidence(db);
     const blockers: string[] = [];
     // stage 1 is the first real-capital step; it needs infrastructure, not fills
-    const requiredFills = clamped === 1 ? 0 : 10 * clamped;
+    const requiredFills = clamped === 1 ? 0 : 10;
     if (ev.cleanFills < requiredFills)
       blockers.push(`${ev.cleanFills} clean fill(s), ${requiredFills} required for stage ${clamped}`);
     if (ev.drawdownPct > cfg.limits.maxTotalDrawdownPct / 2)
       blockers.push(`drawdown ${ev.drawdownPct.toFixed(1)}% is more than half the kill threshold`);
     if (!ev.reconciliationClean) blockers.push('last reconciliation did not match the venue');
     if (ev.failedOrders > 0) blockers.push(`${ev.failedOrders} failed/unresolved order(s) outstanding`);
+    const targetCap = stageCapUsd(clamped);
+    if (ev.collateralizedUsdg < targetCap)
+      blockers.push(`${ev.collateralizedUsdg.toFixed(6)} recorded USDG, ${targetCap} required for stage ${clamped}`);
     if (blockers.length) {
       throw new Error(`BLOCKED: stage ${clamped} promotion needs —\n  ${blockers.join('\n  ')}`);
     }
   }
 
   db.prepare(`UPDATE live_config SET capital_stage = ?, updated_at = ? WHERE id = 1`).run(clamped, Date.now());
-  appendAudit(db, actor, 'capital_stage_change', { stage: clamped, forced: force });
+  appendAudit(db, actor, 'capital_stage_change', { stage: clamped, forced: false });
+  alertOperator('capital_stage_change', `stage ${clamped} set by ${actor}`);
 }

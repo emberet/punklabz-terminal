@@ -1,13 +1,16 @@
 import { createSign, createPrivateKey } from 'node:crypto';
+import fs from 'node:fs';
 import { getAddress, isAddress } from 'viem';
+import { ROBINHOOD_MAINNET_CHAIN_ID, USDG, WETH_ROBINHOOD } from '@punklabz/shared';
 import type { SignRequest, SignerReadiness, TradingSigner } from './signer.js';
+import { ZEROX_ALLOWANCE_HOLDER } from '../instrumentResolver.js';
 
 // PRIVY SERVER WALLET.
 //
-// PunkLabz holds an app id, a wallet id and a PUBLIC address. The key lives
-// inside Privy's enclave and never transits this process — that property is
-// the whole reason for using a remote signer, and nothing in this file may
-// weaken it.
+// The trading-wallet key lives inside Privy's enclave and never transits this
+// process. PunkLabz does use a separate P-256 authorization key to approve
+// signer requests; production reads that key from a systemd credential file,
+// never from the repository or ordinary environment variables.
 //
 // Three independent limits stand between an agent and the wallet:
 //
@@ -42,6 +45,8 @@ export interface PrivyConfig {
   allowedTargets: string[];
   /** hard ceiling on NATIVE value per transaction, in wei */
   maxNativeValueWei: bigint;
+  /** policy ids reviewed and approved for this release */
+  expectedPolicyIds?: string[];
 }
 
 /**
@@ -107,6 +112,7 @@ export interface SignerGuards {
   policyCount: number;
   /** true only when BOTH walls are real at Privy */
   fullyGuarded: boolean;
+  policyIds: string[];
 }
 
 export class PrivySigner implements TradingSigner {
@@ -116,13 +122,25 @@ export class PrivySigner implements TradingSigner {
   private policyIds: string[] = [];
   private readonly allowed: Set<string>;
 
+  private appGuarded(): boolean {
+    const required = new Set([
+      USDG.address.toLowerCase(), WETH_ROBINHOOD.address.toLowerCase(), ZEROX_ALLOWANCE_HOLDER.toLowerCase(),
+    ]);
+    return this.cfg.maxNativeValueWei === 0n
+      && this.allowed.size === required.size
+      && [...required].every((address) => this.allowed.has(address));
+  }
+
   /** Read after isReady(); drives the blocking preflight check. */
   guards(): SignerGuards {
+    const expected = this.cfg.expectedPolicyIds ?? [];
+    const policyMatch = expected.length > 0 && expected.every((id) => this.policyIds.includes(id));
     return {
       ownerEnforced: !!this.ownerId,
       ownerId: this.ownerId,
       policyCount: this.policyIds.length,
-      fullyGuarded: !!this.ownerId && this.policyIds.length > 0,
+      fullyGuarded: !!this.ownerId && !!this.cfg.authorizationKey && policyMatch && this.appGuarded(),
+      policyIds: [...this.policyIds],
     };
   }
 
@@ -269,10 +287,18 @@ export class PrivySigner implements TradingSigner {
         ? `${this.policyIds.length} policy(ies) attached`
         : 'NO POLICY — nothing caps a transaction at the enclave');
 
+      const expectedPolicies = this.cfg.expectedPolicyIds ?? [];
+      const policyMatch = expectedPolicies.length > 0 &&
+        expectedPolicies.every((id) => this.policyIds.includes(id));
+      const appGuarded = this.appGuarded();
+      const fullyGuarded = !!this.ownerId && !!this.cfg.authorizationKey && policyMatch && appGuarded;
       return {
-        ready: true,
+        ready: fullyGuarded,
         address: this.verifiedAddress,
-        detail: `privy wallet ${this.cfg.walletId} verified as ${this.verifiedAddress}; ${guards.join('; ')}`,
+        detail: `privy wallet ${this.cfg.walletId} verified as ${this.verifiedAddress}; ${guards.join('; ')}; ` +
+          (!this.cfg.authorizationKey ? 'AUTHORIZATION KEY MISSING; ' : '') +
+          (policyMatch ? 'approved policy ids match; ' : 'APPROVED POLICY IDS MISSING OR MISMATCHED; ') +
+          (appGuarded ? 'app target/native-value guard exact' : 'APP TARGET ALLOWLIST OR NATIVE-VALUE GUARD IS NOT EXACT'),
       };
     } catch (e) {
       return {
@@ -295,15 +321,18 @@ export class PrivySigner implements TradingSigner {
 
     // ── wall 2: what this process is willing to put its name to ──
     if (!isAddress(req.to)) throw new Error('refusing to sign: destination is not a valid address');
+    if (req.chainId !== ROBINHOOD_MAINNET_CHAIN_ID) {
+      throw new Error(`refusing to sign: chain ${req.chainId} is not Robinhood mainnet ${ROBINHOOD_MAINNET_CHAIN_ID}`);
+    }
     if (this.allowed.size > 0 && !this.allowed.has(req.to.toLowerCase())) {
       throw new Error(
         `refusing to sign: ${getAddress(req.to)} is not on the signer's allowlist. ` +
           'Add it to SIGNER_ALLOWED_TARGETS only after verifying it against the venue\'s own documentation.',
       );
     }
-    if (req.value > this.cfg.maxNativeValueWei) {
+    if (req.value !== 0n || req.value > this.cfg.maxNativeValueWei) {
       throw new Error(
-        `refusing to sign: native value ${req.value} wei exceeds the signer ceiling ${this.cfg.maxNativeValueWei} wei`,
+        `refusing to sign: native value ${req.value} wei is forbidden; signer ceiling is ${this.cfg.maxNativeValueWei} wei`,
       );
     }
     if (!req.intentId) throw new Error('refusing to sign: no intent id — every signature must be attributable');
@@ -352,15 +381,27 @@ export class PrivySigner implements TradingSigner {
 
 /** Read the signer's configuration from the environment. Never logs secrets. */
 export function privyConfigFromEnv(): PrivyConfig {
-  const maxEth = process.env.SIGNER_MAX_NATIVE_ETH ?? '0.05';
+  const maxEth = process.env.SIGNER_MAX_NATIVE_ETH ?? '0';
+  const keyFile = process.env.PRIVY_AUTHORIZATION_KEY_FILE;
+  if (process.env.NODE_ENV === 'production' && process.env.PRIVY_AUTHORIZATION_KEY) {
+    throw new Error('PRIVY_AUTHORIZATION_KEY is forbidden in production; use PRIVY_AUTHORIZATION_KEY_FILE');
+  }
+  let authorizationKey: string | undefined;
+  if (keyFile) {
+    authorizationKey = fs.readFileSync(keyFile, 'utf8').trim();
+    if (!authorizationKey) throw new Error('PRIVY_AUTHORIZATION_KEY_FILE is empty');
+  } else if (process.env.NODE_ENV !== 'production') {
+    authorizationKey = process.env.PRIVY_AUTHORIZATION_KEY || undefined;
+  }
   return {
     appId: process.env.PRIVY_APP_ID ?? '',
     appSecret: process.env.PRIVY_APP_SECRET ?? '',
     walletId: process.env.PRIVY_WALLET_ID ?? '',
     expectedAddress: process.env.TRADING_WALLET_ADDRESS ?? '',
-    authorizationKey: process.env.PRIVY_AUTHORIZATION_KEY || undefined,
+    authorizationKey,
     allowedTargets: (process.env.SIGNER_ALLOWED_TARGETS ?? '')
       .split(',').map((s) => s.trim()).filter(Boolean),
     maxNativeValueWei: BigInt(Math.round(Number(maxEth) * 1e18)),
+    expectedPolicyIds: (process.env.PRIVY_POLICY_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
   };
 }

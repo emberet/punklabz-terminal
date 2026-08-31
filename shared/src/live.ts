@@ -57,7 +57,7 @@ export const MIN_TRADE_USD = 0.5;
 
 export const DEFAULT_LIMITS: RiskLimits = {
   totalCapitalUsd: 100,
-  maxPerTradePct: 5,
+  maxPerTradePct: 10,
   maxPerMachinePct: 15,
   maxSimultaneousPositions: 4,
   maxCorrelatedExposurePct: 25,
@@ -107,6 +107,8 @@ export type OrderState =
   | 'risk_approved'
   | 'risk_rejected'
   | 'submitting'
+  | 'submitted'
+  | 'pending'
   | 'open'
   | 'partial'
   | 'filled'
@@ -131,26 +133,35 @@ export interface LiveStatusView {
   haltReason: string | null;
   capitalStage: number;
   stageCapUsd: number;
-  limits: RiskLimits;
+  /** admin-only; public status does not expose exact risk policy */
+  limits?: RiskLimits;
   nav: { totalUsd: number; deployedUsd: number; availableUsd: number; reserveUsd: number };
   today: { netPnlUsd: number; feesUsd: number; drawdownPct: number };
   throughput: { marketsWatched: number; signals: number; approved: number; executed: number; rejected: number };
-  liveSignerConfigured: boolean;
+  liveSignerConfigured?: boolean;
 
-  // ── the execution boundary, measured at request time ──
-  // `signer` is a live round trip to the signing service and `adapterStatus`
-  // a real health probe — neither is a config value echoed back. A balance of
-  // `null` means we could not read the chain, which is NOT the same as zero.
+  // ── the execution boundary ──
+  // Admin status measures signer/adapter/balances at request time. Public status
+  // omits custody and signer fields and serves only coarse local health.
   network: string;
   chainId: number;
   settlementSymbol: string;
-  signer: { kind: string; ready: boolean; address: string | null; detail: string };
-  walletAddress: string | null;
+  signer?: { kind: string; ready: boolean; address: string | null; detail: string };
+  walletAddress?: string | null;
   adapterStatus: string;
-  settlementBalance: number | null;
-  ethGasBalance: number | null;
-  lastReconciliation: { at: number; clean: boolean } | null;
-  preflightStatus: { at: number; mode: string; passed: boolean } | null;
+  settlementBalance?: number | null;
+  ethGasBalance?: number | null;
+  baseAssetBalance?: number | null;
+  authorizedCapitalUsd?: number;
+  pendingTransactions?: number;
+  promotion?: {
+    cleanFills: number;
+    reconciliationClean: boolean;
+    failedOrders: number;
+    collateralizedUsdg: number;
+  };
+  lastReconciliation?: { at: number; clean: boolean } | null;
+  preflightStatus?: { at: number; mode: string; passed: boolean } | null;
 }
 
 export interface CompositeConfidence {

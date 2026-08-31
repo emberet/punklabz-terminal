@@ -87,13 +87,12 @@ export interface RpcHealth {
  * and for health reporting that is exactly what we need to know.
  */
 export async function probeEndpoints(chainId = ROBINHOOD_MAINNET_CHAIN_ID): Promise<RpcHealth[]> {
-  const out: RpcHealth[] = [];
-  for (const endpoint of endpointsFor(chainId)) {
+  return Promise.all(endpointsFor(chainId).map(async (endpoint): Promise<RpcHealth> => {
     const started = Date.now();
     try {
       const probe = createPublicClient({ chain: rhChainDef(chainId), transport: http(endpoint.url, { timeout: 8000, retryCount: 0 }) });
       const [reported, block] = await Promise.all([probe.getChainId(), probe.getBlockNumber()]);
-      out.push({
+      return {
         label: endpoint.label,
         url: redact(endpoint.url),
         ok: reported === chainId,
@@ -101,16 +100,15 @@ export async function probeEndpoints(chainId = ROBINHOOD_MAINNET_CHAIN_ID): Prom
         chainIdReported: reported,
         latencyMs: Date.now() - started,
         error: reported === chainId ? null : `endpoint reports chain ${reported}, expected ${chainId}`,
-      });
+      };
     } catch (e) {
-      out.push({
+      return {
         label: endpoint.label, url: redact(endpoint.url), ok: false, blockNumber: null,
         chainIdReported: null, latencyMs: Date.now() - started,
         error: String(e instanceof Error ? e.message : e).slice(0, 160),
-      });
+      };
     }
-  }
-  return out;
+  }));
 }
 
 /** RPC URLs carry API keys. They are never logged or returned whole. */

@@ -7,10 +7,19 @@ Wants=network-online.target
 Type=simple
 User=punklabz
 WorkingDirectory=/opt/punklabz
-ExecStart=/usr/bin/node server/dist/index.js
+ExecStart=/usr/bin/flock -n /opt/punklabz/data/execution.lock /usr/bin/node server/dist/index.js
 Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
+EnvironmentFile=/opt/punklabz/.env
+LoadCredential=privy_authorization_key:/etc/punklabz/privy-authorization-key
+Environment=PRIVY_AUTHORIZATION_KEY_FILE=%d/privy_authorization_key
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/punklabz/data /opt/punklabz/backups
 # secrets live in /opt/punklabz/.env (never rsynced by deploy.sh)
 
 [Install]

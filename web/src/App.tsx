@@ -73,7 +73,7 @@ export function App() {
             ) : (
               <NavLink to="/login">[ CONNECT ]</NavLink>
             )}
-            <div style={{ marginTop: 6 }}>simulation · no real funds</div>
+            <div style={{ marginTop: 6 }}>paper credits · mainnet status shown explicitly</div>
           </div>
         </nav>
         <div className="main">

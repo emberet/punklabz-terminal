@@ -5,12 +5,9 @@
 // in the client bundle. A key that transits this process is a key you have to
 // assume is compromised.
 //
-// The interface below is the contract a real signer must satisfy. This file
-// deliberately ships only NoSigner. Implementing a signer that can actually
-// move funds is an operator task performed against a hardware-backed or
-// hosted signing service (Turnkey, Fireblocks, Privy, an internal HSM), with
-// its own auth, its own audit trail, and a spending policy that is enforced on
-// the signer side as well as here — so a bug in PunkLabz cannot drain a wallet.
+// The interface below is the contract a signer must satisfy. This build ships
+// a fail-closed NoSigner and a Privy implementation backed by an external
+// wallet, authorization owner, and signer-side policy.
 
 import { PrivySigner, privyConfigFromEnv } from './privySigner.js';
 
@@ -41,6 +38,13 @@ export interface TradingSigner {
   getAddress(): Promise<string | null>;
   isReady(): Promise<SignerReadiness>;
   signTransaction(req: SignRequest): Promise<string>;
+  guards?(): {
+    ownerEnforced: boolean;
+    ownerId: string | null;
+    policyCount: number;
+    policyIds?: string[];
+    fullyGuarded: boolean;
+  };
 }
 
 export interface SignerReadiness {

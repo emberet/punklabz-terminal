@@ -17,7 +17,7 @@ import { buildDelegationProvider, NullDelegationProvider } from '../src/live/del
 import { revocationCache, RevocationCacheImpl } from '../src/live/delegation/revocationCache.js';
 import type { LiveInstrumentSpec } from '../src/live/instrumentResolver.js';
 import {
-  evaluateIntent, getLiveConfig, haltNetwork, setCapitalStage, updateLimits,
+  evaluateIntent, getLiveConfig, haltNetwork, updateLimits,
 } from '../src/live/riskEngine.js';
 import type { OrderIntent } from '@punklabz/shared';
 import { toMicro } from '../src/money.js';
@@ -504,7 +504,7 @@ describe('the risk gate with a grant attached', () => {
     tier1Evidence(db, 40);          // enough fills for the top capital stage
     forceStoredTier(db, 1);
     revocationCache.hydrate(db);
-    setCapitalStage(db, 4, 'test'); // $100 network cap
+    db.prepare(`UPDATE live_config SET capital_stage=4 WHERE id=1`).run(); // test fixture: $100 network cap
     updateLimits(db, { maxPerTradePct: 10 }, 'test'); // network would allow $10
     grantId = makeGrant(db).grantId;
     activateDirectly(db, grantId);
@@ -550,7 +550,7 @@ describe('the risk gate with a grant attached', () => {
 
     const d = evaluateIntent(db, intent({ side: 'sell' }), undefined, undefined, {
       grantId, hasOpenLot: true,
-    });
+    }, { isExit: true });
     expect(evaluatedSize(d)).toBe(10); // the network cap, not the exhausted grant cap
     expect(d.checks.find((c) => c.name === 'delegation_exit')?.pass).toBe(true);
     expect(d.checks.some((c) => c.name === 'delegation_headroom')).toBe(false);
@@ -560,7 +560,7 @@ describe('the risk gate with a grant attached', () => {
     db.prepare(`UPDATE delegation_grants SET status = 'revoked' WHERE id = ?`).run(grantId);
     const d = evaluateIntent(db, intent({ side: 'sell' }), undefined, undefined, {
       grantId, hasOpenLot: true,
-    });
+    }, { isExit: true });
     expect(d.checks.find((c) => c.name === 'delegation_exit_only')?.pass).toBe(true);
     expect(d.approved).toBe(true);
   });
@@ -575,6 +575,15 @@ describe('the risk gate with a grant attached', () => {
   it('network limits still bind a delegated order — the grant cannot widen them', () => {
     haltNetwork(db, 'operator halt', 'test');
     const d = evaluateIntent(db, intent(), undefined, undefined, { grantId, hasOpenLot: false });
+    expect(d.approved).toBe(false);
+    expect(d.checks.find((c) => c.name === 'kill_switch')?.pass).toBe(false);
+  });
+
+  it('the kill switch also blocks a delegated exit', () => {
+    haltNetwork(db, 'operator halt', 'test');
+    const d = evaluateIntent(db, intent({ side: 'sell' }), undefined, undefined, {
+      grantId, hasOpenLot: true,
+    }, { isExit: true });
     expect(d.approved).toBe(false);
     expect(d.checks.find((c) => c.name === 'kill_switch')?.pass).toBe(false);
   });

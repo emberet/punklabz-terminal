@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { COST_MODEL, edgeForUniverse, edgeLines, estimateEdge } from '../src/live/edge.js';
 import { openTestDb } from '../src/db/db.js';
-import { evaluateIntent, setCapitalStage, setLiveMode, updateLimits } from '../src/live/riskEngine.js';
+import { evaluateIntent, setLiveMode, updateLimits } from '../src/live/riskEngine.js';
 
 describe('net edge accounting', () => {
   it('net edge = gross − fees − slippage − buffer', () => {
@@ -38,7 +38,7 @@ describe('net edge accounting', () => {
     db.prepare(`INSERT INTO users (email, display_name, created_at) VALUES ('e@x.com','e',1)`).run();
     db.prepare(`INSERT INTO bots (name, kind, strategy_type, config_json, created_at) VALUES ('T','house','momentum','{}',1)`).run();
     setLiveMode(db, 'shadow', 'test');
-    setCapitalStage(db, 1, 'test');
+    db.prepare(`UPDATE live_config SET capital_stage=1 WHERE id=1`).run();
     updateLimits(db, { maxPerTradePct: 10, minCashReservePct: 10 }, 'test');
 
     const intent = {

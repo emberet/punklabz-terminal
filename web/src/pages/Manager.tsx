@@ -20,23 +20,24 @@ export function Manager() {
   const [busy, setBusy] = useState(false);
 
   const load = () => {
-    void api.get<{ epochs: EpochView[] }>('/api/manager/epochs').then((r) => {
+    if (!user?.isAdmin) return;
+    void api.get<{ epochs: EpochView[] }>('/api/admin/manager/epochs').then((r) => {
       setEpochs(r.epochs);
       if (selected === null && r.epochs.length) setSelected(r.epochs[0].id);
     });
-    void api.get<{ entries: any[]; chain: { ok: boolean } }>('/api/manager/audit').then(setAudit).catch(() => {});
+    void api.get<{ entries: any[]; chain: { ok: boolean } }>('/api/admin/manager/audit').then(setAudit).catch(() => {});
   };
 
   useEffect(() => {
     load();
     const un = wsClient.sub('manager', () => load());
     return un;
-  }, []);
+  }, [user?.isAdmin]);
 
   useEffect(() => {
     if (selected === null) return;
     void api
-      .get<{ epoch: EpochView; items: PayoutItemView[] }>(`/api/manager/epochs/${selected}`)
+      .get<{ epoch: EpochView; items: PayoutItemView[] }>(`/api/admin/manager/epochs/${selected}`)
       .then((r) => {
         setDetail(r.epoch);
         setItems(r.items);
@@ -47,7 +48,7 @@ export function Manager() {
     setBusy(true);
     setNotice('');
     try {
-      await api.post(`/api/manager/epochs/${id}/approve`);
+      await api.post(`/api/admin/manager/epochs/${id}/approve`);
       load();
     } catch (e: any) {
       setNotice(e.message);
@@ -60,7 +61,7 @@ export function Manager() {
     setBusy(true);
     setNotice('');
     try {
-      await api.post('/api/manager/epochs/run');
+      await api.post('/api/admin/manager/epochs/run');
       load();
     } catch (e: any) {
       setNotice(e.message);
@@ -80,14 +81,22 @@ export function Manager() {
         </div>
       </div>
       <LiveNetworkPanel />
+      {!user?.isAdmin && (
+        <Panel title="OPERATOR CLEARANCE REQUIRED">
+          <p className="dim" style={{ margin: 0 }}>
+            This public view contains delayed aggregate status only. Connect the designated operator wallet to
+            inspect balances, transactions, preflight evidence, controls, and audit records.
+          </p>
+        </Panel>
+      )}
+      {!user?.isAdmin ? null : <>
       <Panel
-        title="CONTROL ROOM // PAYOUTS" sub="daily distribution of house-machine profits to PunkLabz holders"
+        title="CONTROL ROOM // PAPER ECONOMY" sub="demo-credit accounting; real payouts are disabled"
         right={user?.isAdmin ? <button onClick={runNow} disabled={busy}>Close epoch now</button> : undefined}
       >
         <p className="dim">
-          House-bot profits are distributed pro-rata to PunkLabz holders with ≥ 1,000,000 tokens.
-          The numbers come from audited deterministic code; the agent narrates and flags anomalies —
-          it can never change an amount. {notice && <span className="red">{notice}</span>}
+          Paper bot P&amp;L and holder distributions are historical demo-credit accounting. They cannot access
+          the USDG execution wallet or create real payouts. {notice && <span className="red">{notice}</span>}
         </p>
       </Panel>
 
@@ -184,6 +193,7 @@ export function Manager() {
           </tbody>
         </table>
       </Panel>
+      </>}
     </div>
   );
 }
