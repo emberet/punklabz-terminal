@@ -5,8 +5,10 @@ import { api } from '../lib/api';
 import { Panel } from '../components/Panel';
 import { arrow, fmtUsd, fmtPct, pillClass } from '../lib/format';
 import { useAuth } from '../lib/auth';
+import { usePageMeta } from '../lib/pageMeta';
 
 export function Explore() {
+  usePageMeta('Black Market', 'Clone public strategies built by other operators and run them as your own.');
   const { user } = useAuth();
   const navigate = useNavigate();
   const [bots, setBots] = useState<BotSummary[]>([]);
@@ -35,7 +37,7 @@ export function Explore() {
     <div>
       <div className="page-head">
         <div>
-          <div className="page-title">Black Market</div>
+          <h1 className="page-title">Black Market</h1>
           <div className="page-sub">
             Clone another quant's bot for $10 — every dollar goes to its creator.
           </div>

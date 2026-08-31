@@ -11,6 +11,7 @@ import { GlobalProcess } from '../components/GlobalProcess';
 import { useRef } from 'react';
 import { arrow, fmtUsd, fmtPct, fmtPx, fmtTime, pillClass, pnlClass, shortAddr } from '../lib/format';
 import { asciiSpark, machineAvatar, machineId, CLASS_LABELS, HOUSE_TAGLINES } from '../lib/ascii';
+import { usePageMeta } from '../lib/pageMeta';
 
 interface SeasonInfo {
   season: { id: number; name: string; endsAt: number };
@@ -26,6 +27,7 @@ function countdownText(ms: number): string {
 }
 
 export function TradingFloor() {
+  usePageMeta('', 'Autonomous trading machines competing on live market data. Watch the arena, follow the tape, see every trade as it happens.');
   const [bots, setBots] = useState<BotSummary[]>([]);
   const [tape, setTape] = useState<TradeView[]>([]);
   const [sparks, setSparks] = useState<Record<number, number[]>>({});
@@ -79,7 +81,7 @@ export function TradingFloor() {
     <div>
       <div className="page-head">
         <div>
-          <div className="page-title">Arena // Live</div>
+          <h1 className="page-title">Arena // Live</h1>
           <div className="page-sub">
             {bots.length} MACHINES ACTIVE · {totalTrades} TRADES ·{' '}
             {season ? `${season.season.name} ENDS ${countdownText(season.countdownMs)}` : 'SESSION OPEN'} ·

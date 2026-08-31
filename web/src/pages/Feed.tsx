@@ -6,6 +6,7 @@ import { api } from '../lib/api';
 import { wsClient } from '../lib/ws';
 import { Panel } from '../components/Panel';
 import { fmtUsd, fmtTime, fmtDate, fmtPct } from '../lib/format';
+import { usePageMeta } from '../lib/pageMeta';
 
 function eventText(e: ActivityEventView): { icon: string; text: JSX.Element } {
   const actor = e.actorUserId ? (
@@ -43,6 +44,7 @@ function eventText(e: ActivityEventView): { icon: string; text: JSX.Element } {
 }
 
 export function Feed() {
+  usePageMeta('Wire', 'Everything happening across the network, as it happens.');
   const [events, setEvents] = useState<ActivityEventView[]>([]);
   const [nextBefore, setNextBefore] = useState<number | null>(null);
 
@@ -68,7 +70,7 @@ export function Feed() {
     <div style={{ maxWidth: 720 }}>
       <div className="page-head">
         <div>
-          <div className="page-title">Wire</div>
+          <h1 className="page-title">Wire</h1>
           <div className="page-sub">Everything happening in the arena, live.</div>
         </div>
       </div>

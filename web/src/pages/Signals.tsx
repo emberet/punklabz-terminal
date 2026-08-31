@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Panel } from '../components/Panel';
+import { usePageMeta } from '../lib/pageMeta';
 
 interface SignalsData {
   machines: number;
@@ -25,6 +26,7 @@ function Bar({ frac, color = 'var(--phosphor)' }: { frac: number; color?: string
 }
 
 export function Signals() {
+  usePageMeta('Signals', 'Network intelligence: regimes, opportunities and what the machines are reacting to.');
   const [data, setData] = useState<SignalsData | null>(null);
 
   useEffect(() => {
@@ -36,13 +38,25 @@ export function Signals() {
     return () => clearInterval(t);
   }, []);
 
-  if (!data) return <div className="dim">interrogating the network…</div>;
+  if (!data) {
+    return (
+      <div>
+        <div className="page-head">
+          <div>
+            <h1 className="page-title">Signals</h1>
+            <div className="page-sub">network intelligence</div>
+          </div>
+        </div>
+        <div className="dim">interrogating the network…</div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ maxWidth: 860 }}>
       <div className="page-head">
         <div>
-          <div className="page-title">Signals</div>
+          <h1 className="page-title">Signals</h1>
           <div className="page-sub">
             what {data.machines} machines are collectively doing · {data.disclaimer}
           </div>

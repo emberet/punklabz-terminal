@@ -61,15 +61,28 @@ export function ActivityRail() {
         System feed
         <span className="spacer" />
         {(['all', 'trades', 'events'] as const).map((f) => (
-          <a
+          <button
             key={f}
+            type="button"
+            className="linkish"
+            // a filter is a toggle, and aria-pressed is the difference between
+            // "three links" and "three states, one of them current"
+            aria-pressed={filter === f}
             onClick={() => setFilter(f)}
-            style={{ cursor: 'pointer', marginRight: 6, color: filter === f ? 'var(--phosphor)' : 'var(--text-dim)' }}
+            style={{ marginRight: 6, color: filter === f ? 'var(--phosphor)' : 'var(--text-dim)' }}
           >
             {f.toUpperCase()}
-          </a>
+          </button>
         ))}
-        <a onClick={toggle} style={{ cursor: 'pointer', color: 'var(--text-dim)' }}>▸</a>
+        <button
+          type="button"
+          className="linkish"
+          onClick={toggle}
+          style={{ color: 'var(--text-dim)' }}
+          aria-label={collapsed ? 'Expand activity rail' : 'Collapse activity rail'}
+        >
+          ▸
+        </button>
       </div>
       <div className="rail-body">
         {items.length === 0 && <div className="rail-row dim">listening…</div>}

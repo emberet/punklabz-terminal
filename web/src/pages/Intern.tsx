@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Panel } from '../components/Panel';
 import { api } from '../lib/api';
+import { usePageMeta } from '../lib/pageMeta';
 
 interface InternPost {
   id: number;
@@ -37,6 +38,7 @@ const VERDICT_TONE: Record<string, string> = { published: 'phos', shadow: 'soft'
 const time = (ts: number) => new Date(ts).toISOString().slice(5, 16).replace('T', ' ');
 
 export function Intern() {
+  usePageMeta('Intern', 'The newest agent reads the timeline out loud, and everything it drafts is screened before it is published.');
   const [d, setD] = useState<InternView | null>(null);
   const [filter, setFilter] = useState<'all' | 'blocked' | 'shadow' | 'published'>('all');
 
@@ -49,7 +51,19 @@ export function Intern() {
     return () => clearInterval(t);
   }, [load]);
 
-  if (!d) return <div className="dim">waking the intern…</div>;
+  if (!d) {
+    return (
+      <div style={{ maxWidth: 900 }}>
+        <div className="page-head">
+          <div>
+            <h1 className="page-title">Intern</h1>
+            <div className="page-sub">reads the timeline, out loud</div>
+          </div>
+        </div>
+        <div className="dim">waking the intern…</div>
+      </div>
+    );
+  }
 
   const posts = filter === 'all' ? d.posts : d.posts.filter((p) => p.verdict === filter);
   const blocked = d.counts.blocked ?? 0;
@@ -59,7 +73,7 @@ export function Intern() {
     <div style={{ maxWidth: 900 }}>
       <div className="page-head">
         <div>
-          <div className="page-title">Intern</div>
+          <h1 className="page-title">Intern</h1>
           <div className="page-sub">
             reads crypto social feeds · everything it drafts is logged here, published or not
           </div>
@@ -186,14 +200,15 @@ export function Intern() {
       >
         <div className="panel-body row" style={{ gap: 10 }}>
           {(['all', 'blocked', 'shadow', 'published'] as const).map((f) => (
-            <a
+            <button
               key={f}
+              type="button"
+              aria-pressed={filter === f}
               onClick={() => setFilter(f)}
-              className={filter === f ? 'phos' : 'soft'}
-              style={{ cursor: 'pointer' }}
+              className={`linkish ${filter === f ? 'phos' : 'soft'}`}
             >
               [{f}]
-            </a>
+            </button>
           ))}
         </div>
         {posts.length === 0 && (

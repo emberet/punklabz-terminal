@@ -6,8 +6,10 @@ import { Panel } from '../components/Panel';
 import { fmtUsd, fmtDate, shortAddr } from '../lib/format';
 import { useAuth } from '../lib/auth';
 import { LiveNetworkPanel } from '../components/LiveNetworkPanel';
+import { usePageMeta } from '../lib/pageMeta';
 
 export function Manager() {
+  usePageMeta('Control Room', 'Live execution, risk limits and payout epochs. Operator clearance only.');
   const { user } = useAuth();
   const [epochs, setEpochs] = useState<EpochView[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
@@ -69,6 +71,14 @@ export function Manager() {
 
   return (
     <div>
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">Control Room</h1>
+          <div className="page-sub">
+            Live execution, risk limits and payout epochs. Operator clearance only.
+          </div>
+        </div>
+      </div>
       <LiveNetworkPanel />
       <Panel
         title="CONTROL ROOM // PAYOUTS" sub="daily distribution of house-machine profits to PunkLabz holders"

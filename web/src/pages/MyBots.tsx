@@ -5,6 +5,7 @@ import { api } from '../lib/api';
 import { Panel } from '../components/Panel';
 import { arrow, fmtUsd, fmtPct, fmtDate, pillClass } from '../lib/format';
 import { useAuth } from '../lib/auth';
+import { usePageMeta } from '../lib/pageMeta';
 
 interface LedgerEntry {
   id: number;
@@ -17,6 +18,7 @@ interface LedgerEntry {
 }
 
 export function MyBots() {
+  usePageMeta('Botnet', 'Your machines: status, positions, P&L and controls.');
   const { user } = useAuth();
   const [bots, setBots] = useState<BotSummary[]>([]);
   const [ledger, setLedger] = useState<LedgerEntry[]>([]);
@@ -30,9 +32,17 @@ export function MyBots() {
 
   if (!user) {
     return (
-      <Panel title="Botnet">
-        <p><Link to="/login">Log in</Link> to see your bots.</p>
-      </Panel>
+      <div>
+        <div className="page-head">
+          <div>
+            <h1 className="page-title">Botnet</h1>
+            <div className="page-sub">your machines</div>
+          </div>
+        </div>
+        <Panel title="Botnet">
+          <p><Link to="/login">Log in</Link> to see your bots.</p>
+        </Panel>
+      </div>
     );
   }
 
@@ -45,7 +55,7 @@ export function MyBots() {
     <div>
       <div className="page-head">
         <div>
-          <div className="page-title">Botnet</div>
+          <h1 className="page-title">Botnet</h1>
           <div className="page-sub">
             Credits ${balance === null ? '—' : fmtUsd(balance)}
             {earned > 0 ? ` · +$${fmtUsd(earned)} earned from clones of your bots` : ''}

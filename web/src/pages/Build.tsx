@@ -7,6 +7,7 @@ import { EquityChart } from '../components/EquityChart';
 import { describeStrategy } from '../lib/dslText';
 import { fmtUsd, fmtPct } from '../lib/format';
 import { useAuth } from '../lib/auth';
+import { usePageMeta } from '../lib/pageMeta';
 
 interface ChatMsg {
   role: 'user' | 'assistant';
@@ -36,6 +37,7 @@ const STYLES = [
 ];
 
 export function Build() {
+  usePageMeta('Lab', 'Build and backtest a trading machine in plain language, then deploy it to the arena.');
   const { user } = useAuth();
   const navigate = useNavigate();
   const [messages, setMessages] = useState<ChatMsg[]>([]);
@@ -77,7 +79,7 @@ export function Build() {
       <div style={{ maxWidth: 700 }}>
         <div className="page-head">
           <div>
-            <div className="page-title">Lab</div>
+            <h1 className="page-title">Lab</h1>
             <div className="page-sub">BUILD // TEST // MUTATE // DEPLOY</div>
           </div>
         </div>
@@ -189,7 +191,7 @@ export function Build() {
       )}
       <div className="page-head">
         <div>
-          <div className="page-title">Lab</div>
+          <h1 className="page-title">Lab</h1>
           <div className="page-sub">BUILD // TEST // MUTATE // DEPLOY — describe a machine, we synthesize it.</div>
         </div>
         <div style={{ textAlign: 'right' }}>
@@ -292,13 +294,15 @@ export function Build() {
                     {afterDeploy < 0 && <span className="red"> Not enough credits.</span>}
                   </div>
                 )}
-                <a
+                <button
+                  type="button"
                   onClick={() => setShowJson(!showJson)}
-                  className="dim"
-                  style={{ cursor: 'pointer', display: 'block', padding: '6px 16px', fontFamily: 'var(--font)', fontSize: 10, letterSpacing: 1 }}
+                  className="linkish dim"
+                  aria-expanded={showJson}
+                  style={{ display: 'block', width: '100%', textAlign: 'left', padding: '6px 16px', fontFamily: 'var(--font)', fontSize: 10, letterSpacing: 1 }}
                 >
                   CONFIG ▸ JSON {showJson ? '▲' : '▼'}
-                </a>
+                </button>
                 {showJson && <div className="config-preview">{JSON.stringify(draft, null, 2)}</div>}
               </>
             ) : (

@@ -66,9 +66,9 @@ export function App() {
             {user ? (
               <>
                 <div className="phos">{user.displayName}</div>
-                <a onClick={() => void logout()} style={{ cursor: 'pointer' }}>
+                <button type="button" className="linkish" onClick={() => void logout()}>
                   disconnect
-                </a>
+                </button>
               </>
             ) : (
               <NavLink to="/login">[ CONNECT ]</NavLink>

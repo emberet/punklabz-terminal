@@ -8,8 +8,10 @@ import { arrow, fmtUsd, fmtPct, fmtDate, pillClass } from '../lib/format';
 import { useAuth } from '../lib/auth';
 import { WalletPanel } from '../components/WalletPanel';
 import { LinkEmailPanel } from '../components/LinkEmailPanel';
+import { usePageMeta } from '../lib/pageMeta';
 
 export function Profile() {
+  usePageMeta('Operator', 'Operator profile: machines, level and track record.');
   const { id } = useParams();
   const { user } = useAuth();
   const [p, setP] = useState<ProfileView | null>(null);
@@ -35,10 +37,10 @@ export function Profile() {
     <div style={{ maxWidth: 860 }}>
       <div className="page-head">
         <div>
-          <div className="page-title row" style={{ gap: 12 }}>
+          <h1 className="page-title row" style={{ gap: 12 }}>
             {p.user.displayName}
             <span className="chip chip-house">LVL {p.user.level} · {p.user.levelTitle}</span>
-          </div>
+          </h1>
           <div className="page-sub">
             Quant since {fmtDate(p.user.createdAt)} · {p.followers} followers · following {p.following}
           </div>

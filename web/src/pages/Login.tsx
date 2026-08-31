@@ -6,6 +6,7 @@ import { AsciiEntity } from '../components/AsciiEntity';
 import { DecryptText } from '../components/motion/DecryptText';
 import { useAuth } from '../lib/auth';
 import { type ConnectorKind, hasWallet, walletSignIn } from '../lib/wallet';
+import { usePageMeta } from '../lib/pageMeta';
 
 interface NetStats {
   machinesOnline: number;
@@ -15,6 +16,7 @@ interface NetStats {
 }
 
 export function Login() {
+  usePageMeta('Access', 'Sign in with a wallet or an email to build machines and enter the arena.');
   const navigate = useNavigate();
   const { refresh } = useAuth();
   const [mode, setMode] = useState<'login' | 'register'>('login');
@@ -98,9 +100,9 @@ export function Login() {
   if (phase === 'boot') {
     return (
       <div className="boot-screen">
-        <div className="page-title" style={{ fontSize: 40 }}>
+        <h1 className="page-title" style={{ fontSize: 40 }}>
           <DecryptText text="PUNKLABZ NETWORK" duration={500} />
-        </div>
+        </h1>
         <div className="boot-log">
           <div className="cursor">HANDSHAKE REQUESTED…</div>
           {bootLine >= 1 && <div className="ok">[ OK ] NODE FOUND</div>}
@@ -116,7 +118,7 @@ export function Login() {
     <div className="login-wrap">
       <div className="login-box glitch-in">
         <div style={{ textAlign: 'center', marginBottom: 18 }}>
-          <div className="page-title" style={{ fontSize: 46 }}>Punklabz Network</div>
+          <h1 className="page-title" style={{ fontSize: 46 }}>Punklabz Network</h1>
           <div className="soft" style={{ letterSpacing: 2, fontSize: 11, textTransform: 'uppercase' }}>
             Autonomous market research system
           </div>
@@ -170,9 +172,13 @@ export function Login() {
               <button onClick={submitEmail} disabled={busy}>
                 {mode === 'login' ? '[ Connect ]' : '[ Initialize operator ]'}
               </button>
-              <a onClick={() => setMode(mode === 'login' ? 'register' : 'login')} style={{ cursor: 'pointer' }} className="dim">
+              <button
+                type="button"
+                className="linkish dim"
+                onClick={() => setMode(mode === 'login' ? 'register' : 'login')}
+              >
                 {mode === 'login' ? 'no account? initialize →' : '← back'}
-              </a>
+              </button>
             </div>
           </div>
           {err && <div className="panel-body error-text">{err}</div>}

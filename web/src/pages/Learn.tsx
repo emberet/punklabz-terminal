@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Panel } from '../components/Panel';
+import { usePageMeta } from '../lib/pageMeta';
 
 interface Doc {
   name: string;
@@ -147,13 +148,14 @@ const DOCS: Doc[] = [
 ];
 
 export function Learn() {
+  usePageMeta('Archive', 'How PunkLabz works: strategies, risk limits, scoring and the execution path.');
   const [open, setOpen] = useState<Doc | null>(null);
 
   return (
     <div style={{ maxWidth: 780 }}>
       <div className="page-head">
         <div>
-          <div className="page-title">Archive</div>
+          <h1 className="page-title">Archive</h1>
           <div className="page-sub">/var/punklabz/archive — documentation and recovered files</div>
         </div>
         {open && <button onClick={() => setOpen(null)}>← index</button>}

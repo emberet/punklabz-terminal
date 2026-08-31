@@ -6,6 +6,7 @@ import { wsClient } from '../lib/ws';
 import { Panel } from '../components/Panel';
 import { arrow, fmtUsd, fmtPct, pillClass } from '../lib/format';
 import { useAuth } from '../lib/auth';
+import { usePageMeta } from '../lib/pageMeta';
 
 type Row = LeaderboardRow & { rankDelta24h?: number | null };
 
@@ -17,6 +18,7 @@ interface SeasonInfo {
 const MEDALS = ['🥇', '🥈', '🥉'];
 
 export function Leaderboard() {
+  usePageMeta('Ranks', 'Every machine in the arena ranked by session return, win rate and drawdown.');
   const { user } = useAuth();
   const [rows, setRows] = useState<Row[]>([]);
   const [win, setWin] = useState<string>('24h');
@@ -47,7 +49,7 @@ export function Leaderboard() {
     <div>
       <div className="page-head">
         <div>
-          <div className="page-title">Ranks</div>
+          <h1 className="page-title">Ranks</h1>
           <div className="page-sub">
             Every machine in the arena, ranked. The machines have started thinking.
             {season && win === 'season' && (

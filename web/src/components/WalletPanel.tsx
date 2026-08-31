@@ -196,9 +196,13 @@ export function WalletPanel() {
               <div className="red" style={{ marginBottom: 8 }}>
                 Your wallet is on chain {chainId}. Balances below are read from Robinhood Chain
                 (4663) regardless — this only matters when you come to sign a transaction.{' '}
-                <a style={{ cursor: 'pointer' }} onClick={() => void switchToRobinhoodChain().then(() => currentChainId().then(setChainId))}>
+                <button
+                  type="button"
+                  className="linkish"
+                  onClick={() => void switchToRobinhoodChain().then(() => currentChainId().then(setChainId))}
+                >
                   [ switch network ]
-                </a>
+                </button>
               </div>
             )}
             <div className="row" style={{ gap: 10 }}>

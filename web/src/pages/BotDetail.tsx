@@ -10,6 +10,7 @@ import { PersonaPanel, type AppliedMod, type Persona } from '../components/Perso
 import { machineAvatar, machineId, CLASS_LABELS } from '../lib/ascii';
 import { arrow, fmtUsd, fmtPct, fmtPx, fmtTime, pillClass, pnlClass, shortAddr } from '../lib/format';
 import { useAuth } from '../lib/auth';
+import { usePageMeta } from '../lib/pageMeta';
 
 interface Detail {
   bot: BotSummary;
@@ -64,6 +65,7 @@ function CoreStatus({ detail }: { detail: Detail }) {
 }
 
 export function BotDetail() {
+  usePageMeta('Machine', 'Machine dossier: strategy, positions, trade history and performance.');
   const { id } = useParams();
   const { user } = useAuth();
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -93,12 +95,12 @@ export function BotDetail() {
           <div className="dim" style={{ fontSize: 10, letterSpacing: 2 }}>
             ╔ MACHINE DOSSIER · {machineId(bot.id, bot.name)}
           </div>
-          <div className="page-title row" style={{ gap: 12 }}>
-            <span className="bot-avatar" style={{ fontSize: 26 }}>{machineAvatar(bot.id, bot.name)}</span>
+          <h1 className="page-title row" style={{ gap: 12 }}>
+            <span className="bot-avatar" style={{ fontSize: 26 }} aria-hidden="true">{machineAvatar(bot.id, bot.name)}</span>
             {bot.name}
             <span className={`chip chip-${bot.status}`}>● {bot.status}</span>
             {bot.kind === 'house' && <span className="chip chip-house">house</span>}
-          </div>
+          </h1>
           <div className="page-sub">
             CLASS: {CLASS_LABELS[bot.strategyType] ?? CLASS_LABELS.dsl}
             {bot.ownerName ? ` · OPERATOR: ${bot.ownerName}` : ' · property of the house'}
@@ -241,9 +243,9 @@ export function BotDetail() {
         term
         noPad
         right={
-          <a onClick={() => setShowJson(!showJson)} style={{ cursor: 'pointer' }}>
+          <button type="button" className="linkish" onClick={() => setShowJson(!showJson)}>
             {showJson ? 'hide' : 'show'}
-          </a>
+          </button>
         }
       >
         {showJson ? (

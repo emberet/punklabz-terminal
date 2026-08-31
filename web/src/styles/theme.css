@@ -92,6 +92,33 @@ body.fx-off::before, body.fx-off::after { display: none; }
 a { color: var(--phosphor); text-decoration: none; }
 a:hover { color: var(--acid-hover); }
 
+/* A BUTTON THAT READS AS A LINK.
+ *
+ * Several controls were anchors with an onClick and no href: they looked
+ * right and were unreachable by keyboard, invisible to assistive tech as
+ * actions, and offered no focus state. This class keeps the inline-link
+ * appearance while the element underneath is the button it always was. */
+button.linkish {
+  font-family: inherit;
+  font-size: inherit;
+  text-transform: none;
+  letter-spacing: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--phosphor);
+  cursor: pointer;
+  line-height: inherit;
+}
+button.linkish:hover:not(:disabled) { color: var(--acid-hover); background: none; border: none; }
+
+/* Keyboard focus was invisible everywhere. :focus-visible shows it for
+ * keyboard users without putting a ring on every mouse click. */
+:where(a, button, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--phosphor);
+  outline-offset: 2px;
+}
+
 /* buttons: square machine controls */
 button {
   font-family: var(--font);

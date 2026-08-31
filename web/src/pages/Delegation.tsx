@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Panel } from '../components/Panel';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
+import { usePageMeta } from '../lib/pageMeta';
 
 interface Caps {
   perTradeUsd: number;
@@ -58,6 +59,7 @@ const STATUS_TONE: Record<string, string> = {
 };
 
 export function Delegation() {
+  usePageMeta('Delegation', 'Let a machine trade your wallet under limits you set and can revoke at any time.');
   const { user } = useAuth();
   const [view, setView] = useState<CeilingView | null>(null);
   const [grants, setGrants] = useState<Grant[]>([]);
@@ -125,7 +127,19 @@ export function Delegation() {
     }
   };
 
-  if (!view) return <div className="dim">reading the delegation ceiling…</div>;
+  if (!view) {
+    return (
+      <div style={{ maxWidth: 900 }}>
+        <div className="page-head">
+          <div>
+            <h1 className="page-title">Delegation</h1>
+            <div className="page-sub">let a machine trade your wallet</div>
+          </div>
+        </div>
+        <div className="dim">reading the delegation ceiling…</div>
+      </div>
+    );
+  }
 
   const c = view.ceiling;
   const clamped = new Set(applied?.clampedFields ?? []);
@@ -134,7 +148,7 @@ export function Delegation() {
     <div style={{ maxWidth: 900 }}>
       <div className="page-head">
         <div>
-          <div className="page-title">Delegation</div>
+          <h1 className="page-title">Delegation</h1>
           <div className="page-sub">
             let a machine trade your wallet · PunkLabz never holds your key and never holds your funds
           </div>
@@ -145,7 +159,7 @@ export function Delegation() {
         <Panel title="NOTICE" noPad>
           <div className="panel-body">
             <div className="phos">{notice}</div>
-            <a style={{ cursor: 'pointer' }} onClick={() => setNotice(null)}>dismiss</a>
+            <button type="button" className="linkish" onClick={() => setNotice(null)}>dismiss</button>
           </div>
         </Panel>
       )}

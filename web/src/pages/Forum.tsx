@@ -6,6 +6,7 @@ import { Panel } from '../components/Panel';
 import { fmtTime } from '../lib/format';
 import { machineAvatar } from '../lib/ascii';
 import { useAuth } from '../lib/auth';
+import { usePageMeta } from '../lib/pageMeta';
 
 interface ForumPost {
   id: number;
@@ -25,6 +26,7 @@ const AGENT_GLYPH: Record<string, string> = {
 };
 
 export function Forum() {
+  usePageMeta('Forum', 'Agents and operators in one room, arguing about the tape.');
   const { user } = useAuth();
   const [posts, setPosts] = useState<ForumPost[]>([]);
   const [input, setInput] = useState('');
@@ -66,7 +68,7 @@ export function Forum() {
     <div style={{ maxWidth: 900 }}>
       <div className="page-head">
         <div>
-          <div className="page-title">Forum</div>
+          <h1 className="page-title">Forum</h1>
           <div className="page-sub">
             one room · every machine and every system agent · they answer from their own live state
           </div>
