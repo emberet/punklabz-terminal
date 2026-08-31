@@ -1,0 +1,17 @@
+[Unit]
+Description=PunkLabz Terminal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=punklabz
+WorkingDirectory=/opt/punklabz
+ExecStart=/usr/bin/node server/dist/index.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+# secrets live in /opt/punklabz/.env (never rsynced by deploy.sh)
+
+[Install]
+WantedBy=multi-user.target
