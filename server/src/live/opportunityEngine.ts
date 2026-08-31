@@ -46,9 +46,16 @@ export class OpportunityEngine {
     marketsObserved: 0, scansPerformed: 0, candidates: 0, signals: 0, highConfidence: 0,
   };
   private timer: NodeJS.Timeout | null = null;
-  /** (scanner|symbol|interval|barTs) already emitted — the same closed bar must
-   *  not produce the same signal on every 20s pass */
+  /** an idea already emitted must not repeat on every 20s pass: candle
+   *  universes key on the closed bar, streaming universes on a 5-minute bucket */
   private seen = new Set<string>();
+
+  private fresh(key: string): boolean {
+    if (this.seen.has(key)) return false;
+    this.seen.add(key);
+    if (this.seen.size > 4000) this.seen = new Set([...this.seen].slice(-2000));
+    return true;
+  }
 
   constructor(
     private db: DB,
@@ -144,13 +151,7 @@ export class OpportunityEngine {
         counts.candidates++;
 
         const barTs = hist[hist.length - 1].ts;
-        const fresh = (scanner: string) => {
-          const key = `${scanner}|${symbol}|${interval}|${barTs}`;
-          if (this.seen.has(key)) return false;
-          this.seen.add(key);
-          if (this.seen.size > 4000) this.seen = new Set([...this.seen].slice(-2000));
-          return true;
-        };
+        const fresh = (scanner: string) => this.fresh(`${scanner}|${symbol}|${interval}|${barTs}`);
 
         const closes = hist.map((c) => c.c);
         const vols = hist.map((c) => c.v);
@@ -254,10 +255,11 @@ export class OpportunityEngine {
       if (t.last_price_sol <= 0) continue;
       counts.candidates++;
       const ageMin = (Date.now() - t.launched_at) / 60_000;
+      const bucket = Math.floor(Date.now() / 300_000);
       const instrumentId = `CRYPTO_SPOT://pumpfun/${t.mint}`;
 
       // launch scanner: fresh + real buyer breadth
-      if (ageMin < 5 && t.unique_buyers_60s >= 8) {
+      if (ageMin < 5 && t.unique_buyers_60s >= 8 && this.fresh(`launch|${t.mint}|${bucket}`)) {
         yield {
           scanner: 'launch',
           universe: 'pumpfun',
@@ -276,7 +278,7 @@ export class OpportunityEngine {
       }
 
       // herd scanner: sustained pressure on a surviving token
-      if (ageMin >= 2 && ageMin <= 20 && t.buys_60s >= 20) {
+      if (ageMin >= 2 && ageMin <= 20 && t.buys_60s >= 20 && this.fresh(`herd|${t.mint}|${bucket}`)) {
         yield {
           scanner: 'herd',
           universe: 'pumpfun',
@@ -303,7 +305,8 @@ export class OpportunityEngine {
       counts.candidates++;
 
       // short-term acceleration against the hour: real measured divergence
-      if (t.change5m > 3 && t.change1h > 0 && (t.volume24hUsd ?? 0) > 50_000) {
+      const bucket = Math.floor(Date.now() / 300_000);
+      if (t.change5m > 3 && t.change1h > 0 && (t.volume24hUsd ?? 0) > 50_000 && this.fresh(`ccm|${t.id}|${bucket}`)) {
         // volatility proxy from the observed 1h move — labeled honestly
         const atrProxy = Math.min(20, Math.abs(t.change1h));
         yield {
