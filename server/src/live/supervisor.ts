@@ -44,6 +44,22 @@ export class AutonomousSupervisor {
     private ethUsd?: () => number | null,
   ) {}
 
+  /**
+   * Poll until at least one feed reports connected and not stale, or the
+   * deadline passes. Returns whether market data arrived; the caller still
+   * lets preflight make the actual decision, so a timeout produces a normal
+   * blocking failure rather than a special case.
+   */
+  private async awaitMarketData(timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const feeds = Object.values(this.feedStatus);
+      if (feeds.length > 0 && feeds.some((f) => f.connected && !f.stale)) return true;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    return false;
+  }
+
   /** the boot sequence — runs once, before the network is allowed to act */
   async boot(): Promise<BootReport> {
     const cfg = getLiveConfig(this.db);
@@ -52,6 +68,20 @@ export class AutonomousSupervisor {
       `${label} ${'.'.repeat(Math.max(2, 24 - label.length))} ${value}`;
 
     lines.push(pad('DATABASE', 'OK'));
+
+    // WAIT FOR MARKET DATA BEFORE JUDGING IT.
+    //
+    // Feeds connect asynchronously. Running preflight the instant the process
+    // starts guaranteed `market_data: no feeds reporting yet`, which halted the
+    // network on EVERY restart in canary or live — for a condition that was
+    // merely early, not wrong. "Not yet" and "down" are different answers and
+    // only one of them should stop trading.
+    //
+    // After the timeout it IS a real failure and preflight says so.
+    if (cfg.mode === 'canary' || cfg.mode === 'live') {
+      const connected = await this.awaitMarketData(30_000);
+      lines.push(pad('MARKET DATA', connected ? 'CONNECTED' : 'NOT REPORTING'));
+    }
 
     // Before anything else: the revocation cache fails closed, so an
     // un-hydrated cache would refuse every delegated order. Hydrate first, then

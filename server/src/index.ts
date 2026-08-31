@@ -156,12 +156,11 @@ async function main() {
   liveNetwork.attach(engine);
   liveNetwork.startSentinel(feedStatus);
 
-  // boot sequence: recover in-flight orders, reconcile against venues, re-run
-  // preflight for whatever mode we woke up in. Any failure comes up HALTED.
+  // Constructed here, BOOTED after the feed is running — see below. A boot
+  // that runs before market data exists can only ever conclude that market
+  // data is missing.
   const supervisor = new AutonomousSupervisor(db, hub, signer, adapters, feedStatus,
     () => executor.getMark('ETHUSDT') ?? null);
-  await supervisor.boot();
-  supervisor.startLoops();
 
   // the busy part: scanners observe every market with real data, continuously
   const opportunities = new OpportunityEngine(db, candles, memeFeed, hub);
@@ -278,6 +277,15 @@ async function main() {
     }
   }
   await feed.start();
+
+  // boot sequence: wait for market data, recover in-flight orders, reconcile
+  // against venues, re-run preflight for the mode we woke up in. Any failure
+  // comes up HALTED. This runs AFTER feed.start() because the alternative is
+  // halting every restart on "no feeds reporting yet", which was merely early
+  // rather than wrong.
+  await supervisor.boot();
+  supervisor.startLoops();
+
   engine.start();
 
   // ── season lifecycle: close due seasons every minute ──
