@@ -40,6 +40,8 @@ export class AutonomousSupervisor {
     private signer: TradingSigner,
     private adapters: Map<string, ExecutionAdapter>,
     private feedStatus: Record<string, { connected: boolean; stale: boolean }>,
+    /** ETH/USD mark, so the gas-reserve check can price itself */
+    private ethUsd?: () => number | null,
   ) {}
 
   /** the boot sequence — runs once, before the network is allowed to act */
@@ -81,7 +83,12 @@ export class AutonomousSupervisor {
     let preflight: PreflightResult | null = null;
     if (cfg.mode !== 'simulation') {
       preflight = await runPreflight(
-        { db: this.db, signer: this.signer, adapters: this.adapters, feedStatus: this.feedStatus },
+        {
+          db: this.db, signer: this.signer, adapters: this.adapters, feedStatus: this.feedStatus,
+          // no mark at boot means the gas check reports that it cannot price
+          // the reserve, rather than quietly passing on an unpriced balance
+          ethUsd: this.ethUsd?.() ?? null,
+        },
         cfg.mode,
         'supervisor:boot',
       );

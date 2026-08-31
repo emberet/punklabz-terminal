@@ -247,7 +247,8 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
       mode: z.enum(['simulation', 'shadow', 'canary', 'live']).default('live'),
     }).parse(request.query);
     const result = await runPreflight(
-      { db: app.db, signer: app.signer, adapters: app.adapters, feedStatus: app.feedStatus },
+      { db: app.db, signer: app.signer, adapters: app.adapters, feedStatus: app.feedStatus,
+        ethUsd: app.executor.getMark('ETHUSDT') ?? null },
       q.mode,
       'dry-run',
     );
@@ -293,7 +294,8 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     if (!user) return;
     const body = z.object({ mode: z.enum(['simulation', 'shadow', 'canary', 'live']) }).parse(request.body);
     const preflight = await runPreflight(
-      { db: app.db, signer: app.signer, adapters: app.adapters, feedStatus: app.feedStatus },
+      { db: app.db, signer: app.signer, adapters: app.adapters, feedStatus: app.feedStatus,
+        ethUsd: app.executor.getMark('ETHUSDT') ?? null },
       body.mode,
       `admin:${user.id}`,
     );

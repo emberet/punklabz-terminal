@@ -7,7 +7,7 @@ import { accountForMode } from './accounts.js';
 import { appendAudit } from '../audit/auditLog.js';
 import { ROBINHOOD_MAINNET_CHAIN_ID } from '@punklabz/shared';
 import { probeEndpoints } from '../chain/rhChain.js';
-import { SETTLEMENT } from './instruments.js';
+import { ROBINHOOD_VENUE, SETTLEMENT } from './instruments.js';
 import { delegationCeiling } from './delegation/delegationPolicy.js';
 import { buildDelegationProvider } from './delegation/provider.js';
 import { revocationCache } from './delegation/revocationCache.js';
@@ -122,26 +122,31 @@ export async function runPreflight(
   let gasEth = 0;
   let gasDetail = 'no adapter able to report a gas balance';
 
-  for (const [venue, adapter] of realAdapters) {
-    const getBalances = (adapter as any).getBalances;
-    if (typeof getBalances !== 'function') continue;
+  // Ask the venue we would actually trade on. Iterating every adapter and
+  // letting the last one win the message is how "no USDG balance" ends up
+  // attributed to Polymarket — technically true, and useless.
+  const settlementVenue = online.includes(ROBINHOOD_VENUE) ? ROBINHOOD_VENUE : online[0];
+  const balanceAdapter = settlementVenue ? adapters.get(settlementVenue) : undefined;
+  if (balanceAdapter && typeof balanceAdapter.getBalances === 'function') {
     try {
-      const balances = (await getBalances.call(adapter)) ?? [];
-      const settle = balances.find((b: any) => String(b.asset).toUpperCase() === SETTLEMENT.symbol.toUpperCase());
-      const eth = balances.find((b: any) => String(b.asset).toUpperCase() === 'ETH');
-      if (settle && settle.qty > 0) {
-        funded = true;
-        fundedDetail = `${venue}: ${settle.qty} ${SETTLEMENT.symbol}`;
-      } else {
-        fundedDetail = `${venue}: no ${SETTLEMENT.symbol} balance`;
-      }
+      const balances = (await balanceAdapter.getBalances()) ?? [];
+      const settle = balances.find((b) => b.asset.toUpperCase() === SETTLEMENT.symbol.toUpperCase());
+      const eth = balances.find((b) => b.asset.toUpperCase() === 'ETH');
+      funded = !!settle && settle.qty > 0;
+      fundedDetail = funded
+        ? `${settlementVenue}: ${settle!.qty} ${SETTLEMENT.symbol}`
+        : `${settlementVenue}: no ${SETTLEMENT.symbol} balance — fund the trading wallet`;
       if (eth) {
         gasEth = eth.qty;
-        gasDetail = `${venue}: ${eth.qty} ETH`;
+        gasDetail = `${settlementVenue}: ${eth.qty} ETH`;
       }
     } catch (e) {
-      fundedDetail = `${venue}: balance query failed (${String(e).slice(0, 60)})`;
+      fundedDetail = `${settlementVenue}: balance query failed (${String(e).slice(0, 60)})`;
     }
+  } else {
+    fundedDetail = settlementVenue
+      ? `${settlementVenue} cannot report balances`
+      : 'no online venue to read a balance from';
   }
   add('funded_balance', funded, fundedDetail);
 

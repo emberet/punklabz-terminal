@@ -155,7 +155,8 @@ async function main() {
 
   // boot sequence: recover in-flight orders, reconcile against venues, re-run
   // preflight for whatever mode we woke up in. Any failure comes up HALTED.
-  const supervisor = new AutonomousSupervisor(db, hub, signer, adapters, feedStatus);
+  const supervisor = new AutonomousSupervisor(db, hub, signer, adapters, feedStatus,
+    () => executor.getMark('ETHUSDT') ?? null);
   await supervisor.boot();
   supervisor.startLoops();
 
