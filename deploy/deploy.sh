@@ -64,6 +64,8 @@ ssh "$HOST" "set -e
     DB_PATH=/tmp/punklabz-migration-check.db node --input-type=module -e \"import {openDb} from './server/dist/db/db.js'; const d=openDb(process.env.DB_PATH); const r=d.pragma('integrity_check',{simple:true}); if(r!=='ok') throw new Error(String(r)); d.close()\"
     rm -f /tmp/punklabz-migration-check.db
   fi
+  install -m 644 deploy/punklabz.service /etc/systemd/system/punklabz.service
+  systemctl daemon-reload
   chown -R punklabz:punklabz $DEST
   systemctl restart punklabz
   sleep 2

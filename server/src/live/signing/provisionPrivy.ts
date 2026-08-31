@@ -7,10 +7,10 @@ import { canonicalize, normalizeAuthorizationKey } from './privySigner.js';
 // spending policy. Both live at Privy, in the enclave, where a bug in this
 // codebase cannot reach them — which is the entire point of having them.
 //
-// ORDERING MATTERS. Once `owner_id` is set, every subsequent PATCH to the
-// wallet requires an authorization signature. So the policy is created first
-// and attached in the SAME PATCH that sets the owner: one unsigned mutation,
-// no chicken-and-egg, no window where the wallet has an owner but no policy.
+// ORDERING MATTERS. A fresh wallet gets owner and policy in one PATCH. An
+// existing owned wallet keeps that owner and signs the policy-only PATCH with
+// the current authorization key. Neither path creates an unguarded interval
+// or rotates custody as a side effect of changing policy.
 //
 // This is a script rather than a dashboard click because a policy typed by
 // hand into a form is a policy nobody can review, re-apply, or diff.
@@ -270,7 +270,12 @@ export async function provisionPrivyWallet(opts: {
   }
 
   // ── 1. policy first: it needs no authorization signature yet ──
-  const created = await call(ctx, 'POST', '/policies', policy);
+  // Give a replacement policy the same owner as an already-guarded wallet.
+  // Otherwise a later policy mutation would remain app-secret controlled.
+  const policyBody = before.body.owner_id
+    ? { ...policy, owner_id: before.body.owner_id }
+    : policy;
+  const created = await call(ctx, 'POST', '/policies', policyBody);
   if (!created.ok) {
     note('create policy', false, `${created.status}: ${JSON.stringify(created.body).slice(0, 300)}`);
     return { ok: false, steps, policyId: null, ownerId: null };
@@ -278,13 +283,16 @@ export async function provisionPrivyWallet(opts: {
   const policyId: string = created.body.id;
   note('create policy', true, `${policyId} — ${policy.rules.length} rules, cap ${usdgCapHex(capUsd)}`);
 
-  // ── 2. owner AND policy in ONE patch ──
-  // Setting the owner makes every later PATCH require a signature, so doing
-  // both at once avoids a window where the wallet has an owner but no cap.
-  const patched = await call(ctx, 'PATCH', `/wallets/${ctx.walletId}`, {
-    owner: { public_key: publicKey },
-    policy_ids: [policyId],
-  });
+  // ── 2. attach the policy, preserving any existing owner ──
+  // A previously-owned wallet requires a signed PATCH. Re-sending `owner`
+  // would rotate custody while trying to tighten policy, which is too much
+  // authority for this operation. A fresh wallet still sets both together.
+  const patchBody = before.body.owner_id
+    ? { policy_ids: [policyId] }
+    : { owner: { public_key: publicKey }, policy_ids: [policyId] };
+  const patched = await call(
+    ctx, 'PATCH', `/wallets/${ctx.walletId}`, patchBody, !!before.body.owner_id,
+  );
   if (!patched.ok) {
     note('attach owner + policy', false, `${patched.status}: ${JSON.stringify(patched.body).slice(0, 300)}`);
     return { ok: false, steps, policyId, ownerId: null };

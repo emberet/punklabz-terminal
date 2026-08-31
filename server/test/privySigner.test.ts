@@ -1,7 +1,8 @@
 import { generateKeyPairSync, createVerify } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PrivySigner, canonicalize, privyConfigFromEnv, type PrivyConfig } from '../src/live/signing/privySigner.js';
 import { NoSigner, buildSigner } from '../src/live/signing/signer.js';
+import { provisionPrivyWallet } from '../src/live/signing/provisionPrivy.js';
 
 const WALLET = '0xD5788b6694a05366FaaeEfEff35c7a5913D02Ff9';
 const ZEROX = '0x1111111111111111111111111111111111111111';
@@ -31,6 +32,57 @@ const intent = {
   value: 0n,
   intentId: 'plz_live_20260831_abc123',
 };
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe('Privy policy replacement', () => {
+  it('preserves an existing owner and signs the wallet policy update', async () => {
+    const { pkcs8Base64 } = keypair();
+    const newPolicyId = 'n'.repeat(24);
+    const ownerId = 'o'.repeat(24);
+    const requests: { url: string; init: RequestInit }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init: RequestInit = {}) => {
+      const url = String(input);
+      requests.push({ url, init });
+      const method = init.method ?? 'GET';
+      if (method === 'GET' && url.endsWith('/wallets/wallet-id')) {
+        const updated = requests.some((request) => request.init.method === 'PATCH');
+        return new Response(JSON.stringify({
+          address: WALLET,
+          owner_id: ownerId,
+          policy_ids: updated ? [newPolicyId] : ['p'.repeat(24)],
+        }), { status: 200 });
+      }
+      if (method === 'POST' && url.endsWith('/policies')) {
+        return new Response(JSON.stringify({ id: newPolicyId }), { status: 200 });
+      }
+      if (method === 'PATCH' && url.endsWith('/wallets/wallet-id')) {
+        return new Response(JSON.stringify({ owner_id: ownerId }), { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    }));
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const result = await provisionPrivyWallet({
+      ctx: {
+        appId: 'app-id', appSecret: 'app-secret', walletId: 'wallet-id',
+        authorizationKey: pkcs8Base64,
+      },
+      capUsd: 5,
+      chainId: 4663,
+    });
+
+    expect(result.ok).toBe(true);
+    const policyRequest = requests.find((request) => request.init.method === 'POST')!;
+    expect(JSON.parse(String(policyRequest.init.body))).toMatchObject({ owner_id: ownerId });
+    const patchRequest = requests.find((request) => request.init.method === 'PATCH')!;
+    expect(JSON.parse(String(patchRequest.init.body))).toEqual({ policy_ids: [newPolicyId] });
+    expect(new Headers(patchRequest.init.headers).get('privy-authorization-signature')).toBeTruthy();
+  });
+});
 
 describe('JCS canonicalisation', () => {
   it('sorts keys recursively and emits no whitespace', () => {
