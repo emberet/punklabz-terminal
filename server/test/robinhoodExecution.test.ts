@@ -9,6 +9,8 @@ import { verifyQuote, type ZeroXQuote } from '../src/live/adapters/zeroXRobinhoo
 import { buildAdapters, NotConfiguredAdapter } from '../src/live/adapters.js';
 import { ExecutionRouter } from '../src/live/executionRouter.js';
 import { runPreflight } from '../src/live/preflight.js';
+import { reconcileAccount } from '../src/live/reconciler.js';
+import { accountForMode, fundingFor, recordFunding } from '../src/live/accounts.js';
 import { NoSigner } from '../src/live/signing/signer.js';
 import { PrivySigner } from '../src/live/signing/privySigner.js';
 
@@ -337,5 +339,75 @@ describe('the signer reports what the enclave actually enforces', () => {
     const r = await signer.isReady();
     expect(r.ready).toBe(false);
     expect(r.detail).toMatch(/WALLET MISMATCH/);
+  });
+});
+
+describe('external funding vs reconciliation', () => {
+  let db: DB;
+  let accountId: number;
+
+  /** an adapter that reports whatever the "chain" is said to hold */
+  const chainHolding = (balances: { asset: string; qty: number }[]) => ({
+    venue: ROBINHOOD_VENUE,
+    async health() { return { venue: ROBINHOOD_VENUE, status: 'online' as const, latencyMs: 1, errorRate: 0, lastOkAt: Date.now(), note: null }; },
+    async getQuote() { return null; },
+    async placeOrder() { return { accepted: false, error: 'test adapter' }; },
+    async getBalances() { return balances; },
+    async reconcile() { return { ok: true, balances, positions: [], detail: 'test' }; },
+  });
+
+  beforeEach(() => {
+    db = openTestDb();
+    accountId = accountForMode(db, 'canary', ROBINHOOD_VENUE).id;
+  });
+
+  it('an unrecorded deposit HALTS — the reconciler is right, the ledger is incomplete', async () => {
+    const pass = await reconcileAccount(db, null, accountId, chainHolding([
+      { asset: 'ETH', qty: 0.00283351 }, { asset: 'USDG', qty: 4.999992 },
+    ]) as any);
+    expect(pass.ok).toBe(false);
+    expect(pass.drifts.map((d) => d.asset).sort()).toEqual(['ETH', 'USDG']);
+  });
+
+  it('recording what was actually deposited makes it reconcile', () => {
+    recordFunding(db, accountId, [
+      { asset: 'ETH', qty: 0.00283351, note: 'bridge' },
+      { asset: 'USDG', qty: 4.999992, note: 'bridge' },
+    ], 'operator:test');
+    expect(fundingFor(db, accountId).get('USDG')).toBeCloseTo(4.999992, 6);
+  });
+
+  it('AND STILL CATCHES REAL DRIFT — funding is not a blanket excuse', async () => {
+    recordFunding(db, accountId, [{ asset: 'USDG', qty: 5 }], 'operator:test');
+    // the chain says most of it left; nothing in the ledger explains that
+    const pass = await reconcileAccount(db, null, accountId, chainHolding([
+      { asset: 'USDG', qty: 1 },
+    ]) as any);
+    expect(pass.ok).toBe(false);
+    expect(pass.drifts[0].drift).toBeCloseTo(-4, 6);
+  });
+
+  it('an operator who attests the WRONG amount does not get a clean pass', async () => {
+    recordFunding(db, accountId, [{ asset: 'USDG', qty: 50 }], 'operator:test'); // claimed 50
+    const pass = await reconcileAccount(db, null, accountId, chainHolding([
+      { asset: 'USDG', qty: 5 },                                                // chain has 5
+    ]) as any);
+    expect(pass.ok).toBe(false);
+  });
+
+  it('every funding record is audited and attributable', () => {
+    recordFunding(db, accountId, [{ asset: 'USDG', qty: 5, txRef: '0xabc' }], 'operator:ember');
+    const row = db.prepare(`SELECT * FROM execution_account_funding`).get() as any;
+    expect(row.actor).toBe('operator:ember');
+    expect(row.tx_ref).toBe('0xabc');
+    expect(row.audit_hash).toBeTruthy();
+    expect((db.prepare(`SELECT COUNT(*) n FROM audit_log WHERE action='account_funding'`).get() as any).n).toBe(1);
+  });
+
+  it('a withdrawal is a negative entry, not a deletion', () => {
+    recordFunding(db, accountId, [{ asset: 'USDG', qty: 5 }], 'operator:test');
+    recordFunding(db, accountId, [{ asset: 'USDG', qty: -2 }], 'operator:test');
+    expect(fundingFor(db, accountId).get('USDG')).toBeCloseTo(3, 6);
+    expect((db.prepare(`SELECT COUNT(*) n FROM execution_account_funding`).get() as any).n).toBe(2);
   });
 });

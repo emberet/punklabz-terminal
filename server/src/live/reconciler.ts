@@ -26,14 +26,38 @@ export interface ReconcilePass {
 }
 
 /** what the ledger says an account holds, by asset */
+/**
+ * What we believe this account holds: EXTERNAL FUNDING plus the net of every
+ * trade.
+ *
+ * The funding term is not decoration. Without it this returned trades only, so
+ * a freshly funded wallet showed the whole balance as unexplained drift and
+ * halted the network — the reconciler working correctly against an incomplete
+ * ledger. Money entering an account from outside is an event, and it has to be
+ * recorded like any other.
+ *
+ * Funding is what an operator ATTESTED to, never what the chain happened to
+ * say. If the attested figure is wrong, the drift survives and the halt stands,
+ * which is the entire point.
+ */
 function ledgerHoldings(db: DB, accountId: number): Map<string, number> {
+  const held = new Map<string, number>();
+
+  for (const f of db
+    .prepare(
+      `SELECT asset, SUM(qty) q FROM execution_account_funding
+       WHERE execution_account_id = ? GROUP BY asset`,
+    )
+    .all(accountId) as { asset: string; q: number }[]) {
+    held.set(f.asset, (held.get(f.asset) ?? 0) + f.q);
+  }
+
   const rows = db
     .prepare(
       `SELECT instrument_id, side, SUM(qty) q FROM live_ledger
        WHERE execution_account_id = ? GROUP BY instrument_id, side`,
     )
     .all(accountId) as { instrument_id: string; side: string; q: number }[];
-  const held = new Map<string, number>();
   for (const r of rows) {
     const asset = r.instrument_id.split('/').pop()?.replace('USDT', '') ?? r.instrument_id;
     held.set(asset, (held.get(asset) ?? 0) + (r.side === 'buy' ? r.q : -r.q));

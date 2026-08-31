@@ -1,5 +1,6 @@
 import type { ExecutionMode } from '@punklabz/shared';
 import type { DB } from '../db/db.js';
+import { appendAudit } from '../audit/auditLog.js';
 
 // Execution accounts keep books apart. Shadow profit is not live NAV, canary
 // is not live, and a broker account is not a wallet. Every order and every
@@ -120,4 +121,58 @@ export function accountBook(db: DB, accountId: number, baseCapitalUsd: number): 
     drawdownPct: dd,
     todayPnlUsd: today.s / micro,
   };
+}
+
+// ── external funding ─────────────────────────────────────────────────────────
+
+export interface FundingEntry {
+  asset: string;
+  qty: number;
+  txRef?: string | null;
+  note?: string | null;
+}
+
+/**
+ * Record money entering (or leaving) an execution account from outside trading.
+ *
+ * The caller states the amount. This deliberately does NOT read the chain and
+ * write down whatever it finds — that would make reconciliation compare the
+ * chain against itself and always pass, which is exactly the "fix the database
+ * to match the chain" failure the reconciler forbids. An operator attests; the
+ * reconciler then checks that attestation against the chain and still halts if
+ * they disagree.
+ */
+export function recordFunding(
+  db: DB,
+  accountId: number,
+  entries: FundingEntry[],
+  actor: string,
+): number {
+  const ts = Date.now();
+  const hash = appendAudit(db, actor, 'account_funding', { accountId, entries });
+  const stmt = db.prepare(
+    `INSERT INTO execution_account_funding
+       (execution_account_id, asset, qty, tx_ref, actor, note, audit_hash, ts)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  return db.transaction(() => {
+    let n = 0;
+    for (const e of entries) {
+      if (!Number.isFinite(e.qty) || e.qty === 0) continue;
+      stmt.run(accountId, e.asset, e.qty, e.txRef ?? null, actor, e.note ?? null, hash, ts);
+      n++;
+    }
+    return n;
+  })();
+}
+
+/** What has been attested as funded for this account, per asset. */
+export function fundingFor(db: DB, accountId: number): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const r of db
+    .prepare(`SELECT asset, SUM(qty) q FROM execution_account_funding WHERE execution_account_id = ? GROUP BY asset`)
+    .all(accountId) as { asset: string; q: number }[]) {
+    out.set(r.asset, r.q);
+  }
+  return out;
 }
