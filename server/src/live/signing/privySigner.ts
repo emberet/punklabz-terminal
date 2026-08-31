@@ -71,10 +71,40 @@ export function canonicalize(value: unknown): string {
   throw new Error(`JCS: unsupported value type ${t} in signing payload`);
 }
 
+interface PrivyWallet {
+  id: string;
+  address: string;
+  chain_type?: string;
+  /** the authorization key or quorum whose signature Privy requires. null = none. */
+  owner_id?: string | null;
+  policy_ids?: string[];
+}
+
+/** What the enclave is actually enforcing, as opposed to what we configured. */
+export interface SignerGuards {
+  ownerEnforced: boolean;
+  ownerId: string | null;
+  policyCount: number;
+  /** true only when BOTH walls are real at Privy */
+  fullyGuarded: boolean;
+}
+
 export class PrivySigner implements TradingSigner {
   readonly kind = 'privy';
   private verifiedAddress: string | null = null;
+  private ownerId: string | null = null;
+  private policyIds: string[] = [];
   private readonly allowed: Set<string>;
+
+  /** Read after isReady(); drives the blocking preflight check. */
+  guards(): SignerGuards {
+    return {
+      ownerEnforced: !!this.ownerId,
+      ownerId: this.ownerId,
+      policyCount: this.policyIds.length,
+      fullyGuarded: !!this.ownerId && this.policyIds.length > 0,
+    };
+  }
 
   constructor(private cfg: PrivyConfig) {
     this.allowed = new Set(cfg.allowedTargets.map((a) => a.toLowerCase()));
@@ -174,7 +204,7 @@ export class PrivySigner implements TradingSigner {
     }
 
     try {
-      const wallet = await this.call<{ id: string; address: string; chain_type?: string }>(
+      const wallet = await this.call<PrivyWallet>(
         'GET', `/wallets/${encodeURIComponent(this.cfg.walletId)}`,
       );
       if (!wallet?.address || !isAddress(wallet.address)) {
@@ -194,13 +224,34 @@ export class PrivySigner implements TradingSigner {
             `but TRADING_WALLET_ADDRESS is ${getAddress(this.cfg.expectedAddress)}. Refusing to sign.`,
         };
       }
+
+      // THE SECOND WALL, REPORTED FROM PRIVY AND NOT FROM OUR OWN CONFIG.
+      //
+      // This previously said "authorization key active" whenever
+      // PRIVY_AUTHORIZATION_KEY was merely present in the environment. That is
+      // not the same question. The key only enforces anything once it is the
+      // wallet's OWNER at Privy — and a wallet can have the env var set and
+      // `owner_id: null`, which is exactly the state this deployment was in.
+      //
+      // A readiness message is what an operator reads when deciding whether it
+      // is safe to fund a wallet. Asserting a control that is not in force is
+      // worse than saying nothing at all.
+      this.ownerId = wallet.owner_id ?? null;
+      this.policyIds = wallet.policy_ids ?? [];
       this.verifiedAddress = getAddress(wallet.address);
+
+      const guards: string[] = [];
+      guards.push(this.ownerId
+        ? `owner ${this.ownerId} enforced`
+        : 'NO OWNER — the app secret alone can move this wallet');
+      guards.push(this.policyIds.length
+        ? `${this.policyIds.length} policy(ies) attached`
+        : 'NO POLICY — nothing caps a transaction at the enclave');
+
       return {
         ready: true,
         address: this.verifiedAddress,
-        detail:
-          `privy wallet ${this.cfg.walletId} verified as ${this.verifiedAddress}` +
-          (this.cfg.authorizationKey ? ' (authorization key active)' : ' — NO AUTHORIZATION KEY: the app secret alone can move funds'),
+        detail: `privy wallet ${this.cfg.walletId} verified as ${this.verifiedAddress}; ${guards.join('; ')}`,
       };
     } catch (e) {
       return {

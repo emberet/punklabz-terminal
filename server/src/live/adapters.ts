@@ -1,4 +1,7 @@
 import type { Instrument, VenueHealth } from '@punklabz/shared';
+import type { TradingSigner } from './signing/signer.js';
+import { ROBINHOOD_VENUE } from './instruments.js';
+import { ZeroXRobinhoodAdapter } from './adapters/zeroXRobinhood.js';
 
 // The venue boundary. ShadowAdapter is the only "executing" adapter in this
 // build: it produces theoretical fills against real marks and never submits
@@ -167,13 +170,38 @@ export class ShadowAdapter implements ExecutionAdapter {
   }
 }
 
-export function buildAdapters(markOf: (s: string) => number | undefined): Map<string, ExecutionAdapter> {
+export function buildAdapters(
+  markOf: (s: string) => number | undefined,
+  signer?: TradingSigner,
+): Map<string, ExecutionAdapter> {
   const adapters = new Map<string, ExecutionAdapter>();
   const shadow = new ShadowAdapter(markOf);
   adapters.set('shadow', shadow);
   adapters.set('paper', shadow); // paper-venue instruments execute via shadow fills
+
+  // ROBINHOOD CHAIN — the one venue that can move real funds.
+  //
+  // Registered only when both an API key and a signer exist. Without either it
+  // stays a NotConfiguredAdapter that refuses orders, which is what keeps the
+  // execution_adapter preflight check honest: the router finds *an* adapter for
+  // this venue either way, so it never falls through to shadow, and a missing
+  // credential produces a refusal rather than a silent simulation.
+  const zeroXKey = process.env.ZEROX_API_KEY ?? '';
+  if (zeroXKey && signer) {
+    adapters.set(ROBINHOOD_VENUE, new ZeroXRobinhoodAdapter({
+      apiKey: zeroXKey,
+      signer,
+      maxSlippageBps: Number(process.env.MAX_SLIPPAGE_BPS ?? 100),
+    }));
+  } else {
+    adapters.set(ROBINHOOD_VENUE, new NotConfiguredAdapter(
+      ROBINHOOD_VENUE,
+      !zeroXKey ? 'ZEROX_API_KEY not set' : 'no trading signer configured',
+    ));
+  }
+
   for (const [venue, note] of [
-    ['evm:base', 'EVM adapter stub — 0x routing + signer are a later, operator-configured sprint'],
+    ['evm:base', 'EVM adapter stub — superseded by Robinhood Chain as the home network'],
     ['solana', 'Solana adapter stub — aggregator + signer not configured'],
     ['broker', 'Broker adapter stub — no brokerage account connected'],
     ['polymarket', 'Polymarket adapter stub — CLOB credentials not configured'],

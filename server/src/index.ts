@@ -126,10 +126,12 @@ async function main() {
   memeFeed.start();
   newsFeed.start();
 
-  // the signing boundary: this build resolves to NoSigner, which reports
-  // not-ready and keeps the live preflight failing closed
+  // The signing boundary. Resolves to NoSigner unless SIGNER_PROVIDER names a
+  // real service; either way the key lives outside this process.
   const signer = buildSigner();
-  const adapters = buildAdapters((s) => executor.getMark(s));
+  // the signer is handed to the adapters so the Robinhood venue can actually
+  // sign; without it that venue registers as NotConfigured and refuses orders
+  const adapters = buildAdapters((s) => executor.getMark(s), signer);
 
   const app: AppContext = {
     db, engine, executor, candles, hub, holderSource, payoutQueue,
@@ -145,9 +147,9 @@ async function main() {
   registerInternRoutes(server, app);
   ensureActiveSeason(db, hub);
 
-  // live-execution safety spine: shadow pipeline + sentinel (no signer exists;
-  // canary/live are structurally refused by the risk engine)
-  const liveNetwork = new LiveNetwork(db, hub, candles, (s) => executor.getMark(s));
+  // live-execution safety spine: shadow pipeline + sentinel. canary/live are
+  // gated by preflight, not by an assertion — see riskEngine.setLiveMode()
+  const liveNetwork = new LiveNetwork(db, hub, candles, (s) => executor.getMark(s), signer);
   liveNetwork.attach(engine);
   liveNetwork.startSentinel(feedStatus);
 

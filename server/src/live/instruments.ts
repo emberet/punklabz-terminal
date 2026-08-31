@@ -1,4 +1,18 @@
-import { MAJOR_SYMBOLS, type Instrument } from '@punklabz/shared';
+import { MAJOR_SYMBOLS, USDG, type Instrument } from '@punklabz/shared';
+
+/** The venue every Robinhood Chain order routes to. One name, one place. */
+export const ROBINHOOD_VENUE = 'evm:robinhood';
+
+/**
+ * The settlement asset. Configurable because it is NOT USDC here — it is USDG
+ * with six decimals, and code that assumed the usual eighteen would misprice
+ * every settlement leg by a factor of a trillion.
+ */
+export const SETTLEMENT = {
+  symbol: process.env.LIVE_SETTLEMENT_SYMBOL ?? USDG.symbol,
+  address: USDG.address,
+  decimals: USDG.decimals,
+};
 
 // Instrument registry. Crypto spot on the paper venue is tradable in shadow
 // (we have real market data). Other asset classes are registered for the
@@ -23,6 +37,32 @@ for (const sym of MAJOR_SYMBOLS) {
     tradable: true,
   });
 }
+
+// ── ROBINHOOD CHAIN: the live execution universe ──
+//
+// Deliberately ONE pair. A live universe is a list of things that can lose
+// real money, and it grows on evidence — ten clean canary fills — not on
+// ambition. Both addresses were read off the chain in v11 (see
+// shared/src/robinhood.ts); neither was copied from a blog post.
+//
+// Note the decimals asymmetry that governs every amount on this venue: WETH
+// is 18, USDG is 6. It is not visible in this record because the adapter reads
+// decimals from the token specs rather than assuming, which is the point.
+registry.push({
+  id: `CRYPTO_SPOT://robinhood/WETH-${SETTLEMENT.symbol}`,
+  symbol: `WETH-${SETTLEMENT.symbol}`,
+  displayName: `WETH/${SETTLEMENT.symbol}`,
+  assetClass: 'CRYPTO_SPOT',
+  venue: ROBINHOOD_VENUE,
+  network: 'robinhood',
+  baseAsset: 'WETH',
+  quoteAsset: SETTLEMENT.symbol,
+  settlementAsset: SETTLEMENT.symbol,
+  // 0x quotes this pair on chain 4663 with real liquidity — verified live.
+  minNotionalUsd: 0.2,
+  leverageAllowed: 1,
+  tradable: true,
+});
 
 // registered-but-not-tradable examples across classes — the model is real,
 // the execution path is not wired (Sprints 4+ / operator config).

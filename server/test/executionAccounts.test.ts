@@ -122,11 +122,17 @@ describe('live preflight', () => {
     expect(r.passed).toBe(false);
     const failed = r.checks.filter((c) => c.blocking && !c.pass).map((c) => c.name);
     expect(failed).toContain('signer');
-    expect(failed).toContain('instrument_mapping');
     expect(failed).toContain('execution_adapter');
     expect(failed).toContain('funded_balance');
     // and the reasons are readable, not a bare refusal
     expect(r.blockers.join(' ')).toMatch(/no signing service configured/);
+
+    // instrument_mapping used to be listed here as a proxy for "LIVE_MAPPINGS
+    // is empty". It is no longer empty — ETHUSDT resolves to WETH/USDG on
+    // Robinhood Chain — so that check now legitimately PASSES, and asserting
+    // otherwise would be asserting the absence of the feature this work adds.
+    // The gate is unweakened: live is still closed on the four above.
+    expect(r.checks.find((c) => c.name === 'instrument_mapping')?.pass).toBe(true);
   });
 
   it('unresolved orders block any venue mode', async () => {

@@ -119,6 +119,21 @@ export interface LiveStatusView {
   today: { netPnlUsd: number; feesUsd: number; drawdownPct: number };
   throughput: { marketsWatched: number; signals: number; approved: number; executed: number; rejected: number };
   liveSignerConfigured: boolean;
+
+  // ── the execution boundary, measured at request time ──
+  // `signer` is a live round trip to the signing service and `adapterStatus`
+  // a real health probe — neither is a config value echoed back. A balance of
+  // `null` means we could not read the chain, which is NOT the same as zero.
+  network: string;
+  chainId: number;
+  settlementSymbol: string;
+  signer: { kind: string; ready: boolean; address: string | null; detail: string };
+  walletAddress: string | null;
+  adapterStatus: string;
+  settlementBalance: number | null;
+  ethGasBalance: number | null;
+  lastReconciliation: { at: number; clean: boolean } | null;
+  preflightStatus: { at: number; mode: string; passed: boolean } | null;
 }
 
 export interface CompositeConfidence {

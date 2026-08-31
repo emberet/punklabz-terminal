@@ -5,6 +5,9 @@ import type { TradingSigner } from './signing/signer.js';
 import { mappedSymbols, validateMappings } from './instrumentResolver.js';
 import { accountForMode } from './accounts.js';
 import { appendAudit } from '../audit/auditLog.js';
+import { ROBINHOOD_MAINNET_CHAIN_ID } from '@punklabz/shared';
+import { probeEndpoints } from '../chain/rhChain.js';
+import { SETTLEMENT } from './instruments.js';
 import { delegationCeiling } from './delegation/delegationPolicy.js';
 import { buildDelegationProvider } from './delegation/provider.js';
 import { revocationCache } from './delegation/revocationCache.js';
@@ -41,6 +44,8 @@ export interface PreflightDeps {
   signer: TradingSigner;
   adapters: Map<string, ExecutionAdapter>;
   feedStatus: Record<string, { connected: boolean; stale: boolean }>;
+  /** used to price the ETH gas reserve; null means the check reports honestly that it cannot */
+  ethUsd?: number | null;
 }
 
 export async function runPreflight(
@@ -107,20 +112,32 @@ export async function runPreflight(
   add('execution_adapter', online.length > 0,
     online.length ? `online: ${online.join(', ')}` : 'no real execution adapter reports online');
 
-  // funded balance: only meaningful once an adapter can actually report one
+  // ── settlement + gas, from the chain ──
+  //
+  // Settlement is NOT assumed to be USDC. On Robinhood Chain it is USDG at six
+  // decimals, and it is configurable, because a hardcoded settlement symbol is
+  // how a balance check silently passes against the wrong asset.
   let funded = false;
   let fundedDetail = 'no adapter able to report balances';
+  let gasEth = 0;
+  let gasDetail = 'no adapter able to report a gas balance';
+
   for (const [venue, adapter] of realAdapters) {
     const getBalances = (adapter as any).getBalances;
     if (typeof getBalances !== 'function') continue;
     try {
-      const balances = await getBalances.call(adapter);
-      const usdc = (balances ?? []).find((b: any) => String(b.asset).toUpperCase() === 'USDC');
-      if (usdc && usdc.qty > 0) {
+      const balances = (await getBalances.call(adapter)) ?? [];
+      const settle = balances.find((b: any) => String(b.asset).toUpperCase() === SETTLEMENT.symbol.toUpperCase());
+      const eth = balances.find((b: any) => String(b.asset).toUpperCase() === 'ETH');
+      if (settle && settle.qty > 0) {
         funded = true;
-        fundedDetail = `${venue}: ${usdc.qty} USDC`;
+        fundedDetail = `${venue}: ${settle.qty} ${SETTLEMENT.symbol}`;
       } else {
-        fundedDetail = `${venue}: no USDC balance`;
+        fundedDetail = `${venue}: no ${SETTLEMENT.symbol} balance`;
+      }
+      if (eth) {
+        gasEth = eth.qty;
+        gasDetail = `${venue}: ${eth.qty} ETH`;
       }
     } catch (e) {
       fundedDetail = `${venue}: balance query failed (${String(e).slice(0, 60)})`;
@@ -128,12 +145,50 @@ export async function runPreflight(
   }
   add('funded_balance', funded, fundedDetail);
 
-  const rpcPrimary = process.env.RPC_BASE_PRIMARY ?? '';
-  const rpcSecondary = process.env.RPC_BASE_SECONDARY ?? '';
-  add('rpc_primary', !!rpcPrimary, rpcPrimary ? 'configured' : 'RPC_BASE_PRIMARY not set');
-  add('rpc_redundancy', !!rpcSecondary,
-    rpcSecondary ? 'secondary configured' : 'RPC_BASE_SECONDARY not set — single point of failure',
+  // Gas is ETH on this chain and it is a hard trading precondition: a wallet
+  // that cannot pay for a transaction cannot exit a position either.
+  const cfg = getLiveConfig(db);
+  const gasFloorUsd = (db.prepare(`SELECT gas_reserve_critical_usd g FROM live_config WHERE id = 1`)
+    .get() as { g: number } | undefined)?.g ?? 3;
+  const ethUsd = deps.ethUsd ?? null;
+  const gasUsd = ethUsd !== null ? gasEth * ethUsd : null;
+  add('gas_reserve',
+    gasUsd !== null ? gasUsd >= gasFloorUsd : gasEth > 0,
+    gasUsd !== null
+      ? `${gasEth.toFixed(6)} ETH ≈ $${gasUsd.toFixed(2)} against a $${gasFloorUsd} floor`
+      : `${gasDetail} (no ETH/USD mark to price it against)`);
+
+  // ── RPC: Robinhood Chain, and BOTH endpoints must report 4663 ──
+  const chainId = cfg.mode === 'live' || cfg.mode === 'canary'
+    ? ((db.prepare(`SELECT primary_chain_id c FROM live_config WHERE id = 1`).get() as { c: number } | undefined)?.c
+        ?? ROBINHOOD_MAINNET_CHAIN_ID)
+    : ROBINHOOD_MAINNET_CHAIN_ID;
+
+  const endpoints = await probeEndpoints(chainId).catch(() => []);
+  const named = endpoints.filter((e) => e.label !== 'public');
+  const primary = named.find((e) => e.label === 'primary');
+  const secondary = named.find((e) => e.label === 'secondary');
+
+  add('rpc_primary', !!primary?.ok,
+    primary
+      ? primary.ok
+        ? `${primary.url} reports chain ${primary.chainIdReported} (${primary.latencyMs}ms)`
+        : `primary RPC unusable: ${primary.error}`
+      : 'RPC_ROBINHOOD_PRIMARY not set — the public endpoint is rate-limited and not for production');
+
+  add('rpc_redundancy', !!secondary?.ok,
+    secondary
+      ? secondary.ok ? `secondary healthy at chain ${secondary.chainIdReported}` : `secondary unusable: ${secondary.error}`
+      : 'RPC_ROBINHOOD_SECONDARY not set — single point of failure',
     false);
+
+  // An endpoint that answers on the WRONG chain is worse than one that is
+  // down: it looks healthy and it would sign against a different network.
+  const wrongChain = endpoints.filter((e) => e.chainIdReported !== null && e.chainIdReported !== chainId);
+  add('chain_id', wrongChain.length === 0,
+    wrongChain.length === 0
+      ? `every reachable endpoint reports chain ${chainId}`
+      : wrongChain.map((e) => `${e.label} reports ${e.chainIdReported}, expected ${chainId}`).join('; '));
 
   const account = accountForMode(db, targetMode, online[0] ?? 'unconfigured');
   add('execution_account', !!account, `books to ${account.name}`);

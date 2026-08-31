@@ -635,8 +635,12 @@ describe('the delegation preflight', () => {
     expect(failed).toContain('delegation_provider');
     expect(failed).toContain('delegation_ceiling');
     expect(failed).toContain('delegation_signer');
-    expect(failed).toContain('delegation_instruments');
     expect(r.blockers.join(' ')).toMatch(/tier 0/);
+
+    // delegation_instruments now passes: a live mapping exists (WETH/USDG on
+    // Robinhood Chain), so "a grant could name no tradable pair" is no longer
+    // true. Delegation itself remains shut on the three blockers above.
+    expect(r.checks.find((c) => c.name === 'delegation_instruments')?.pass).toBe(true);
   });
 
   it('blocks activation, and records the refusal against the grant', async () => {

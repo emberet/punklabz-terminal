@@ -11,8 +11,10 @@ import { buildAdapters, type ExecutionAdapter } from './adapters.js';
 import { ExecutionRouter } from './executionRouter.js';
 import { edgeForUniverse } from './edge.js';
 import { findInstrument } from './instruments.js';
+import { resolveLiveInstrument } from './instrumentResolver.js';
 import { evaluateIntent, getLiveConfig, haltNetwork, stageCapUsd } from './riskEngine.js';
 import { accountForMode } from './accounts.js';
+import type { TradingSigner } from './signing/signer.js';
 import { currentWeights } from '../research/scoring.js';
 import { openEdgeClaim } from '../research/predictions.js';
 
@@ -37,8 +39,9 @@ export class LiveNetwork {
     private hub: WsHub,
     private candles: CandleStore,
     private markOf: (s: string) => number | undefined,
+    signer?: TradingSigner,
   ) {
-    this.adapters = buildAdapters(markOf);
+    this.adapters = buildAdapters(markOf, signer);
     this.router = new ExecutionRouter(this.adapters);
     this.restoreLots();
   }
@@ -91,13 +94,56 @@ export class LiveNetwork {
     return { strategy, regime, liquidity, cost, confirmation, composite };
   }
 
+  /**
+   * A signal we cannot route is recorded, not discarded. An unmapped symbol
+   * silently doing nothing looks identical to a quiet market, and the whole
+   * point of the resolver is that the refusal is visible and explains itself.
+   */
+  private recordUnroutable(trade: TradeView, mode: string, reason: string): void {
+    const account = accountForMode(this.db, mode as never);
+    const now = Date.now();
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO live_orders
+           (intent_id, execution_account_id, bot_id, instrument_id, venue, side,
+            requested_notional_micro, mode, state, reject_reason, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'unresolved', ?, 0, ?, 'risk_rejected', ?, ?, ?)`,
+      )
+      .run(
+        `plz_unmapped_${trade.botId}_${trade.symbol}_${now}`,
+        account.id, trade.botId, trade.symbol, trade.side, mode,
+        `no live instrument mapping: ${reason}`.slice(0, 300), now, now,
+      );
+    this.hub.publish('live', { event: 'order_rejected', symbol: trade.symbol, reason });
+  }
+
   private async mirrorTrade(trade: TradeView): Promise<void> {
     const cfg = getLiveConfig(this.db);
     if (cfg.mode === 'simulation') return; // live pipeline off
 
-    const instrumentId = `CRYPTO_SPOT://binance/${trade.symbol}`;
-    const inst = findInstrument(instrumentId);
-    if (!inst) return;
+    // A strategy names a PAPER symbol. Executing that name directly is how a
+    // signal about "ETHUSDT on Binance" becomes an order on whatever venue
+    // happens to list something called ETH. The resolver is the only thing
+    // permitted to turn a signal into a destination, and it names the chain,
+    // both contract addresses and their decimals explicitly.
+    //
+    // Shadow keeps using the paper instrument, because shadow is precisely the
+    // mode that books theoretical fills against paper market data. Anything
+    // that can move funds must resolve.
+    const realMoney = cfg.mode === 'canary' || cfg.mode === 'live';
+    let inst;
+    if (realMoney) {
+      const resolution = resolveLiveInstrument(trade.symbol);
+      if (!resolution.mapped || !resolution.instrument) {
+        this.recordUnroutable(trade, cfg.mode, resolution.reason);
+        return;
+      }
+      inst = resolution.instrument;
+    } else {
+      inst = findInstrument(`CRYPTO_SPOT://binance/${trade.symbol}`);
+      if (!inst) return;
+    }
+    const instrumentId = inst.id;
 
     const account = accountForMode(this.db, cfg.mode, inst.venue);
     const conf = this.confidenceFor(trade);

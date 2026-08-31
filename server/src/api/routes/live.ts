@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { CAPITAL_STAGES, type LiveStatusView } from '@punklabz/shared';
+import { CAPITAL_STAGES, ROBINHOOD_MAINNET_CHAIN_ID, type LiveStatusView } from '@punklabz/shared';
 import type { AppContext } from '../context.js';
 import { requireUser } from './auth.js';
 import { fromMicro } from '../../money.js';
@@ -8,7 +8,7 @@ import {
   getLiveConfig, haltNetwork, promotionEvidence, resumeNetwork, setCapitalStage,
   setLiveMode, stageCapUsd, updateLimits,
 } from '../../live/riskEngine.js';
-import { allInstruments, searchInstruments } from '../../live/instruments.js';
+import { ROBINHOOD_VENUE, SETTLEMENT, allInstruments, searchInstruments } from '../../live/instruments.js';
 import { runPreflight, preflightLines } from '../../live/preflight.js';
 import { accountBook, accountForMode, listAccounts } from '../../live/accounts.js';
 import { reconcileAll } from '../../live/reconciler.js';
@@ -70,8 +70,75 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
         rejected: counts.rejected ?? 0,
       },
       liveSignerConfigured: signerReady.ready, // reported, never asserted
+
+      // ── the execution boundary, as it actually is right now ──
+      // Every field is measured at request time. Nothing here is a config
+      // value echoed back: `signerReady` is a live round trip to the signing
+      // service, `adapter` is a real health probe, and the balances come off
+      // the chain rather than out of our own ledger.
+      network: 'robinhood',
+      chainId: ROBINHOOD_MAINNET_CHAIN_ID,
+      settlementSymbol: SETTLEMENT.symbol,
+      signer: {
+        kind: app.signer.kind,
+        ready: signerReady.ready,
+        address: signerReady.address,
+        detail: signerReady.detail,
+      },
+      walletAddress: signerReady.address,
+      ...(await executionBoundary(app)),
     };
   });
+
+  /**
+   * Adapter health, wallet balances and the last reconciliation — the things
+   * an operator needs before deciding whether canary is safe to arm.
+   * Deliberately tolerant: a probe that fails reports the failure rather than
+   * throwing and taking the whole status endpoint down with it.
+   */
+  async function executionBoundary(app: AppContext) {
+    const adapter = app.adapters.get(ROBINHOOD_VENUE);
+    let adapterStatus = 'not registered';
+    let settlementBalance: number | null = null;
+    let ethGasBalance: number | null = null;
+
+    if (adapter) {
+      try {
+        const health = await adapter.health();
+        adapterStatus = `${health.status}${health.note ? ` — ${health.note}` : ''}`;
+      } catch (e) {
+        adapterStatus = `probe failed: ${String(e).slice(0, 80)}`;
+      }
+      if (typeof adapter.getBalances === 'function') {
+        try {
+          const balances = await adapter.getBalances();
+          settlementBalance = balances.find((b) => b.asset.toUpperCase() === SETTLEMENT.symbol.toUpperCase())?.qty ?? 0;
+          ethGasBalance = balances.find((b) => b.asset.toUpperCase() === 'ETH')?.qty ?? 0;
+        } catch {
+          // leave null: "we could not read it" is not the same as "it is zero"
+        }
+      }
+    }
+
+    const recon = app.db
+      .prepare(`SELECT ts, within_tolerance FROM balance_snapshots ORDER BY id DESC LIMIT 1`)
+      .get() as { ts: number; within_tolerance: number } | undefined;
+    const preflight = app.db
+      .prepare(`SELECT ts, target_mode, passed FROM preflight_runs ORDER BY id DESC LIMIT 1`)
+      .get() as { ts: number; target_mode: string; passed: number } | undefined;
+
+    return {
+      adapterStatus,
+      settlementBalance,
+      ethGasBalance,
+      lastReconciliation: recon
+        ? { at: recon.ts, clean: recon.within_tolerance === 1 }
+        : null,
+      preflightStatus: preflight
+        ? { at: preflight.ts, mode: preflight.target_mode, passed: preflight.passed === 1 }
+        : null,
+    };
+  }
 
   // GLOBAL PROCESS: the funnel, every number measured
   server.get('/api/live/process', async () => {

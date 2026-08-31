@@ -1,5 +1,7 @@
-import type { Instrument } from '@punklabz/shared';
-import { findInstrument } from './instruments.js';
+import {
+  ROBINHOOD_MAINNET_CHAIN_ID, WETH_ROBINHOOD, type Instrument,
+} from '@punklabz/shared';
+import { ROBINHOOD_VENUE, SETTLEMENT, findInstrument } from './instruments.js';
 
 // Paper signal → live instrument.
 //
@@ -55,7 +57,42 @@ export interface ResolutionResult {
  * Every address here must be verified against the venue's own documentation
  * before it is added. An unverified address in this table is an unbounded loss.
  */
-const LIVE_MAPPINGS: Record<string, LiveInstrumentSpec> = {};
+/**
+ * 0x's AllowanceHolder on Robinhood Chain — the only address this wallet may
+ * ever approve. Verified from a live `/swap/allowance-holder/price` response
+ * for USDG→WETH on chain 4663.
+ */
+export const ZEROX_ALLOWANCE_HOLDER = '0x0000000000001ff3684f28c67538d4d072c22734';
+
+const LIVE_MAPPINGS: Record<string, LiveInstrumentSpec> = {
+  // The ONLY live mapping. A paper ETHUSDT signal executes as WETH/USDG on
+  // Robinhood Chain — never as the Binance instrument the strategy named.
+  //
+  // Every address here was read from the chain, not from documentation:
+  // WETH decimals() = 18 and USDG decimals() = 6, both confirmed by direct
+  // eth_call in v11. The spender is 0x's AllowanceHolder, taken from a live
+  // quote response for this exact pair rather than from a blog post — a
+  // wrong spender is an approval handed to a contract nobody vetted.
+  ETHUSDT: {
+    id: `CRYPTO_SPOT://robinhood/WETH-${SETTLEMENT.symbol}`,
+    venue: ROBINHOOD_VENUE,
+    chainId: ROBINHOOD_MAINNET_CHAIN_ID,
+    base: {
+      chainId: ROBINHOOD_MAINNET_CHAIN_ID,
+      address: WETH_ROBINHOOD.address,
+      symbol: 'WETH',
+      decimals: WETH_ROBINHOOD.decimals,
+    },
+    quote: {
+      chainId: ROBINHOOD_MAINNET_CHAIN_ID,
+      address: SETTLEMENT.address,
+      symbol: SETTLEMENT.symbol,
+      decimals: SETTLEMENT.decimals,
+    },
+    spender: ZEROX_ALLOWANCE_HOLDER,
+    minNotionalUsd: 0.2,
+  },
+};
 
 export function resolveLiveInstrument(paperSymbol: string): ResolutionResult {
   const spec = LIVE_MAPPINGS[paperSymbol];
