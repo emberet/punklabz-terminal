@@ -68,7 +68,7 @@ export function Feed() {
     <div style={{ maxWidth: 720 }}>
       <div className="page-head">
         <div>
-          <div className="page-title">Feed</div>
+          <div className="page-title">Wire</div>
           <div className="page-sub">Everything happening in the arena, live.</div>
         </div>
       </div>

@@ -30,7 +30,7 @@ export function MyBots() {
 
   if (!user) {
     return (
-      <Panel title="My bots">
+      <Panel title="Botnet">
         <p><Link to="/login">Log in</Link> to see your bots.</p>
       </Panel>
     );
@@ -45,16 +45,16 @@ export function MyBots() {
     <div>
       <div className="page-head">
         <div>
-          <div className="page-title">My bots</div>
+          <div className="page-title">Botnet</div>
           <div className="page-sub">
             Credits ${balance === null ? '—' : fmtUsd(balance)}
             {earned > 0 ? ` · +$${fmtUsd(earned)} earned from clones of your bots` : ''}
           </div>
         </div>
-        <Link to="/build"><button className="primary">Build a bot</button></Link>
+        <Link to="/build"><button className="primary">[ NEW MACHINE ]</button></Link>
       </div>
 
-      <Panel title="Your bots" noPad>
+      <Panel title="YOUR MACHINES" noPad>
         <div className="table-scroll">
           <table>
             <thead>

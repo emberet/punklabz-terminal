@@ -1,9 +1,16 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Panel } from '../components/Panel';
 import { glyphs } from '../lib/glyphs';
 import { useAuth } from '../lib/auth';
+
+interface NetStats {
+  machinesOnline: number;
+  tradesToday: number;
+  operators: number;
+  season: { name: string; endsAt: number } | null;
+}
 
 export function Login() {
   const navigate = useNavigate();
@@ -14,6 +21,14 @@ export function Login() {
   const [displayName, setDisplayName] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const [stats, setStats] = useState<NetStats | null>(null);
+  const [booted, setBooted] = useState(false);
+
+  useEffect(() => {
+    void api.get<NetStats>('/api/network/stats').then(setStats).catch(() => {});
+    const t = setTimeout(() => setBooted(true), 500);
+    return () => clearTimeout(t);
+  }, []);
 
   const done = async () => {
     await refresh();
@@ -42,9 +57,7 @@ export function Login() {
     setErr('');
     try {
       const provider = (window as any).solana;
-      if (!provider?.isPhantom && !provider) {
-        throw new Error('no solana wallet found — install Phantom or use email');
-      }
+      if (!provider) throw new Error('no solana wallet found — install Phantom or use email');
       const { publicKey } = await provider.connect();
       const address = publicKey.toString();
       const { message } = await api.get<{ nonce: string; message: string }>(
@@ -52,10 +65,8 @@ export function Login() {
       );
       const encoded = new TextEncoder().encode(message);
       const signed = await provider.signMessage(encoded, 'utf8');
-      // Phantom returns { signature: Uint8Array }; encode as base58
       const sigBytes: Uint8Array = signed.signature ?? signed;
-      const signature = b58encode(sigBytes);
-      await api.post('/api/auth/wallet/verify', { address, signature });
+      await api.post('/api/auth/wallet/verify', { address, signature: b58encode(sigBytes) });
       await done();
     } catch (e: any) {
       setErr(e.message);
@@ -66,28 +77,42 @@ export function Login() {
 
   return (
     <div className="login-wrap">
-      <div className="login-box">
-        <Panel title="Welcome to Punklabz" sub="paper trading arena" noPad>
+      <div className="login-box glitch-in">
+        <div style={{ textAlign: 'center', marginBottom: 18 }}>
+          <div className="page-title" style={{ fontSize: 46 }}>Punklabz Network</div>
+          <div className="soft" style={{ letterSpacing: 2, fontSize: 11, textTransform: 'uppercase' }}>
+            Autonomous market research system
+          </div>
+          <div className="syslog" style={{ padding: '8px 0 0' }}>
+            {booted ? (
+              <>
+                <span className="ln ok">[ OK ] market feeds connected</span>
+                <span className="ln ok">[ OK ] {stats?.machinesOnline ?? '—'} machines online</span>
+                <span className="ln cursor">ready. build machines. test strategies. enter the arena.</span>
+              </>
+            ) : (
+              <span className="ln cursor">initializing interface…</span>
+            )}
+          </div>
+        </div>
+
+        <Panel title="ACCESS" noPad>
           <div className="login-cols">
             <div className="login-mosaic">
-              <pre className="glyphs faint">{glyphs(14, 6, 42)}</pre>
+              <pre className="glyphs faint">{glyphs(13, 6, 42)}</pre>
               <div className="acid-block" />
             </div>
             <div className="login-col">
-              <div className="acid">Wallet</div>
+              <div className="phos">WALLET</div>
               <p className="dim">Sign a message with your Solana wallet. No password, no email.</p>
               <button className="primary" onClick={walletLogin} disabled={busy}>
-                Connect wallet
+                [ Connect wallet ]
               </button>
             </div>
             <div className="login-col">
-              <div className="acid">{mode === 'login' ? 'Email' : 'Create account'}</div>
+              <div className="phos">{mode === 'login' ? 'CREDENTIALS' : 'NEW OPERATOR'}</div>
               {mode === 'register' && (
-                <input
-                  placeholder="display name"
-                  value={displayName}
-                  onChange={(e) => setDisplayName(e.target.value)}
-                />
+                <input placeholder="operator handle" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
               )}
               <input placeholder="email" value={email} onChange={(e) => setEmail(e.target.value)} />
               <input
@@ -98,20 +123,20 @@ export function Login() {
                 onKeyDown={(e) => e.key === 'Enter' && submitEmail()}
               />
               <button onClick={submitEmail} disabled={busy}>
-                {mode === 'login' ? 'Sign in' : 'Create account'}
+                {mode === 'login' ? '[ Connect ]' : '[ Initialize operator ]'}
               </button>
-              <a
-                onClick={() => setMode(mode === 'login' ? 'register' : 'login')}
-                style={{ cursor: 'pointer' }}
-                className="dim"
-              >
-                {mode === 'login' ? 'Need an account? Register →' : '← Back to sign in'}
+              <a onClick={() => setMode(mode === 'login' ? 'register' : 'login')} style={{ cursor: 'pointer' }} className="dim">
+                {mode === 'login' ? 'no account? initialize →' : '← back'}
               </a>
             </div>
           </div>
           {err && <div className="panel-body error-text">{err}</div>}
-          <div className="panel-body dim" style={{ fontSize: 11 }}>
-            New accounts get $100 in demo credits · paper trading only — no real funds involved
+          <div className="boot-stats">
+            <span><b>{stats?.machinesOnline ?? '—'}</b> MACHINES ONLINE</span>
+            <span><b>{stats?.tradesToday ?? '—'}</b> TRADES TODAY</span>
+            <span><b>{stats?.operators ?? '—'}</b> OPERATORS</span>
+            {stats?.season && <span><b>{stats.season.name}</b> RUNNING</span>}
+            <span className="amber">SIMULATION — NO REAL FUNDS</span>
           </div>
         </Panel>
       </div>

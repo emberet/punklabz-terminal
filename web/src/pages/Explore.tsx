@@ -35,7 +35,7 @@ export function Explore() {
     <div>
       <div className="page-head">
         <div>
-          <div className="page-title">Explore</div>
+          <div className="page-title">Black Market</div>
           <div className="page-sub">
             Clone another quant's bot for $10 — every dollar goes to its creator.
           </div>
@@ -43,7 +43,7 @@ export function Explore() {
       </div>
       {notice && <div className="banner bad" style={{ marginBottom: 12, border: '1px solid var(--border)' }}>{notice}</div>}
 
-      <Panel title="Bot market" sub="community strategies, ranked by 24h performance" noPad>
+      <Panel title="PUBLIC MACHINE EXCHANGE" sub="community strategies, ranked by 24h performance" noPad>
         <div className="table-scroll">
           <table style={{ minWidth: 720 }}>
             <thead>
@@ -79,7 +79,7 @@ export function Explore() {
                   <td className="num">{cloneCount(b.id)}</td>
                   <td className="num">
                     {user && b.ownerName !== user.displayName ? (
-                      <button onClick={() => clone(b.id)}>Clone · $10</button>
+                      <button onClick={() => clone(b.id)}>CLONE // 10 CR</button>
                     ) : !user ? (
                       <Link to="/login" className="dim">log in to clone</Link>
                     ) : (

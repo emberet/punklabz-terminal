@@ -77,18 +77,18 @@ export function Build() {
       <div style={{ maxWidth: 700 }}>
         <div className="page-head">
           <div>
-            <div className="page-title">Bot Builder</div>
-            <div className="page-sub">Describe your strategy. We'll turn it into a bot.</div>
+            <div className="page-title">Lab</div>
+            <div className="page-sub">BUILD // TEST // MUTATE // DEPLOY</div>
           </div>
         </div>
-        <Panel title="No code needed">
+        <Panel title="MACHINE LABORATORY" term>
           <p>
             Tell the builder what you want in plain English — "buy bitcoin dips, sell at 5% profit" —
             and it becomes a live bot competing in the arena. Backtest it first, deploy it for $20,
             earn $10 every time someone clones it.
           </p>
           <p style={{ marginTop: 10 }}>
-            <Link to="/login"><button className="primary">Log in to build</button></Link>
+            <Link to="/login"><button className="primary">[ CONNECT TO BUILD ]</button></Link>
           </p>
         </Panel>
       </div>
@@ -143,17 +143,21 @@ export function Build() {
     }
   };
 
+  const [deploying, setDeploying] = useState<'run' | 'done' | null>(null);
+
   const deploy = async () => {
     if (!draft) return;
     setBusy(true);
     setNotice('');
+    setDeploying('run');
     try {
       const res = await api.post<{ botId: number }>('/api/bots', { config: draft });
       loadMoney();
-      navigate(`/bots/${res.botId}`);
+      setDeploying('done');
+      setTimeout(() => navigate(`/bots/${res.botId}`), 1100);
     } catch (e: any) {
       setNotice(e.message);
-    } finally {
+      setDeploying(null);
       setBusy(false);
     }
   };
@@ -163,10 +167,30 @@ export function Build() {
 
   return (
     <div>
+      {deploying && (
+        <div className="cmdk-overlay">
+          <div className="cmdk glitch-in">
+            <div className="cmdk-head">machine deployment</div>
+            <div className="syslog" style={{ padding: '12px 14px' }}>
+              <span className="ln ok">[ OK ] INITIALIZING MACHINE…</span>
+              <span className="ln ok">[ OK ] ALLOCATING CAPITAL…</span>
+              <span className="ln ok">[ OK ] CONNECTING MARKET FEED…</span>
+              {deploying === 'done' ? (
+                <>
+                  <span className="ln ok">[ OK ] STRATEGY LOADED · PARAMETERS VERIFIED</span>
+                  <span className="ln phos" style={{ fontSize: 15 }}>MACHINE ONLINE.</span>
+                </>
+              ) : (
+                <span className="ln cursor">LOADING STRATEGY…</span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       <div className="page-head">
         <div>
-          <div className="page-title">Bot Builder</div>
-          <div className="page-sub">Describe your strategy. We'll turn it into a bot.</div>
+          <div className="page-title">Lab</div>
+          <div className="page-sub">BUILD // TEST // MUTATE // DEPLOY — describe a machine, we synthesize it.</div>
         </div>
         <div style={{ textAlign: 'right' }}>
           <div className="dim" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>Credits</div>
@@ -179,7 +203,7 @@ export function Build() {
       {notice && <div className="banner bad" style={{ marginBottom: 12, border: '1px solid var(--border)' }}>{notice}</div>}
 
       <div className="toolkit-layout">
-        <Panel title="Builder" sub="tell it what to trade" noPad>
+        <Panel title="SYNTHESIS" sub="tell it what to trade" noPad>
           <div className="chat-log" ref={logRef}>
             {messages.length === 0 && (
               <>
@@ -199,7 +223,13 @@ export function Build() {
             {messages.map((m, i) => (
               <div key={i} className={`chat-msg ${m.role}`}>{m.content}</div>
             ))}
-            {busy && <div className="chat-msg assistant dim">thinking…</div>}
+            {busy && (
+              <div className="syslog">
+                <span className="ln ok">PARSING INTENT…</span>
+                <span className="ln ok">BUILDING CONDITIONS…</span>
+                <span className="ln cursor">VALIDATING DSL…</span>
+              </div>
+            )}
           </div>
           <div className="chat-input">
             <input
@@ -214,11 +244,11 @@ export function Build() {
         </Panel>
 
         <div>
-          <Panel title="Strategy config" sub="what will be deployed" noPad>
+          <Panel title="STRATEGY BLUEPRINT" sub="what will be deployed" noPad>
             {summary ? (
               <>
                 <div className={`banner ${draftValid ? 'ok' : 'bad'}`}>
-                  {draftValid ? '✓ CONFIG VALID — READY TO DEPLOY' : `✗ INVALID: ${errors.join('; ')}`}
+                  {draftValid ? '✓ MACHINE CONFIGURATION GENERATED — READY' : `✗ INVALID: ${errors.join('; ')}`}
                 </div>
                 <div className="panel-body">
                   <div className="dim" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>Market</div>
@@ -253,7 +283,7 @@ export function Build() {
                   ))}
                   <span className="spacer" />
                   <button className="primary" disabled={!draftValid || busy} onClick={deploy}>
-                    Deploy bot · $20
+                    DEPLOY MACHINE · $20
                   </button>
                 </div>
                 {afterDeploy !== null && draftValid && (

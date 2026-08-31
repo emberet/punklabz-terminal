@@ -69,7 +69,7 @@ export function Manager() {
   return (
     <div>
       <Panel
-        title="Payouts" sub="daily distribution of house-bot profits to PunkLabz holders"
+        title="CONTROL ROOM // PAYOUTS" sub="daily distribution of house-machine profits to PunkLabz holders"
         right={user?.isAdmin ? <button onClick={runNow} disabled={busy}>Close epoch now</button> : undefined}
       >
         <p className="dim">

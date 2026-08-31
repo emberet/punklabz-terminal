@@ -13,6 +13,7 @@ import { MyBots } from './pages/MyBots';
 import { Manager } from './pages/Manager';
 import { Learn } from './pages/Learn';
 import { Login } from './pages/Login';
+import { Signals } from './pages/Signals';
 import { Feed } from './pages/Feed';
 import { Profile } from './pages/Profile';
 
@@ -29,12 +30,14 @@ const router = createBrowserRouter([
       { path: 'my-bots', element: <MyBots /> },
       { path: 'feed', element: <Feed /> },
       { path: 'u/:id', element: <Profile /> },
-      { path: 'admin/payouts', element: <Manager /> },
+      { path: 'control-room', element: <Manager /> },
+      { path: 'signals', element: <Signals /> },
       { path: 'learn', element: <Learn /> },
       { path: 'login', element: <Login /> },
       // legacy routes from v1
       { path: 'toolkit', element: <Navigate to="/build" replace /> },
-      { path: 'manager', element: <Navigate to="/admin/payouts" replace /> },
+      { path: 'manager', element: <Navigate to="/control-room" replace /> },
+      { path: 'admin/payouts', element: <Navigate to="/control-room" replace /> },
       { path: 'docs', element: <Navigate to="/learn" replace /> },
     ],
   },

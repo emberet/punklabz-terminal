@@ -7,6 +7,7 @@ import { Panel } from '../components/Panel';
 import { Sparkline } from '../components/Sparkline';
 import { AgentPanel } from '../components/AgentPanel';
 import { PersonaPanel, type AppliedMod, type Persona } from '../components/PersonaPanel';
+import { machineAvatar, machineId, CLASS_LABELS } from '../lib/ascii';
 import { arrow, fmtUsd, fmtPct, fmtPx, fmtTime, pillClass, pnlClass, shortAddr } from '../lib/format';
 import { useAuth } from '../lib/auth';
 
@@ -47,14 +48,18 @@ export function BotDetail() {
     <div>
       <div className="page-head">
         <div>
+          <div className="dim" style={{ fontSize: 10, letterSpacing: 2 }}>
+            ╔ MACHINE DOSSIER · {machineId(bot.id, bot.name)}
+          </div>
           <div className="page-title row" style={{ gap: 12 }}>
+            <span className="bot-avatar" style={{ fontSize: 26 }}>{machineAvatar(bot.id, bot.name)}</span>
             {bot.name}
             <span className={`chip chip-${bot.status}`}>● {bot.status}</span>
             {bot.kind === 'house' && <span className="chip chip-house">house</span>}
           </div>
           <div className="page-sub">
-            {bot.strategyType}
-            {bot.ownerName ? ` · by ${bot.ownerName}` : ' · house bot'}
+            CLASS: {CLASS_LABELS[bot.strategyType] ?? CLASS_LABELS.dsl}
+            {bot.ownerName ? ` · OPERATOR: ${bot.ownerName}` : ' · property of the house'}
           </div>
         </div>
         {isOwner && bot.kind === 'quant' && (
@@ -154,7 +159,7 @@ export function BotDetail() {
         </div>
       </Panel>
 
-      <Panel title="Trade log" noPad>
+      <Panel title="Decision log" sub="every trade, with the machine's stated reason" noPad>
         <div className="table-scroll">
           <table style={{ minWidth: 760 }}>
             <thead>

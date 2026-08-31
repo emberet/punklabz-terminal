@@ -6,15 +6,22 @@ import { fmtPx, fmtPct } from '../lib/format';
 type Prices = Record<string, { price: number; changePct24h: number }>;
 type Feeds = Record<string, { connected: boolean; stale: boolean }>;
 
-export function TickerBar() {
+interface NetStats {
+  machinesOnline: number;
+  tradesToday: number;
+  season: { name: string; endsAt: number } | null;
+}
+
+export function TopBar() {
   const [prices, setPrices] = useState<Prices>({});
   const [feeds, setFeeds] = useState<Feeds>({});
-  const [flashes, setFlashes] = useState<Record<string, 'flash-pos' | 'flash-neg'>>({});
+  const [stats, setStats] = useState<NetStats | null>(null);
+  const [clock, setClock] = useState('');
+  const [flashes, setFlashes] = useState<Record<string, string>>({});
 
-  // flash a symbol's price cell when it ticks (tinted background, fades out)
   const applyPrices = (next: Prices) => {
     setPrices((prev) => {
-      const f: Record<string, 'flash-pos' | 'flash-neg'> = {};
+      const f: Record<string, string> = {};
       for (const [sym, p] of Object.entries(next)) {
         const old = prev[sym]?.price;
         if (old !== undefined && p.price !== old) f[sym] = p.price > old ? 'flash-pos' : 'flash-neg';
@@ -28,18 +35,24 @@ export function TickerBar() {
   };
 
   useEffect(() => {
-    void api
-      .get<{ prices: Prices; feeds: Feeds }>('/api/market/prices')
-      .then((r) => {
-        applyPrices(r.prices);
-        setFeeds(r.feeds);
-      })
-      .catch(() => {});
+    void api.get<{ prices: Prices; feeds: Feeds }>('/api/market/prices').then((r) => {
+      applyPrices(r.prices);
+      setFeeds(r.feeds);
+    }).catch(() => {});
+    const loadStats = () => api.get<NetStats>('/api/network/stats').then(setStats).catch(() => {});
+    void loadStats();
     const un1 = wsClient.sub('prices', (d) => applyPrices(d as Prices));
     const un2 = wsClient.sub('feedstatus', (d) => setFeeds(d as Feeds));
+    const t1 = setInterval(loadStats, 60_000);
+    const t2 = setInterval(
+      () => setClock(new Date().toISOString().slice(11, 19)),
+      1000,
+    );
     return () => {
       un1();
       un2();
+      clearInterval(t1);
+      clearInterval(t2);
     };
   }, []);
 
@@ -47,7 +60,9 @@ export function TickerBar() {
   const anyDown = Object.values(feeds).some((f) => !f.connected);
 
   return (
-    <div className="ticker">
+    <div className="topbar">
+      <span className="node">PUNKLABZ<span style={{ opacity: 0.5 }}>▮</span></span>
+      <span className="stat dim">NODE 042</span>
       {['BTCUSDT', 'ETHUSDT', 'SOLUSDT'].map((sym) => {
         const p = prices[sym];
         return (
@@ -64,16 +79,21 @@ export function TickerBar() {
           </span>
         );
       })}
-      <span style={{ marginLeft: 'auto' }}>
+      {stats && (
+        <>
+          <span className="stat">MACHINES <b>{stats.machinesOnline}</b></span>
+          <span className="stat">TRADES <b>{stats.tradesToday}</b></span>
+        </>
+      )}
+      <span className="clock">
         {anyDown ? (
-          <span className="feed-down">■ FEED DOWN</span>
+          <span className="feed-down">■ FEED DOWN </span>
         ) : anyStale ? (
-          <span className="feed-stale">■ FEED STALE</span>
-        ) : Object.keys(feeds).length ? (
-          <span className="feed-ok">■ FEED LIVE</span>
+          <span className="feed-stale">■ STALE </span>
         ) : (
-          <span className="dim">■ CONNECTING</span>
+          <span className="feed-ok">■ LIVE </span>
         )}
+        UTC {clock}
       </span>
     </div>
   );

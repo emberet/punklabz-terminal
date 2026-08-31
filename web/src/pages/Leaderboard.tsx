@@ -47,9 +47,9 @@ export function Leaderboard() {
     <div>
       <div className="page-head">
         <div>
-          <div className="page-title">Leaderboard</div>
+          <div className="page-title">Ranks</div>
           <div className="page-sub">
-            Every bot in the arena, ranked.
+            Every machine in the arena, ranked. The machines have started thinking.
             {season && win === 'season' && (
               <span className="acid"> {season.season.name} — {Math.ceil(season.countdownMs / 86_400_000)} days left</span>
             )}

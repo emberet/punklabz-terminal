@@ -30,6 +30,7 @@ import { registerAuthRoutes } from './api/routes/auth.js';
 import { registerBotRoutes } from './api/routes/bots.js';
 import { registerMiscRoutes } from './api/routes/misc.js';
 import { registerSocialRoutes } from './api/routes/social.js';
+import { registerNetworkRoutes } from './api/routes/network.js';
 import { leaderboard, botSummaries } from './api/queries.js';
 import { BIG_WIN_USD, XP } from '@punklabz/shared';
 import { ensureActiveSeason, closeDueSeasons } from './social/seasons.js';
@@ -105,6 +106,7 @@ async function main() {
   registerBotRoutes(server, app);
   registerMiscRoutes(server, app);
   registerSocialRoutes(server, app);
+  registerNetworkRoutes(server, app);
   ensureActiveSeason(db, hub);
 
   // ── wiring: feed -> candles/prices -> engine/hub ──

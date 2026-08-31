@@ -7,15 +7,7 @@ import { Panel } from '../components/Panel';
 import { Sparkline } from '../components/Sparkline';
 import { MemesPanel } from '../components/MemesPanel';
 import { arrow, fmtUsd, fmtPct, fmtPx, fmtTime, pillClass, pnlClass, shortAddr } from '../lib/format';
-
-const STRAT_META: Record<string, { label: string; market: string; tf: string; risk: string }> = {
-  momentum: { label: 'Momentum', market: 'BTC · ETH · SOL', tf: '15m', risk: 'medium' },
-  mean_reversion: { label: 'Mean reversion', market: 'BTC · ETH · SOL', tf: '5m', risk: 'medium' },
-  grid: { label: 'Grid', market: 'BTC · ETH · SOL', tf: '1m', risk: 'low' },
-  pump_sniper: { label: 'Pump sniper', market: 'pump.fun', tf: 'live', risk: 'degen' },
-  herd_sentiment: { label: 'Herd sentiment', market: 'pump.fun', tf: 'live', risk: 'degen' },
-  dsl: { label: 'Custom', market: 'majors', tf: '—', risk: 'custom' },
-};
+import { asciiSpark, machineAvatar, machineId, CLASS_LABELS, HOUSE_TAGLINES } from '../lib/ascii';
 
 interface SeasonInfo {
   season: { id: number; name: string; endsAt: number };
@@ -27,7 +19,7 @@ function countdownText(ms: number): string {
   const d = Math.floor(ms / 86_400_000);
   const h = Math.floor((ms % 86_400_000) / 3_600_000);
   const m = Math.floor((ms % 3_600_000) / 60_000);
-  return d > 0 ? `${d}d ${h}h` : `${h}h ${m}m`;
+  return d > 0 ? `${d}D ${h}H` : `${h}H ${m}M`;
 }
 
 export function TradingFloor() {
@@ -35,6 +27,7 @@ export function TradingFloor() {
   const [tape, setTape] = useState<TradeView[]>([]);
   const [sparks, setSparks] = useState<Record<number, number[]>>({});
   const [season, setSeason] = useState<SeasonInfo | null>(null);
+  const [expanded, setExpanded] = useState<number | null>(null);
 
   const load = () =>
     api.get<{ bots: BotSummary[] }>('/api/bots').then((r) => {
@@ -61,68 +54,70 @@ export function TradingFloor() {
     };
   }, []);
 
-  const totalEquity = bots.reduce((s, b) => s + b.equityUsd, 0);
-  const totalInitial = bots.reduce((s, b) => s + b.initialBalanceUsd, 0);
+  const race = [...bots].sort((a, b) => b.pnlPct24h - a.pnlPct24h);
   const totalTrades = bots.reduce((s, b) => s + b.tradeCount, 0);
-  const pnl24hAvg = bots.length ? bots.reduce((s, b) => s + b.pnlPct24h, 0) / bots.length : 0;
-  const nextEpochMs = (Math.floor(Date.now() / 86_400_000) + 1) * 86_400_000 - Date.now();
 
   return (
     <div>
       <div className="page-head">
         <div>
-          <div className="page-title">Arena</div>
-          <div className="page-sub">Live bots trading real market data with simulated balances.</div>
-        </div>
-      </div>
-
-      <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', marginBottom: 16 }}>
-        <div className="stat-tile invert">
-          <div className="label">Arena equity</div>
-          <div className="value">${fmtUsd(totalEquity, 0)}</div>
-        </div>
-        <div className={`stat-tile ${totalEquity - totalInitial > 0 ? 'pos' : totalEquity - totalInitial < 0 ? 'neg' : ''}`}>
-          <div className="label">All-time P&L</div>
-          <div className="value">
-            {totalEquity - totalInitial >= 0 ? '+' : '−'}${fmtUsd(Math.abs(totalEquity - totalInitial), 0)}
-          </div>
-        </div>
-        <div className="stat-tile">
-          <div className="label">Avg 24h</div>
-          <div className="value">{fmtPct(pnl24hAvg)}</div>
-        </div>
-        <div className="stat-tile">
-          <div className="label">Trades</div>
-          <div className="value">{totalTrades}</div>
-        </div>
-        <div className="stat-tile">
-          <div className="label">{season ? season.season.name : 'Next payout'}</div>
-          <div className="value">
-            {season ? countdownText(season.countdownMs) : countdownText(nextEpochMs)}
+          <div className="page-title">Arena // Live</div>
+          <div className="page-sub">
+            {bots.length} MACHINES ACTIVE · {totalTrades} TRADES ·{' '}
+            {season ? `${season.season.name} ENDS ${countdownText(season.countdownMs)}` : 'SESSION OPEN'} ·
+            simulated balances, real market data
           </div>
         </div>
       </div>
 
-      <div className="grid grid-bots" style={{ marginBottom: 14 }}>
+      <Panel title="LIVE BOT RACE" sub="session return, re-ranked in real time" noPad>
+        <div className="table-scroll">
+          <table style={{ minWidth: 560 }}>
+            <tbody>
+              {race.map((b, i) => (
+                <tr key={b.id}>
+                  <td className={i < 3 ? 'phos' : 'dim'} style={{ width: 34 }}>
+                    {String(i + 1).padStart(2, '0')}
+                  </td>
+                  <td>
+                    <span className="bot-avatar" style={{ marginRight: 8 }}>{machineAvatar(b.id, b.name)}</span>
+                    <Link to={`/bots/${b.id}`}>{b.name}</Link>
+                    {b.kind === 'house' && <span className="chip chip-house" style={{ marginLeft: 6 }}>house</span>}
+                  </td>
+                  <td className="ascii-spark" style={{ width: 120 }}>{asciiSpark(sparks[b.id] ?? [], 12)}</td>
+                  <td className="num" style={{ width: 110 }}>
+                    <span className={`pill ${pillClass(b.pnlPct24h)}`}>
+                      {fmtPct(b.pnlPct24h)} {arrow(b.pnlPct24h)}
+                    </span>
+                  </td>
+                  <td className="num dim" style={{ width: 100 }}>${fmtUsd(b.equityUsd, 0)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+
+      <div className="grid grid-bots" style={{ marginBottom: 12 }}>
         {bots.map((b) => {
-          const meta = STRAT_META[b.strategyType] ?? STRAT_META.dsl;
+          const meta = CLASS_LABELS[b.strategyType] ?? CLASS_LABELS.dsl;
+          const tagline = HOUSE_TAGLINES[b.strategyType];
           const sells = Math.max(1, Math.round(b.tradeCount / 2));
           const winRate = b.tradeCount > 0 ? Math.round((b.winCount / sells) * 100) : 0;
           return (
             <Link key={b.id} to={`/bots/${b.id}`} style={{ color: 'inherit' }}>
               <div className="bot-card">
+                <span className="machine-id">{machineId(b.id, b.name)}</span>
                 <div className="bot-head">
+                  <span className="bot-avatar">{machineAvatar(b.id, b.name)}</span>
                   <span className="bot-name">{b.name}</span>
-                  {b.kind === 'house' && <span className="chip chip-house">house</span>}
-                  <span className={`chip chip-${b.status}`} style={{ marginLeft: 'auto' }}>
-                    ● {b.status}
-                  </span>
                 </div>
                 <div className="bot-pnl-row">
                   <span className={`pill ${pillClass(b.pnlPct24h)}`}>
                     {fmtPct(b.pnlPct24h)} {arrow(b.pnlPct24h)}
                   </span>
-                  <span className="when">24h</span>
+                  <span className="when">24H</span>
+                  <span className={`chip chip-${b.status}`} style={{ marginLeft: 10 }}>● {b.status}</span>
                 </div>
                 <div className="bot-equity-label">Equity</div>
                 <div className="bot-equity">${fmtUsd(b.equityUsd, 0)}</div>
@@ -130,14 +125,13 @@ export function TradingFloor() {
                   <Sparkline values={sparks[b.id] ?? []} />
                 </div>
                 <div className="bot-meta">
-                  {meta.label} · {meta.market} · {meta.tf}
-                  {b.ownerName ? ` · by ${b.ownerName}` : ''}
+                  CLASS: {meta}
+                  {b.ownerName ? ` · OPERATOR: ${b.ownerName}` : ''}
                 </div>
                 <div className="bot-stats-line">
-                  {b.tradeCount > 0 ? `${winRate}% win rate · ` : ''}
-                  {b.tradeCount} trades · {meta.risk} risk
+                  {tagline ? `"${tagline}"` : `${b.tradeCount > 0 ? `${winRate}% win rate · ` : ''}${b.tradeCount} trades`}
                 </div>
-                <div className="bot-cta">VIEW BOT →</div>
+                <div className="bot-cta">OPEN DOSSIER →</div>
               </div>
             </Link>
           );
@@ -146,22 +140,35 @@ export function TradingFloor() {
 
       <MemesPanel />
 
-      <Panel title="TAPE ▸ ALL BOTS" term noPad right={<span className="chip chip-running">LIVE</span>}>
+      <Panel title="TAPE ▸ ALL MACHINES" term noPad right={<span className="chip chip-running">LIVE</span>}>
         <div className="tape">
           {tape.length === 0 && <div className="tape-row dim">waiting for trades…</div>}
           {tape.map((t, i) => (
-            <div className="tape-row" key={`${t.id}-${i}`}>
-              <span className="t">{fmtTime(t.ts)}</span>
-              <span className={t.side === 'buy' ? 'side-buy' : 'side-sell'}>{t.side.toUpperCase()}</span>
-              <span>{t.symbol.length > 20 ? shortAddr(t.symbol) : t.symbol}</span>
-              <span className="num">{fmtPx(t.price)}</span>
-              <span className="dim">{t.botName ?? `bot #${t.botId}`}</span>
-              {t.reason && <span className="soft">{t.reason}</span>}
-              {t.side === 'sell' && (
-                <span className={pnlClass(t.realizedPnlUsd)}>
-                  {t.realizedPnlUsd >= 0 ? '+' : ''}
-                  {fmtUsd(t.realizedPnlUsd)}
-                </span>
+            <div key={`${t.id}-${i}`}>
+              <div
+                className="tape-row"
+                style={{ cursor: t.reason ? 'pointer' : 'default' }}
+                onClick={() => setExpanded(expanded === t.id ? null : t.id)}
+              >
+                <span className="t">{fmtTime(t.ts)}</span>
+                <span className={t.side === 'buy' ? 'side-buy' : 'side-sell'}>{t.side.toUpperCase()}</span>
+                <span>{t.symbol.length > 20 ? shortAddr(t.symbol) : t.symbol}</span>
+                <span className="num">{fmtPx(t.price)}</span>
+                <span className="dim">{t.botName ?? `M-${t.botId}`}</span>
+                {t.side === 'sell' && (
+                  <span className={pnlClass(t.realizedPnlUsd)}>
+                    {t.realizedPnlUsd >= 0 ? '+' : ''}
+                    {fmtUsd(t.realizedPnlUsd)}
+                  </span>
+                )}
+                {t.reason && <span className="dim">{expanded === t.id ? '▲' : '▼'}</span>}
+              </div>
+              {expanded === t.id && t.reason && (
+                <div className="tape-row" style={{ background: 'var(--tint-hover)' }}>
+                  <span className="dim">WHY:</span>
+                  <span className="soft">{t.reason}</span>
+                  <span className="phos">[ DECISION LOGGED ]</span>
+                </div>
               )}
             </div>
           ))}

@@ -41,6 +41,7 @@ export const BADGES: Record<string, { label: string; description: string }> = {
   clones_5: { label: '5 CLONES', description: 'Your bots were cloned 5 times' },
   season_top10: { label: 'TOP 10', description: 'Finished a season in the top 10' },
   streak_7d: { label: '7 DAY STREAK', description: 'A bot grew 7 days in a row' },
+  ghost_machine: { label: 'GHOST IN THE MACHINE', description: 'Found something that was not supposed to be found' },
 };
 
 export const BIG_WIN_USD = 100;
