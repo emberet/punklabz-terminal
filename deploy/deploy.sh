@@ -9,9 +9,16 @@ DRY="${2:-}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST=/opt/punklabz
 
+# --delete removes anything on the server that is not in this checkout, so
+# every server-side directory MUST be excluded explicitly. `backups` is here
+# because it was not, and a deploy deleted the database backup that had been
+# taken minutes earlier to protect that very deploy. The migrations happened to
+# succeed; had they not, the rollback had already been destroyed by the thing
+# it was insuring against.
 RSYNC_FLAGS=(-az --delete
   --exclude node_modules --exclude dist --exclude data
-  --exclude .env --exclude .git --exclude .claude)
+  --exclude .env --exclude .git --exclude .claude
+  --exclude backups --exclude '*.bak' --exclude .DS_Store)
 [[ "$DRY" == "--dry-run" ]] && RSYNC_FLAGS+=(--dry-run -v)
 
 echo ">> rsync -> $HOST:$DEST"
