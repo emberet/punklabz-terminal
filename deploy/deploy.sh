@@ -22,7 +22,7 @@ rsync "${RSYNC_FLAGS[@]}" "$ROOT/" "$HOST:$DEST/"
 echo ">> remote build + restart"
 ssh "$HOST" "set -e
   cd $DEST
-  npm install --omit=optional
+  npm install
   npm run build
   chown -R punklabz:punklabz $DEST
   systemctl restart punklabz
