@@ -6,6 +6,8 @@ import { awardBadge, checkCloneBadges } from '../../social/badges.js';
 import { emitActivity } from '../../social/activity.js';
 import { botChat } from '../../toolkit/botChat.js';
 import { rrProbability } from '../../analysis/rr.js';
+import { applyPersonaToConfig, distillTraits, parsePersona, savePersona } from '../../toolkit/persona.js';
+import { strategyConfigSchema } from '@punklabz/shared';
 import type { AppContext } from '../context.js';
 import { botSummaries } from '../queries.js';
 import { requireUser } from './auth.js';
@@ -43,8 +45,57 @@ export function registerBotRoutes(server: FastifyInstance, app: AppContext) {
       .prepare(`SELECT ts, equity_micro FROM bot_metrics WHERE bot_id = ? ORDER BY ts ASC LIMIT 2880`)
       .all(id)
       .map((m: any) => ({ ts: m.ts, equityUsd: fromMicro(m.equity_micro) }));
-    const cfgRow = app.db.prepare('SELECT config_json, owner_user_id FROM bots WHERE id = ?').get(id) as any;
-    return { bot, positions, trades, metrics, config: JSON.parse(cfgRow.config_json) };
+    const cfgRow = app.db.prepare('SELECT config_json, persona_json, owner_user_id FROM bots WHERE id = ?').get(id) as any;
+    const persona = parsePersona(cfgRow.persona_json);
+    let personaMods = null;
+    if (persona && cfgRow.config_json && bot.strategyType === 'dsl') {
+      const parsed = strategyConfigSchema.safeParse(JSON.parse(cfgRow.config_json));
+      if (parsed.success) personaMods = applyPersonaToConfig(parsed.data, persona.traits).mods;
+    }
+    return { bot, positions, trades, metrics, config: JSON.parse(cfgRow.config_json), persona, personaMods };
+  });
+
+  // set/replace the agent's personality (owner only) — distilled once, applied at runtime
+  server.post('/api/bots/:id/persona', {
+    config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const user = requireUser(app, request, reply);
+    if (!user) return;
+    const { id } = z.object({ id: z.coerce.number() }).parse(request.params);
+    const body = z.object({ intro: z.string().min(10).max(1500) }).parse(request.body);
+    const bot = app.db.prepare('SELECT owner_user_id, kind FROM bots WHERE id = ?').get(id) as any;
+    if (!bot) return reply.code(404).send({ error: 'bot not found' });
+    if (bot.kind !== 'quant' || (bot.owner_user_id !== user.id && !user.isAdmin))
+      return reply.code(403).send({ error: 'only the owner can set a quant bot personality' });
+
+    const traits = await distillTraits(body.intro, []);
+    const persona = { intro: body.intro, notes: [], traits, updatedAt: Date.now() };
+    savePersona(app.db, id, persona);
+    app.engine.reloadBot(id);
+    return { ok: true, persona };
+  });
+
+  // train the personality with a note — re-distills traits
+  server.post('/api/bots/:id/persona/train', {
+    config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const user = requireUser(app, request, reply);
+    if (!user) return;
+    const { id } = z.object({ id: z.coerce.number() }).parse(request.params);
+    const body = z.object({ note: z.string().min(3).max(300) }).parse(request.body);
+    const bot = app.db.prepare('SELECT owner_user_id, kind, persona_json FROM bots WHERE id = ?').get(id) as any;
+    if (!bot) return reply.code(404).send({ error: 'bot not found' });
+    if (bot.kind !== 'quant' || (bot.owner_user_id !== user.id && !user.isAdmin))
+      return reply.code(403).send({ error: 'only the owner can train this bot' });
+    const existing = parsePersona(bot.persona_json);
+    if (!existing) return reply.code(400).send({ error: 'set a personality first' });
+
+    const notes = [...existing.notes, body.note].slice(-20);
+    const traits = await distillTraits(existing.intro, notes);
+    const persona = { ...existing, notes, traits, updatedAt: Date.now() };
+    savePersona(app.db, id, persona);
+    app.engine.reloadBot(id);
+    return { ok: true, persona };
   });
 
   // deploy a quant bot from a validated DSL config — charges the $20 creation fee

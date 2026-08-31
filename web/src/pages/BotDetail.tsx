@@ -6,6 +6,7 @@ import { wsClient } from '../lib/ws';
 import { Panel } from '../components/Panel';
 import { Sparkline } from '../components/Sparkline';
 import { AgentPanel } from '../components/AgentPanel';
+import { PersonaPanel, type AppliedMod, type Persona } from '../components/PersonaPanel';
 import { arrow, fmtUsd, fmtPct, fmtPx, fmtTime, pillClass, pnlClass, shortAddr } from '../lib/format';
 import { useAuth } from '../lib/auth';
 
@@ -15,6 +16,8 @@ interface Detail {
   trades: TradeView[];
   metrics: { ts: number; equityUsd: number }[];
   config: unknown;
+  persona: Persona | null;
+  personaMods: AppliedMod[] | null;
 }
 
 export function BotDetail() {
@@ -94,6 +97,15 @@ export function BotDetail() {
           <div className="value">${fmtUsd(bot.cashUsd, 0)}</div>
         </div>
       </div>
+
+      {isOwner && bot.kind === 'quant' && (
+        <PersonaPanel
+          botId={bot.id}
+          persona={detail.persona}
+          personaMods={detail.personaMods}
+          onChanged={() => void load()}
+        />
+      )}
 
       <AgentPanel
         botId={bot.id}

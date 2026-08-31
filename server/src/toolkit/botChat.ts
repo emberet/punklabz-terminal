@@ -7,6 +7,7 @@ import type { CandleStore } from '../feeds/candles.js';
 import { ema, rsi, sma } from '../engine/indicators.js';
 import { getOpenPositions } from '../engine/accounting.js';
 import { fromMicro } from '../money.js';
+import { parsePersona } from './persona.js';
 
 const MODEL = 'claude-haiku-4-5-20251001';
 
@@ -81,9 +82,10 @@ export async function botChat(
   }
   const { db, candles, markOf } = deps;
   const bot = db
-    .prepare(`SELECT id, name, strategy_type, config_json, status, kind FROM bots WHERE id = ?`)
+    .prepare(`SELECT id, name, strategy_type, config_json, persona_json, status, kind FROM bots WHERE id = ?`)
     .get(botId) as any;
   if (!bot) throw new Error('bot not found');
+  const userPersona = parsePersona(bot.persona_json);
 
   const account = db
     .prepare(`SELECT cash_micro, initial_balance_micro FROM bot_accounts WHERE bot_id = ?`)
@@ -132,7 +134,15 @@ export async function botChat(
     config: bot.strategy_type === 'dsl' ? JSON.parse(bot.config_json) : undefined,
   };
 
-  const persona = PERSONAS[bot.strategy_type] ?? PERSONAS.dsl;
+  let persona = PERSONAS[bot.strategy_type] ?? PERSONAS.dsl;
+  if (userPersona?.intro) {
+    persona =
+      `(written by your owner — embody it fully, speak exactly in this character) ${userPersona.intro}` +
+      (userPersona.notes.length
+        ? `\nOwner's training notes — standing instructions you always follow:\n${userPersona.notes.map((n) => `- ${n}`).join('\n')}`
+        : '') +
+      `\nYour distilled temperament (already applied to your live trading config): aggression ${userPersona.traits.aggression.toFixed(2)}, patience ${userPersona.traits.patience.toFixed(2)}, risk tolerance ${userPersona.traits.riskTolerance.toFixed(2)}.`;
+  }
   const system =
     `You are ${bot.name}, a PAPER-TRADING bot in the Punklabz arena. Persona: ${persona}\n\n` +
     `LIVE STATE (real market data, simulated balances):\n${JSON.stringify(facts)}\n\n` +

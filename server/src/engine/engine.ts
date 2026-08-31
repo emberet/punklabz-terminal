@@ -12,6 +12,7 @@ import { GridStrategy } from './strategies/grid.js';
 import { PumpSniperStrategy } from './strategies/pumpSniper.js';
 import { HerdSentimentStrategy } from './strategies/herdSentiment.js';
 import { DslStrategy } from './strategies/dslStrategy.js';
+import { applyPersonaToConfig, parsePersona } from '../toolkit/persona.js';
 
 interface BotRow {
   id: number;
@@ -20,6 +21,7 @@ interface BotRow {
   kind: 'house' | 'quant';
   strategy_type: string;
   config_json: string;
+  persona_json: string | null;
   status: 'running' | 'stopped' | 'paused';
 }
 
@@ -73,7 +75,7 @@ export class Engine extends EventEmitter {
    */
   loadBots(): void {
     const rows = this.db
-      .prepare(`SELECT id, owner_user_id, name, kind, strategy_type, config_json, status FROM bots WHERE status IN ('running','paused')`)
+      .prepare(`SELECT id, owner_user_id, name, kind, strategy_type, config_json, persona_json, status FROM bots WHERE status IN ('running','paused')`)
       .all() as BotRow[];
     const seen = new Set<number>();
     for (const row of rows) {
@@ -85,6 +87,12 @@ export class Engine extends EventEmitter {
     for (const id of this.bots.keys()) if (!seen.has(id)) this.bots.delete(id);
   }
 
+  /** force-rebuild one bot's strategy (e.g. after a persona/config change) */
+  reloadBot(botId: number): void {
+    this.bots.delete(botId);
+    this.loadBots();
+  }
+
   private buildStrategy(row: BotRow): Strategy | null {
     try {
       const cfg = JSON.parse(row.config_json);
@@ -94,7 +102,13 @@ export class Engine extends EventEmitter {
         case 'grid': return new GridStrategy(cfg);
         case 'pump_sniper': return new PumpSniperStrategy(cfg);
         case 'herd_sentiment': return new HerdSentimentStrategy(cfg);
-        case 'dsl': return new DslStrategy(strategyConfigSchema.parse(cfg));
+        case 'dsl': {
+          const parsed = strategyConfigSchema.parse(cfg);
+          // user-trained persona tilts the config (bounded, deterministic)
+          const persona = parsePersona(row.persona_json);
+          const effective = persona ? applyPersonaToConfig(parsed, persona.traits).config : parsed;
+          return new DslStrategy(effective);
+        }
         default:
           console.error(`unknown strategy_type ${row.strategy_type} on bot ${row.id}`);
           return null;
