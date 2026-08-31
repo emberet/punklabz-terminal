@@ -5,6 +5,8 @@ import { currentUser, requireUser } from './auth.js';
 import { currentSeason } from '../../social/seasons.js';
 import { awardBadge } from '../../social/badges.js';
 import { getOpenPositions } from '../../engine/accounting.js';
+import { backtestLoad } from '../../backtest/backtester.js';
+import { classifyRegime, REGIME_AFFINITY } from '../../analysis/regime.js';
 
 const MAJORS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'];
 
@@ -16,10 +18,13 @@ export function registerNetworkRoutes(server: FastifyInstance, app: AppContext) 
     const trades = app.db.prepare(`SELECT COUNT(*) n FROM trades WHERE ts >= ?`).get(dayStart) as { n: number };
     const operators = app.db.prepare(`SELECT COUNT(*) n FROM users`).get() as { n: number };
     const season = currentSeason(app.db);
+    const connected = app.db.prepare(`SELECT COUNT(*) n FROM sessions WHERE expires_at > ?`).get(Date.now()) as { n: number };
     return {
       machinesOnline: bots.n,
       tradesToday: trades.n,
       operators: operators.n,
+      operatorsConnected: connected.n,
+      backtestsRunning: backtestLoad.inFlight,
       season: season ? { name: season.name, endsAt: season.ends_at } : null,
       build: '0.6.6',
     };
@@ -104,6 +109,16 @@ export function registerNetworkRoutes(server: FastifyInstance, app: AppContext) 
         .map(([name, machines]) => ({ name, machines })),
       disclaimer: 'simulated machine activity — a census, not advice',
     };
+  });
+
+  // market regime per major — deterministic classification of recent candles
+  server.get('/api/market/regime', async () => {
+    const readings = MAJORS.map((symbol) => {
+      const m1 = app.candles.history(symbol, '1m', 360);
+      const r = classifyRegime(m1);
+      return r ? { symbol, ...r, affinity: REGIME_AFFINITY[r.regime] } : { symbol, regime: null };
+    });
+    return { readings, note: 'regime affinity reflects machine class design, not a prediction' };
   });
 
   // hidden-command discovery: awards GHOST IN THE MACHINE once

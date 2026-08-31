@@ -11,6 +11,7 @@ type RailItem =
 
 export function ActivityRail() {
   const [items, setItems] = useState<RailItem[]>([]);
+  const [filter, setFilter] = useState<'all' | 'trades' | 'events'>('all');
   const [collapsed, setCollapsed] = useState(() => {
     try {
       return localStorage.getItem('plz.rail') === 'closed';
@@ -59,11 +60,22 @@ export function ActivityRail() {
       <div className="rail-head">
         System feed
         <span className="spacer" />
+        {(['all', 'trades', 'events'] as const).map((f) => (
+          <a
+            key={f}
+            onClick={() => setFilter(f)}
+            style={{ cursor: 'pointer', marginRight: 6, color: filter === f ? 'var(--phosphor)' : 'var(--text-dim)' }}
+          >
+            {f.toUpperCase()}
+          </a>
+        ))}
         <a onClick={toggle} style={{ cursor: 'pointer', color: 'var(--text-dim)' }}>▸</a>
       </div>
       <div className="rail-body">
         {items.length === 0 && <div className="rail-row dim">listening…</div>}
-        {items.map((it, i) =>
+        {items
+          .filter((it) => filter === 'all' || (filter === 'trades' ? it.kind === 'trade' : it.kind === 'event'))
+          .map((it, i) =>
           it.kind === 'trade' ? (
             <div className="rail-row" key={`t${it.trade.id}-${i}`}>
               <span className="t">{fmtTime(it.ts)}</span>

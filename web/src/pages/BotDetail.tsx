@@ -21,6 +21,48 @@ interface Detail {
   personaMods: AppliedMod[] | null;
 }
 
+/** CORE STATUS — diagnostics derived from real machine data, no fake health */
+function CoreStatus({ detail }: { detail: Detail }) {
+  const { bot, positions, trades, metrics } = detail;
+  // capital: equity vs initial, capped at 100
+  const capital = Math.max(0, Math.min(100, (bot.equityUsd / bot.initialBalanceUsd) * 100));
+  // drawdown: peak-walk on the equity series
+  let peak = 0;
+  let dd = 0;
+  for (const m of metrics) {
+    peak = Math.max(peak, m.equityUsd);
+    if (peak > 0) dd = Math.max(dd, ((peak - m.equityUsd) / peak) * 100);
+  }
+  // exposure: open position notional vs equity
+  const posNotional = positions.reduce((s, p) => s + p.qty * p.markPrice, 0);
+  const exposure = bot.equityUsd > 0 ? Math.min(100, (posNotional / bot.equityUsd) * 100) : 0;
+  // trade frequency: last-24h trades vs a 20/day reference load
+  const dayAgo = Date.now() - 86_400_000;
+  const freq = Math.min(100, (trades.filter((t) => t.ts >= dayAgo).length / 20) * 100);
+
+  const rows: { label: string; value: number; warn?: boolean; crit?: boolean }[] = [
+    { label: 'Capital', value: capital, crit: capital < 70, warn: capital < 90 },
+    { label: 'Drawdown', value: dd, crit: dd > 15, warn: dd > 7 },
+    { label: 'Exposure', value: exposure, warn: exposure > 60 },
+    { label: 'Trade load', value: freq },
+  ];
+  return (
+    <Panel title="CORE STATUS" sub="live diagnostics from real machine telemetry" noPad>
+      <div className="panel-body">
+        {rows.map((r) => (
+          <div key={r.label} className="health-row">
+            <span className="hlabel">{r.label}</span>
+            <span className={`health-bar ${r.crit ? 'crit' : r.warn ? 'warn' : ''}`}>
+              <span style={{ width: `${Math.max(2, r.value)}%` }} />
+            </span>
+            <span className="hval">{r.value.toFixed(0)}</span>
+          </div>
+        ))}
+      </div>
+    </Panel>
+  );
+}
+
 export function BotDetail() {
   const { id } = useParams();
   const { user } = useAuth();
@@ -102,6 +144,8 @@ export function BotDetail() {
           <div className="value">${fmtUsd(bot.cashUsd, 0)}</div>
         </div>
       </div>
+
+      <CoreStatus detail={detail} />
 
       {isOwner && bot.kind === 'quant' && (
         <PersonaPanel

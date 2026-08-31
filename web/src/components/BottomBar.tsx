@@ -1,20 +1,11 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
+import { useFx } from '../lib/fx';
 import { loreLine } from '../lib/lore';
 
 export function BottomBar() {
   const [ping, setPing] = useState<number | null>(null);
-  const [fxOff, setFxOff] = useState(() => {
-    try {
-      return localStorage.getItem('plz.fx') === 'off';
-    } catch {
-      return false;
-    }
-  });
-
-  useEffect(() => {
-    document.body.classList.toggle('fx-off', fxOff);
-  }, [fxOff]);
+  const { mode, setMode } = useFx();
 
   useEffect(() => {
     const measure = async () => {
@@ -31,12 +22,8 @@ export function BottomBar() {
     return () => clearInterval(t);
   }, []);
 
-  const toggleFx = () => {
-    const next = !fxOff;
-    setFxOff(next);
-    try {
-      localStorage.setItem('plz.fx', next ? 'off' : 'on');
-    } catch { /* private mode */ }
+  const cycleFx = () => {
+    setMode(mode === 'full' ? 'reduced' : mode === 'reduced' ? 'off' : 'full');
   };
 
   return (
@@ -46,7 +33,7 @@ export function BottomBar() {
       <span className="on">WS CONNECTED</span>
       <span className="amber">SIMULATION MODE</span>
       <span>BUILD 0.6.6</span>
-      <button onClick={toggleFx} title="toggle CRT texture">{fxOff ? 'FX:OFF' : 'FX:ON'}</button>
+      <button onClick={cycleFx} title="visual effects: full / reduced / off">FX:{mode.toUpperCase()}</button>
       <span className="dim">CTRL+K TERMINAL</span>
       <span className="spacer" />
       <span className="lore">{loreLine()}</span>

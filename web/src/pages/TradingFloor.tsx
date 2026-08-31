@@ -6,6 +6,8 @@ import { wsClient } from '../lib/ws';
 import { Panel } from '../components/Panel';
 import { Sparkline } from '../components/Sparkline';
 import { MemesPanel } from '../components/MemesPanel';
+import { MarketChart } from '../components/MarketChart';
+import { useRef } from 'react';
 import { arrow, fmtUsd, fmtPct, fmtPx, fmtTime, pillClass, pnlClass, shortAddr } from '../lib/format';
 import { asciiSpark, machineAvatar, machineId, CLASS_LABELS, HOUSE_TAGLINES } from '../lib/ascii';
 
@@ -28,6 +30,8 @@ export function TradingFloor() {
   const [sparks, setSparks] = useState<Record<number, number[]>>({});
   const [season, setSeason] = useState<SeasonInfo | null>(null);
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [regime, setRegime] = useState<{ symbol: string; regime: string | null }[]>([]);
+  const prevRanks = useRef<Map<number, number>>(new Map());
 
   const load = () =>
     api.get<{ bots: BotSummary[] }>('/api/bots').then((r) => {
@@ -43,6 +47,11 @@ export function TradingFloor() {
   useEffect(() => {
     void load();
     void api.get<SeasonInfo>('/api/seasons/current').then(setSeason).catch(() => {});
+    const loadRegime = () =>
+      api.get<{ readings: { symbol: string; regime: string | null }[] }>('/api/market/regime')
+        .then((r) => setRegime(r.readings)).catch(() => {});
+    void loadRegime();
+    const rt = setInterval(loadRegime, 120_000);
     const unTape = wsClient.sub('tape', (d) => {
       setTape((t) => [d as TradeView, ...t].slice(0, 50));
       void load();
@@ -51,10 +60,18 @@ export function TradingFloor() {
     return () => {
       unTape();
       clearInterval(interval);
+      clearInterval(rt);
     };
   }, []);
 
   const race = [...bots].sort((a, b) => b.pnlPct24h - a.pnlPct24h);
+  const rankDelta = (botId: number, rank: number) => {
+    const prev = prevRanks.current.get(botId);
+    return prev === undefined ? 0 : prev - rank;
+  };
+  setTimeout(() => {
+    race.forEach((b, i) => prevRanks.current.set(b.id, i + 1));
+  }, 0);
   const totalTrades = bots.reduce((s, b) => s + b.tradeCount, 0);
 
   return (
@@ -67,17 +84,30 @@ export function TradingFloor() {
             {season ? `${season.season.name} ENDS ${countdownText(season.countdownMs)}` : 'SESSION OPEN'} ·
             simulated balances, real market data
           </div>
+          <div className="row" style={{ gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
+            {regime.filter((r) => r.regime).map((r) => (
+              <span key={r.symbol} className={`regime-chip regime-${String(r.regime).replace(/ /g, '-')}`}>
+                {r.symbol.replace('USDT', '')}: {r.regime}
+              </span>
+            ))}
+          </div>
         </div>
       </div>
+
+      <MarketChart />
 
       <Panel title="LIVE BOT RACE" sub="session return, re-ranked in real time" noPad>
         <div className="table-scroll">
           <table style={{ minWidth: 560 }}>
             <tbody>
-              {race.map((b, i) => (
-                <tr key={b.id}>
+              {race.map((b, i) => {
+                const delta = rankDelta(b.id, i + 1);
+                return (
+                <tr key={b.id} className={delta > 0 ? 'race-moved' : delta < 0 ? 'race-moved-down' : ''}>
                   <td className={i < 3 ? 'phos' : 'dim'} style={{ width: 34 }}>
                     {String(i + 1).padStart(2, '0')}
+                    {delta > 0 && <span className="race-up"> ↑{delta}</span>}
+                    {delta < 0 && <span className="race-down"> ↓{-delta}</span>}
                   </td>
                   <td>
                     <span className="bot-avatar" style={{ marginRight: 8 }}>{machineAvatar(b.id, b.name)}</span>
@@ -92,7 +122,8 @@ export function TradingFloor() {
                   </td>
                   <td className="num dim" style={{ width: 100 }}>${fmtUsd(b.equityUsd, 0)}</td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -109,7 +140,7 @@ export function TradingFloor() {
               <div className="bot-card">
                 <span className="machine-id">{machineId(b.id, b.name)}</span>
                 <div className="bot-head">
-                  <span className="bot-avatar">{machineAvatar(b.id, b.name)}</span>
+                  <span className={`bot-avatar ${b.status === 'running' ? 'sigil-running' : ''}`}>{machineAvatar(b.id, b.name)}</span>
                   <span className="bot-name">{b.name}</span>
                 </div>
                 <div className="bot-pnl-row">
@@ -146,7 +177,7 @@ export function TradingFloor() {
           {tape.map((t, i) => (
             <div key={`${t.id}-${i}`}>
               <div
-                className="tape-row"
+                className={`tape-row ${i === 0 ? `tape-new ${t.side === 'sell' ? 'tape-sell' : ''}` : ''}`}
                 style={{ cursor: t.reason ? 'pointer' : 'default' }}
                 onClick={() => setExpanded(expanded === t.id ? null : t.id)}
               >

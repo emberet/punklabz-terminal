@@ -481,6 +481,96 @@ tr:hover td { background: var(--tint-hover); }
 .error-text { color: var(--red); font-size: 11.5px; }
 .ok-text { color: var(--signal); font-size: 11.5px; }
 
+/* ============================================================
+   v5 MOTION SYSTEM — every animation answers to an event.
+   fx-full: everything · fx-reduced: functional only · fx-off: static
+   ============================================================ */
+
+/* ambient scanline drift (fx-full only) */
+body.fx-full::before {
+  background:
+    repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.22) 0 1px, transparent 1px 3px);
+  animation: scan-drift 9s linear infinite;
+}
+@keyframes scan-drift { from { background-position-y: 0; } to { background-position-y: 3px; } }
+body.fx-reduced::before { animation: none; }
+body.fx-off::before, body.fx-off::after { display: none; }
+
+/* CRT sync displacement: one horizontal band sweep, content shifts ~2px */
+body.crt-sync .main { transform: translateX(2px); }
+body.crt-sync::before { opacity: 0.55; }
+body.crt-sync .app { position: relative; }
+/* luminance variance */
+body.crt-flicker .app { opacity: 0.985; }
+
+/* module transition strip */
+.module-transition {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 300;
+  background: var(--bg);
+  border-bottom: 1px solid var(--phosphor);
+  color: var(--phosphor);
+  font-family: var(--font);
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  padding: 4px 14px;
+  animation: module-in 0.28s steps(6);
+  pointer-events: none;
+}
+@keyframes module-in {
+  0% { transform: translateY(-100%); }
+  35% { transform: translateY(0); }
+  100% { transform: translateY(0); opacity: 0.9; }
+}
+body.fx-reduced .module-transition, body.fx-off .module-transition { display: none; }
+
+/* machine sigils breathe while running (fx-full) */
+body.fx-full .bot-card .bot-avatar.sigil-running { animation: sigil-pulse 3.2s steps(2) infinite; }
+@keyframes sigil-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+
+/* tape insertion: new row snaps in with high-contrast first frames */
+.tape-new { animation: tape-in 0.45s steps(4); }
+@keyframes tape-in {
+  0% { background: var(--tint-pos); transform: translateY(-3px); }
+  33% { background: var(--tint-pos); }
+  100% { background: transparent; transform: none; }
+}
+.tape-new.tape-sell { animation-name: tape-in-sell; }
+@keyframes tape-in-sell {
+  0% { background: var(--tint-neg); transform: translateY(-3px); }
+  33% { background: var(--tint-neg); }
+  100% { background: transparent; transform: none; }
+}
+body.fx-off .tape-new { animation: none; }
+
+/* rank shift markers in the bot race */
+.race-up { color: var(--signal); font-size: 10px; }
+.race-down { color: var(--red); font-size: 10px; }
+tr.race-moved td { animation: flash-pos 0.7s steps(3); }
+tr.race-moved-down td { animation: flash-neg 0.7s steps(3); }
+
+/* machine health bars */
+.health-row { display: flex; align-items: center; gap: 12px; margin-bottom: 5px; font-size: 11px; }
+.health-row .hlabel { width: 110px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; font-size: 9.5px; }
+.health-bar { flex: 1; max-width: 260px; height: 9px; background: var(--bg-raised); }
+.health-bar > span { display: block; height: 100%; background: var(--phosphor); transition: width 0.4s steps(8); }
+.health-bar.warn > span { background: var(--amber); }
+.health-bar.crit > span { background: var(--red); }
+.health-row .hval { color: var(--text-soft); width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* regime chip */
+.regime-chip { font-family: var(--font); font-size: 10px; letter-spacing: 1px; padding: 2px 8px; text-transform: uppercase; }
+.regime-TRENDING-UP, .regime-BREAKOUT { color: var(--signal); background: var(--tint-pos); }
+.regime-TRENDING-DOWN { color: var(--red); background: var(--tint-neg); }
+.regime-HIGH-VOLATILITY { color: var(--amber); background: var(--tint-warn); }
+.regime-RANGING, .regime-LOW-VOLATILITY { color: var(--text-soft); background: var(--tint-neu); }
+
+/* boot sequence (login) */
+.boot-screen { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 18px; }
+.boot-log { font-family: var(--font); font-size: 13px; color: var(--text-soft); min-height: 120px; }
+.boot-log .ok { color: var(--signal); }
+
 /* ── mobile: handheld diagnostic device ── */
 .nav-toggle { display: none; }
 .nav-backdrop { display: none; }

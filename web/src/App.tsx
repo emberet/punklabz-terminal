@@ -5,6 +5,7 @@ import { NewsStrip } from './components/NewsStrip';
 import { ActivityRail } from './components/ActivityRail';
 import { BottomBar } from './components/BottomBar';
 import { CommandPalette } from './components/CommandPalette';
+import { ModuleTransition } from './components/motion/ModuleTransition';
 import { useAuth } from './lib/auth';
 
 function Item({
@@ -90,6 +91,7 @@ export function App() {
         </NavLink>
       </nav>
       <CommandPalette />
+      <ModuleTransition />
     </div>
   );
 }

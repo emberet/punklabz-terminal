@@ -4,6 +4,7 @@ import { createBrowserRouter, Navigate, RouterProvider } from 'react-router-dom'
 import './styles/theme.css';
 import { App } from './App';
 import { AuthProvider } from './lib/auth';
+import { FxProvider } from './lib/fx';
 import { TradingFloor } from './pages/TradingFloor';
 import { BotDetail } from './pages/BotDetail';
 import { Leaderboard } from './pages/Leaderboard';
@@ -45,8 +46,10 @@ const router = createBrowserRouter([
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <AuthProvider>
-      <RouterProvider router={router} />
-    </AuthProvider>
+    <FxProvider>
+      <AuthProvider>
+        <RouterProvider router={router} />
+      </AuthProvider>
+    </FxProvider>
   </React.StrictMode>,
 );

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { wsClient } from '../lib/ws';
 import { fmtPx, fmtPct } from '../lib/format';
+import { NumberTicker } from './motion/NumberTicker';
 
 type Prices = Record<string, { price: number; changePct24h: number }>;
 type Feeds = Record<string, { connected: boolean; stale: boolean }>;
@@ -9,6 +10,8 @@ type Feeds = Record<string, { connected: boolean; stale: boolean }>;
 interface NetStats {
   machinesOnline: number;
   tradesToday: number;
+  operatorsConnected?: number;
+  backtestsRunning?: number;
   season: { name: string; endsAt: number } | null;
 }
 
@@ -81,8 +84,14 @@ export function TopBar() {
       })}
       {stats && (
         <>
-          <span className="stat">MACHINES <b>{stats.machinesOnline}</b></span>
-          <span className="stat">TRADES <b>{stats.tradesToday}</b></span>
+          <span className="stat">MACHINES <b><NumberTicker value={stats.machinesOnline} /></b></span>
+          <span className="stat">TRADES <b><NumberTicker value={stats.tradesToday} /></b></span>
+          {stats.operatorsConnected !== undefined && (
+            <span className="stat">OPERATORS <b><NumberTicker value={stats.operatorsConnected} /></b></span>
+          )}
+          {(stats.backtestsRunning ?? 0) > 0 && (
+            <span className="stat amber">BACKTESTS <b>{stats.backtestsRunning}</b></span>
+          )}
         </>
       )}
       <span className="clock">

@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Panel } from '../components/Panel';
-import { glyphs } from '../lib/glyphs';
+import { AsciiEntity } from '../components/AsciiEntity';
+import { DecryptText } from '../components/motion/DecryptText';
 import { useAuth } from '../lib/auth';
 
 interface NetStats {
@@ -22,13 +23,37 @@ export function Login() {
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [stats, setStats] = useState<NetStats | null>(null);
-  const [booted, setBooted] = useState(false);
+  const [phase, setPhase] = useState<'boot' | 'ready'>(() => {
+    try {
+      return localStorage.getItem('plz.booted') ? 'ready' : 'boot';
+    } catch {
+      return 'ready';
+    }
+  });
+  const [bootLine, setBootLine] = useState(0);
 
   useEffect(() => {
     void api.get<NetStats>('/api/network/stats').then(setStats).catch(() => {});
-    const t = setTimeout(() => setBooted(true), 500);
-    return () => clearTimeout(t);
   }, []);
+
+  // first-visit handshake: ~2s max, skippable, never repeated
+  useEffect(() => {
+    if (phase !== 'boot') return;
+    const timers = [
+      setTimeout(() => setBootLine(1), 350),
+      setTimeout(() => setBootLine(2), 750),
+      setTimeout(() => setBootLine(3), 1150),
+      setTimeout(() => finishBoot(), 1900),
+    ];
+    return () => timers.forEach(clearTimeout);
+  }, [phase]);
+
+  const finishBoot = () => {
+    try {
+      localStorage.setItem('plz.booted', '1');
+    } catch { /* private mode */ }
+    setPhase('ready');
+  };
 
   const done = async () => {
     await refresh();
@@ -75,6 +100,23 @@ export function Login() {
     }
   };
 
+  if (phase === 'boot') {
+    return (
+      <div className="boot-screen">
+        <div className="page-title" style={{ fontSize: 40 }}>
+          <DecryptText text="PUNKLABZ NETWORK" duration={500} />
+        </div>
+        <div className="boot-log">
+          <div className="cursor">HANDSHAKE REQUESTED…</div>
+          {bootLine >= 1 && <div className="ok">[ OK ] NODE FOUND</div>}
+          {bootLine >= 2 && <div className="ok">[ OK ] MARKET FEED CONNECTED</div>}
+          {bootLine >= 3 && <div className="ok">[ OK ] {stats?.machinesOnline ?? '—'} MACHINES DISCOVERED</div>}
+        </div>
+        <button onClick={finishBoot}>SKIP</button>
+      </div>
+    );
+  }
+
   return (
     <div className="login-wrap">
       <div className="login-box glitch-in">
@@ -84,23 +126,16 @@ export function Login() {
             Autonomous market research system
           </div>
           <div className="syslog" style={{ padding: '8px 0 0' }}>
-            {booted ? (
-              <>
-                <span className="ln ok">[ OK ] market feeds connected</span>
-                <span className="ln ok">[ OK ] {stats?.machinesOnline ?? '—'} machines online</span>
-                <span className="ln cursor">ready. build machines. test strategies. enter the arena.</span>
-              </>
-            ) : (
-              <span className="ln cursor">initializing interface…</span>
-            )}
+            <span className="ln ok">[ OK ] market feeds connected</span>
+            <span className="ln ok">[ OK ] {stats?.machinesOnline ?? '—'} machines online</span>
+            <span className="ln cursor">ready. build machines. test strategies. enter the arena.</span>
           </div>
         </div>
 
         <Panel title="ACCESS" noPad>
           <div className="login-cols">
-            <div className="login-mosaic">
-              <pre className="glyphs faint">{glyphs(13, 6, 42)}</pre>
-              <div className="acid-block" />
+            <div className="login-mosaic" style={{ alignItems: 'center', justifyContent: 'center', padding: 8 }}>
+              <AsciiEntity width={24} height={16} fontSize={9} />
             </div>
             <div className="login-col">
               <div className="phos">WALLET</div>

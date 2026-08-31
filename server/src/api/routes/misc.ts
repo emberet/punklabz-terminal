@@ -8,7 +8,7 @@ import { validateStrategyConfig } from '../../toolkit/validator.js';
 import { balanceMicro, ledgerFor } from '../../billing/ledger.js';
 import { fromMicro } from '../../money.js';
 import { approveEpoch, runEpoch } from '../../manager/managerAgent.js';
-import { BacktestError, resolveWindow, runBacktest } from '../../backtest/backtester.js';
+import { BacktestError, backtestLoad, resolveWindow, runBacktest } from '../../backtest/backtester.js';
 import { XP } from '@punklabz/shared';
 import { awardXp } from '../../social/xp.js';
 import { seasonLeaderboardRows } from './social.js';
@@ -43,13 +43,12 @@ export function registerMiscRoutes(server: FastifyInstance, app: AppContext) {
     return turn;
   });
 
-  let backtestsInFlight = 0;
   server.post('/api/toolkit/backtest', {
     config: { rateLimit: { max: 6, timeWindow: '1 minute' } },
   }, async (request, reply) => {
     const user = requireUser(app, request, reply);
     if (!user) return;
-    if (backtestsInFlight >= 2) return reply.code(429).send({ error: 'backtester busy — try again in a moment' });
+    if (backtestLoad.inFlight >= 2) return reply.code(429).send({ error: 'backtester busy — try again in a moment' });
     const body = z.object({
       config: z.unknown(),
       window: z.enum(['24h', '7d', '30d', '90d']),
@@ -57,7 +56,7 @@ export function registerMiscRoutes(server: FastifyInstance, app: AppContext) {
     const result = validateStrategyConfig(body.config);
     if (!result.ok || !result.config)
       return reply.code(400).send({ error: 'invalid config', details: result.errors });
-    backtestsInFlight++;
+    backtestLoad.inFlight++;
     try {
       const range = resolveWindow(result.config, body.window);
       const bt = await runBacktest(app.candles, result.config, range);
@@ -67,7 +66,7 @@ export function registerMiscRoutes(server: FastifyInstance, app: AppContext) {
       if (e instanceof BacktestError) return reply.code(400).send({ error: e.message });
       throw e;
     } finally {
-      backtestsInFlight--;
+      backtestLoad.inFlight--;
     }
   });
 

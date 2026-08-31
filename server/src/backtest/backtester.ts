@@ -42,6 +42,9 @@ export interface BacktestResult {
 
 export class BacktestError extends Error {}
 
+/** live gauge for presence stats + route concurrency cap */
+export const backtestLoad = { inFlight: 0 };
+
 /** max lookback any condition needs, so indicators are warm at window start */
 function warmupBars(cfg: StrategyConfig): number {
   let max = 5;
