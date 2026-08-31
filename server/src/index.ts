@@ -34,6 +34,7 @@ import { registerNetworkRoutes } from './api/routes/network.js';
 import { registerLiveRoutes } from './api/routes/live.js';
 import { registerDelegationRoutes } from './api/routes/delegation.js';
 import { registerInternRoutes } from './api/routes/intern.js';
+import { registerVersionRoutes } from './api/routes/version.js';
 import { LiveNetwork } from './live/liveNetwork.js';
 import { buildAdapters } from './live/adapters.js';
 import { buildSigner } from './live/signing/signer.js';
@@ -145,6 +146,7 @@ async function main() {
   registerLiveRoutes(server, app);
   registerDelegationRoutes(server, app);
   registerInternRoutes(server, app);
+  registerVersionRoutes(server, app);
   ensureActiveSeason(db, hub);
 
   // live-execution safety spine: shadow pipeline + sentinel. canary/live are

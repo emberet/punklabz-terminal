@@ -45,6 +45,26 @@ export interface PrivyConfig {
 }
 
 /**
+ * Privy hands out authorization keys prefixed with `wallet-auth:`, e.g.
+ * `wallet-auth:MIGHAgEAMBMGByqGSM49...`. The bytes after the prefix are a
+ * base64 PKCS8 P-256 key; the prefix itself is not base64 and makes the whole
+ * string fail to decode.
+ *
+ * Normalising in ONE place matters: the same string is consumed by the signer
+ * and by the provisioning script, and a prefix handled in only one of them
+ * means provisioning succeeds and every subsequent signature fails — or the
+ * reverse. Copy the value straight from the dashboard and it works.
+ */
+export function normalizeAuthorizationKey(raw: string): Buffer {
+  const body = raw.includes(':') ? raw.slice(raw.indexOf(':') + 1) : raw;
+  const der = Buffer.from(body.trim(), 'base64');
+  if (der.length === 0 || der[0] !== 0x30) {
+    throw new Error('authorization key is not a base64 PKCS8 DER key (expected a DER SEQUENCE)');
+  }
+  return der;
+}
+
+/**
  * RFC 8785 (JCS) canonicalisation, scoped to the value types Privy payloads
  * contain: objects, arrays, strings, integers, booleans, null. Deliberately
  * throws on anything else — a float or a bigint silently serialised the wrong
@@ -133,8 +153,9 @@ export class PrivySigner implements TradingSigner {
       body,
       headers: { 'privy-app-id': this.cfg.appId, ...extraHeaders },
     };
-    const der = Buffer.from(this.cfg.authorizationKey, 'base64');
-    const key = createPrivateKey({ key: der, format: 'der', type: 'pkcs8' });
+    const key = createPrivateKey({
+      key: normalizeAuthorizationKey(this.cfg.authorizationKey), format: 'der', type: 'pkcs8',
+    });
     const signer = createSign('sha256');
     signer.update(Buffer.from(canonicalize(payload), 'utf8'));
     signer.end();
@@ -287,9 +308,20 @@ export class PrivySigner implements TradingSigner {
     }
     if (!req.intentId) throw new Error('refusing to sign: no intent id — every signature must be attributable');
 
+    // NO `caip2` HERE.
+    //
+    // Privy's documented example carries `caip2` — but that example is for
+    // eth_sendTransaction, where Privy broadcasts and therefore needs to be
+    // told which network. eth_signTransaction only signs, and rejects the key
+    // outright: `Unrecognized key(s) in object: 'caip2'`.
+    //
+    // This mattered more than a shape error usually does. The first policy
+    // test refused all three cases — including one that should have been
+    // allowed — and every refusal was this 400, not the policy engine. Taken
+    // at face value it would have read as "the cap works". The chain is bound
+    // inside the transaction via chain_id, which is what actually signs.
     const body = {
       method: 'eth_signTransaction',
-      caip2: `eip155:${req.chainId}`,
       params: {
         transaction: {
           to: getAddress(req.to),

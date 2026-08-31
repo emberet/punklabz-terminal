@@ -21,6 +21,25 @@ RSYNC_FLAGS=(-az --delete
   --exclude backups --exclude '*.bak' --exclude .DS_Store)
 [[ "$DRY" == "--dry-run" ]] && RSYNC_FLAGS+=(--dry-run -v)
 
+# Stamp the deployment with the exact revision being shipped, so
+# GET /api/version can answer "which commit controls the money?" without
+# anyone having to remember. A dirty tree is recorded as dirty rather than
+# quietly presented as the commit it most resembles.
+COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+BRANCH="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+DIRTY=false
+[[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]] && DIRTY=true
+cat > "$ROOT/build-info.json" <<JSON
+{
+  "commit": "$COMMIT",
+  "branch": "$BRANCH",
+  "dirty": $DIRTY,
+  "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "builtBy": "$(whoami)@$(hostname -s)"
+}
+JSON
+echo ">> shipping $BRANCH@$COMMIT (dirty=$DIRTY)"
+
 echo ">> rsync -> $HOST:$DEST"
 rsync "${RSYNC_FLAGS[@]}" "$ROOT/" "$HOST:$DEST/"
 

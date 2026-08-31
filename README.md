@@ -1,11 +1,32 @@
 # PUNKLABZ TERMINAL
 
-Paper-trading arena with five house bots on live market data, a no-code bot
-builder powered by Claude, a leaderboard, and a Claude-narrated profit
-distributor for PunkLabz token holders. Neon, no glow.
+Autonomous market laboratory on Robinhood Chain. Five house bots and
+user-built quant machines trade on live market data, a no-code builder powered
+by Claude turns plain English into validated strategy JSON, and a leaderboard
+ranks the results. Neon, no glow.
 
-**No real funds are traded.** Balances are simulated; billing is a mock ledger;
-payout signatures are stubs until the PunkLabz token exists.
+## What is real, and what is not
+
+"Live" means four different things in a trading product, and conflating them is
+how people lose money. Precisely:
+
+| | Status |
+|---|---|
+| Market data | **REAL** — Binance, pump.fun, Robinhood Chain asset APIs |
+| Robinhood Chain asset registry | **REAL** — 194 assets, verified onchain |
+| 0x quotes on chain 4663 | **REAL** — priced, validated, not signed |
+| Privy signer + policy | **REAL** — wallet owner and $25 cap enforced at the enclave |
+| Strategy P&L, balances, fees | **SIMULATED** — paper books, mock ledger |
+| Execution mode | **SIMULATION** — no order has ever reached a venue |
+| Token holder payouts | **STUBBED** — no PunkLabz token exists |
+
+`GET /api/version` reports the exact commit, migration count and execution mode
+of any running deployment. Do not reason about what production is doing from
+this README; ask the server.
+
+Canary execution is gated by a preflight that today still blocks on funding.
+Live is gated behind ten clean canary fills. Neither gate may be weakened to
+make the UI show a nicer word.
 
 ## Stack
 
@@ -28,15 +49,22 @@ npm run dev:web             # vite dev on :4710 (proxies /api + /ws)
 npm test
 ```
 
-35 tests: payout math property tests, ledger invariants, indicators vs hand
-fixtures, DSL validator corpus, paper-executor fills, and a deterministic
-engine replay (V-shaped tape → dip buy → recovery sell → tax collected).
+344 tests. Beyond the original paper-trading suite (payout math properties,
+ledger invariants, indicators vs hand fixtures, DSL validator corpus,
+deterministic engine replay) the execution boundary carries its own: wrong
+chain, wrong token, wrong spender, unapproved transaction target, slippage
+enforced before signing, duplicate intent, shadow P&L never touching live NAV,
+reconciliation drift engaging the kill switch, and operator clearance derived
+from a signature rather than a database column.
 
 ## Architecture notes
 
-- **Executor boundary** (`server/src/execution/executor.ts`): engine and
-  strategies never know paper from live. Real-money later = implement
-  `LiveExecutor`, swap one line in `index.ts`.
+- **Execution boundary**: real money is NOT one line away, and any suggestion
+  otherwise is a bug in the documentation. A signal becomes a transaction only
+  through: instrument resolver (explicit chain + contract addresses + decimals)
+  → risk engine → preflight → execution account → venue adapter (every quote
+  field checked against the approved intent) → external signer → broadcast →
+  receipt → reconciliation. Each stage can refuse, and refusals say why.
 - **Money math**: integer micro-USD everywhere money moves; BigInt in payout
   pro-rata; floats only in candles/indicators.
 - **Manager split**: `payoutMath.ts` is pure + deterministic; Claude narrates
@@ -45,9 +73,10 @@ engine replay (V-shaped tape → dip buy → recovery sell → tax collected).
   Everything money-adjacent lands in a hash-chained audit log.
 - **DSL not codegen**: the builder agent emits JSON validated by zod + semantic
   lint (3 repair rounds); quant bots run the same engine as house bots.
-- **Fees** (mock ledger): $100 signup credit · $20 deploy → platform ·
-  $10 clone → 100% to creator · $1/trade tax → platform. Broke bots pause
-  (exits still run).
+- **Fees** (mock ledger, NOT real revenue): $100 signup credit · $20 deploy →
+  platform · $10 clone → 100% to creator · 1% trade tax → platform. Broke bots
+  pause (exits still run). These are database accounting units; nothing here
+  is settled onchain, and paper P&L must never reach a real treasury.
 
 ## Deploy
 
