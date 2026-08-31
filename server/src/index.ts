@@ -31,6 +31,8 @@ import { registerBotRoutes } from './api/routes/bots.js';
 import { registerMiscRoutes } from './api/routes/misc.js';
 import { registerSocialRoutes } from './api/routes/social.js';
 import { registerNetworkRoutes } from './api/routes/network.js';
+import { registerLiveRoutes } from './api/routes/live.js';
+import { LiveNetwork } from './live/liveNetwork.js';
 import { leaderboard, botSummaries } from './api/queries.js';
 import { BIG_WIN_USD, XP } from '@punklabz/shared';
 import { ensureActiveSeason, closeDueSeasons } from './social/seasons.js';
@@ -107,7 +109,14 @@ async function main() {
   registerMiscRoutes(server, app);
   registerSocialRoutes(server, app);
   registerNetworkRoutes(server, app);
+  registerLiveRoutes(server, app);
   ensureActiveSeason(db, hub);
+
+  // live-execution safety spine: shadow pipeline + sentinel (no signer exists;
+  // canary/live are structurally refused by the risk engine)
+  const liveNetwork = new LiveNetwork(db, hub, candles, (s) => executor.getMark(s));
+  liveNetwork.attach(engine);
+  liveNetwork.startSentinel(feedStatus);
 
   // ── wiring: feed -> candles/prices -> engine/hub ──
   feed.on('tick', (t: { symbol: string; price: number; changePct24h: number }) => {

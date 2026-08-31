@@ -7,6 +7,11 @@ import { NumberTicker } from './motion/NumberTicker';
 type Prices = Record<string, { price: number; changePct24h: number }>;
 type Feeds = Record<string, { connected: boolean; stale: boolean }>;
 
+interface LiveMini {
+  mode: string;
+  halted: boolean;
+}
+
 interface NetStats {
   machinesOnline: number;
   tradesToday: number;
@@ -19,6 +24,7 @@ export function TopBar() {
   const [prices, setPrices] = useState<Prices>({});
   const [feeds, setFeeds] = useState<Feeds>({});
   const [stats, setStats] = useState<NetStats | null>(null);
+  const [live, setLive] = useState<LiveMini | null>(null);
   const [clock, setClock] = useState('');
   const [flashes, setFlashes] = useState<Record<string, string>>({});
 
@@ -43,7 +49,10 @@ export function TopBar() {
       setFeeds(r.feeds);
     }).catch(() => {});
     const loadStats = () => api.get<NetStats>('/api/network/stats').then(setStats).catch(() => {});
+    const loadLive = () => api.get<LiveMini>('/api/live/status').then(setLive).catch(() => {});
     void loadStats();
+    void loadLive();
+    const unLive = wsClient.sub('live', () => void loadLive());
     const un1 = wsClient.sub('prices', (d) => applyPrices(d as Prices));
     const un2 = wsClient.sub('feedstatus', (d) => setFeeds(d as Feeds));
     const t1 = setInterval(loadStats, 60_000);
@@ -54,6 +63,7 @@ export function TopBar() {
     return () => {
       un1();
       un2();
+      unLive();
       clearInterval(t1);
       clearInterval(t2);
     };
@@ -93,6 +103,11 @@ export function TopBar() {
             <span className="stat amber">BACKTESTS <b>{stats.backtestsRunning}</b></span>
           )}
         </>
+      )}
+      {live && (
+        <span className={live.halted ? 'red' : live.mode === 'simulation' ? 'dim' : 'amber'}>
+          {live.halted ? '■ EXEC HALTED' : live.mode === 'simulation' ? '○ PAPER NETWORK' : `● ${live.mode.toUpperCase()} MODE`}
+        </span>
       )}
       <span className="clock">
         {anyDown ? (

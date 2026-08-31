@@ -5,6 +5,7 @@ import { wsClient } from '../lib/ws';
 import { Panel } from '../components/Panel';
 import { fmtUsd, fmtDate, shortAddr } from '../lib/format';
 import { useAuth } from '../lib/auth';
+import { LiveNetworkPanel } from '../components/LiveNetworkPanel';
 
 export function Manager() {
   const { user } = useAuth();
@@ -68,6 +69,7 @@ export function Manager() {
 
   return (
     <div>
+      <LiveNetworkPanel />
       <Panel
         title="CONTROL ROOM // PAYOUTS" sub="daily distribution of house-machine profits to PunkLabz holders"
         right={user?.isAdmin ? <button onClick={runNow} disabled={busy}>Close epoch now</button> : undefined}
