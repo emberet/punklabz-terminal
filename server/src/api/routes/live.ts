@@ -13,6 +13,8 @@ import { runPreflight, preflightLines } from '../../live/preflight.js';
 import { accountBook, accountForMode, listAccounts } from '../../live/accounts.js';
 import { reconcileAll } from '../../live/reconciler.js';
 import { mappedSymbols } from '../../live/instrumentResolver.js';
+import { buildResearchExport } from '../../research/export.js';
+import { closeNow, currentWindow, openWindow } from '../../research/window.js';
 
 function requireAdmin(app: AppContext, request: any, reply: any) {
   const user = requireUser(app, request, reply);
@@ -139,6 +141,42 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
         : null,
     };
   }
+
+  /**
+   * The research record. Admin-only: it is one operator's trading history,
+   * including wallet-linked transaction references, and it is not public data.
+   */
+  server.get('/api/live/research', async (request, reply) => {
+    const user = requireAdmin(app, request, reply);
+    if (!user) return;
+    return buildResearchExport(app.db);
+  });
+
+  /** Open / inspect / close the research window. */
+  server.get('/api/live/window', async () => currentWindow(app.db));
+
+  server.post('/api/live/window', async (request, reply) => {
+    const user = requireAdmin(app, request, reply);
+    if (!user) return;
+    const body = z.object({
+      hours: z.number().min(0.5).max(168),
+      confidenceThreshold: z.number().int().min(50).max(100),
+      maxSimultaneousPositions: z.number().int().min(1).max(10),
+      maxPerTradePct: z.number().min(0.5).max(10),
+    }).safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: body.error.issues[0].message });
+    try {
+      return openWindow(app.db, { ...body.data, actor: `user:${user.id}` });
+    } catch (e) {
+      return reply.code(409).send({ error: String(e instanceof Error ? e.message : e) });
+    }
+  });
+
+  server.delete('/api/live/window', async (request, reply) => {
+    const user = requireAdmin(app, request, reply);
+    if (!user) return;
+    return closeNow(app.db, `user:${user.id}`);
+  });
 
   // GLOBAL PROCESS: the funnel, every number measured
   server.get('/api/live/process', async () => {

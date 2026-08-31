@@ -41,6 +41,7 @@ import { buildSigner } from './live/signing/signer.js';
 import { AutonomousSupervisor } from './live/supervisor.js';
 import { resolvePredictions } from './research/predictions.js';
 import { runSession } from './research/discussion.js';
+import { closeIfElapsed } from './research/window.js';
 import { runInternCycle } from './intern/intern.js';
 import { buildXAdapter } from './intern/xAdapter.js';
 import { expireDueGrants } from './live/delegation/grants.js';
@@ -384,6 +385,18 @@ async function main() {
   };
   void refreshRh();
   cron.schedule('*/20 * * * *', refreshRh);
+
+  // ── close the research window on time ──
+  // A time-boxed experiment that only ends when someone remembers is not
+  // time-boxed. This restores the settings captured when the window opened.
+  cron.schedule('*/5 * * * *', () => {
+    try {
+      const r = closeIfElapsed(db, 'cron');
+      if (r.closed) server.log.warn(`research window closed: ${r.detail}`);
+    } catch (e) {
+      server.log.error(`research window close failed: ${String(e)}`);
+    }
+  });
 
   // ── expire lapsed delegation grants ──
   cron.schedule('0 * * * *', () => {
