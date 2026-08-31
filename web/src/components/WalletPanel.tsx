@@ -3,7 +3,8 @@ import { Panel } from './Panel';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import {
-  ROBINHOOD_CHAIN_ID, WalletError, currentChainId, hasWallet, shortAddress,
+  ROBINHOOD_CHAIN_ID, WalletError, type ConnectorKind, activeConnector, currentChainId,
+  disconnectProvider, hasWallet, restoreConnector, shortAddress,
   switchToRobinhoodChain, walletConnectToAccount,
 } from '../lib/wallet';
 
@@ -59,6 +60,8 @@ export function WalletPanel() {
   const [notice, setNotice] = useState<string | null>(null);
   const [chainId, setChainId] = useState<number | null>(null);
   const [operatorWallet, setOperatorWallet] = useState<string | null>(null);
+  /** which button is mid-handshake, so only that one shows as waiting */
+  const [pending, setPending] = useState<ConnectorKind | null>(null);
 
   const connected = !!user?.walletAddress;
 
@@ -79,16 +82,18 @@ export function WalletPanel() {
   }, [loadPortfolio, connected]);
 
   useEffect(() => {
-    void currentChainId().then(setChainId);
+    // a WalletConnect session survives a reload; pick it back up before asking
+    // the chain anything, or we read the extension's chain instead of the phone's
+    void restoreConnector().then(() => currentChainId().then(setChainId));
     api.get<{ operatorWallet: string }>('/api/me')
       .then((r) => setOperatorWallet(r.operatorWallet))
       .catch(() => {});
   }, [user]);
 
-  const connect = async () => {
-    setBusy(true); setError(null); setNotice(null);
+  const connect = async (kind: ConnectorKind) => {
+    setBusy(true); setPending(kind); setError(null); setNotice(null);
     try {
-      const { address, isAdmin } = await walletConnectToAccount();
+      const { address, isAdmin } = await walletConnectToAccount(kind);
       await refresh();
       setNotice(
         isAdmin
@@ -100,13 +105,15 @@ export function WalletPanel() {
     } catch (e) {
       setError(e instanceof WalletError ? e.message : String((e as Error)?.message ?? e));
     } finally {
-      setBusy(false);
+      setBusy(false); setPending(null);
     }
   };
 
   const disconnect = async () => {
     setBusy(true); setError(null); setNotice(null);
     try {
+      // drop the wallet-side session too, not just our record of it
+      await disconnectProvider();
       await api.post('/api/auth/wallet/unlink');
       await refresh();
       setPortfolio(null);
@@ -139,15 +146,23 @@ export function WalletPanel() {
               Connect an EVM wallet to see your Robinhood Chain balances. This asks for a
               signature, not a transaction — it costs nothing and moves nothing.
             </div>
-            {!hasWallet() && (
-              <div className="red" style={{ marginBottom: 8 }}>
-                No EVM wallet detected in this browser. Install MetaMask or Rabby, or keep using
-                email sign-in.
-              </div>
-            )}
-            <button className="primary" onClick={() => void connect()} disabled={busy || !hasWallet()}>
-              {busy ? '[ waiting for signature… ]' : '[ Connect wallet ]'}
-            </button>
+            <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+              <button
+                className="primary"
+                onClick={() => void connect('injected')}
+                disabled={busy || !hasWallet()}
+              >
+                {pending === 'injected' ? '[ waiting for signature… ]' : '[ Browser wallet ]'}
+              </button>
+              <button onClick={() => void connect('walletconnect')} disabled={busy}>
+                {pending === 'walletconnect' ? '[ waiting for signature… ]' : '[ WalletConnect ]'}
+              </button>
+            </div>
+            <div className="soft" style={{ marginTop: 8 }}>
+              {hasWallet()
+                ? 'Browser wallet uses the extension in this browser. WalletConnect scans a QR code with a wallet on your phone.'
+                : 'No extension wallet in this browser — WalletConnect will show a QR code you scan with your phone.'}
+            </div>
           </>
         )}
 
@@ -157,6 +172,14 @@ export function WalletPanel() {
               <span className="soft" style={{ width: 130 }}>ADDRESS</span>
               <span className="phos" style={{ wordBreak: 'break-all' }}>{user.walletAddress}</span>
             </div>
+            {activeConnector() && (
+              <div className="row" style={{ gap: 16, marginBottom: 8 }}>
+                <span className="soft" style={{ width: 130 }}>CONNECTED VIA</span>
+                <span className="soft">
+                  {activeConnector() === 'walletconnect' ? 'WalletConnect' : 'browser extension'}
+                </span>
+              </div>
+            )}
             <div className="row" style={{ gap: 16, marginBottom: 8 }}>
               <span className="soft" style={{ width: 130 }}>CLEARANCE</span>
               <span className={isOperator ? 'phos' : 'soft'}>

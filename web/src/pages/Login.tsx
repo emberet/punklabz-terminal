@@ -5,7 +5,7 @@ import { Panel } from '../components/Panel';
 import { AsciiEntity } from '../components/AsciiEntity';
 import { DecryptText } from '../components/motion/DecryptText';
 import { useAuth } from '../lib/auth';
-import { hasWallet, walletSignIn } from '../lib/wallet';
+import { type ConnectorKind, hasWallet, walletSignIn } from '../lib/wallet';
 
 interface NetStats {
   machinesOnline: number;
@@ -32,6 +32,8 @@ export function Login() {
     }
   });
   const [bootLine, setBootLine] = useState(0);
+  /** which wallet button is mid-handshake, so only that one shows as waiting */
+  const [pending, setPending] = useState<ConnectorKind | null>(null);
 
   useEffect(() => {
     void api.get<NetStats>('/api/network/stats').then(setStats).catch(() => {});
@@ -78,16 +80,18 @@ export function Login() {
     }
   };
 
-  const walletLogin = async () => {
+  const walletLogin = async (kind: ConnectorKind) => {
     setBusy(true);
+    setPending(kind);
     setErr('');
     try {
-      await walletSignIn();
+      await walletSignIn(kind);
       await done();
     } catch (e: any) {
       setErr(e.message);
     } finally {
       setBusy(false);
+      setPending(null);
     }
   };
 
@@ -134,12 +138,21 @@ export function Login() {
                 Sign a message with your EVM wallet. No password, no email. A signature is not a
                 transaction — it costs nothing and moves nothing.
               </p>
-              <button className="primary" onClick={walletLogin} disabled={busy || !hasWallet()}>
-                {busy ? '[ waiting for signature… ]' : '[ Connect wallet ]'}
+              <button
+                className="primary"
+                onClick={() => void walletLogin('injected')}
+                disabled={busy || !hasWallet()}
+              >
+                {pending === 'injected' ? '[ waiting for signature… ]' : '[ Browser wallet ]'}
               </button>
-              {!hasWallet() && (
-                <p className="dim">No EVM wallet in this browser — use email, and connect a wallet later.</p>
-              )}
+              <button onClick={() => void walletLogin('walletconnect')} disabled={busy}>
+                {pending === 'walletconnect' ? '[ waiting for signature… ]' : '[ WalletConnect ]'}
+              </button>
+              <p className="dim">
+                {hasWallet()
+                  ? 'Or scan a QR code with a wallet on your phone.'
+                  : 'No extension wallet here — WalletConnect shows a QR code for your phone.'}
+              </p>
             </div>
             <div className="login-col">
               <div className="phos">{mode === 'login' ? 'CREDENTIALS' : 'NEW OPERATOR'}</div>
