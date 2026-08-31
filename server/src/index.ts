@@ -94,7 +94,16 @@ async function main() {
   const feedStatus: AppContext['feedStatus'] = {};
 
   // ── http/ws ──
-  const server = Fastify({ logger: { level: config.isDev ? 'info' : 'warn' } });
+  // Production ran at 'warn', which silenced every operational line the newer
+  // subsystems emit — heartbeat turns, registry refreshes, prediction
+  // resolution, corporate-action pauses. The reason it was set that way is
+  // Fastify logging one line per HTTP request, which buries everything else.
+  // So: keep 'info' for our own lines, and turn the request firehose off in
+  // production rather than throwing away the signal along with the noise.
+  const server = Fastify({
+    logger: { level: 'info' },
+    disableRequestLogging: !config.isDev,
+  });
   await server.register(cookie, { secret: config.sessionSecret });
   await server.register(rateLimit, { global: false });
 
