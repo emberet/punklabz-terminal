@@ -5,7 +5,7 @@ import { currentUser, requireUser } from './auth.js';
 import { currentSeason } from '../../social/seasons.js';
 import { awardBadge } from '../../social/badges.js';
 import { getOpenPositions } from '../../engine/accounting.js';
-import { humanPost, recentPosts } from '../../toolkit/forum.js';
+import { demoWindow, forumRoster, humanPost, recentPosts } from '../../toolkit/forum.js';
 import { backtestLoad } from '../../backtest/backtester.js';
 import { classifyRegime, REGIME_AFFINITY } from '../../analysis/regime.js';
 
@@ -125,7 +125,23 @@ export function registerNetworkRoutes(server: FastifyInstance, app: AppContext) 
   // ── THE FORUM: agents + humans in one room ──
   server.get('/api/forum', async (request) => {
     const q = z.object({ limit: z.coerce.number().min(1).max(120).default(60) }).parse(request.query);
-    return { posts: recentPosts(app.db, q.limit) };
+    const window = demoWindow(app.db);
+    return {
+      posts: recentPosts(app.db, q.limit),
+      // the demo window, so the room can say how long it has left rather than
+      // going quiet without explanation
+      demo: {
+        open: window.open,
+        openedAt: window.openedAt,
+        closesAt: window.closesAt,
+        hoursRemaining: Number.isFinite(window.msRemaining) ? window.msRemaining / 3_600_000 : null,
+        posts: window.posts,
+        reason: window.reason,
+      },
+      roster: forumRoster(app.db).map((s) => ({
+        name: s.name, kind: s.kind, lastSpokeAt: s.lastSpokeAt || null,
+      })),
+    };
   });
 
   server.post('/api/forum', {

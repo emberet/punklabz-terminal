@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openTestDb, type DB } from '../src/db/db.js';
 import { config } from '../src/config.js';
-import { forumHeartbeat, forumRoster, post, recentPosts, SYSTEM_AGENTS } from '../src/toolkit/forum.js';
+import { demoWindow, forumHeartbeat, forumRoster, post, recentPosts, SYSTEM_AGENTS } from '../src/toolkit/forum.js';
 import { takeRateLimit } from '../src/research/budget.js';
 
 const HOUSE = ['MOMENTUM RUNNER', 'MEAN REVERSION', 'GRID TRADER', 'PUMP SNIPER', 'HERD SENTIMENT'];
@@ -116,6 +116,75 @@ describe('the heartbeat', () => {
       if (takeRateLimit(db, 'forum:heartbeat', spec).allowed) allowed++;
     }
     expect(allowed).toBe(320);
+    config.anthropicApiKey = previousKey;
+  });
+
+  it('the window opens on the FIRST TICK, not at boot', () => {
+    // a deploy an hour before anyone looks must not burn an hour of the demo
+    const before = demoWindow(db, 24);
+    expect(before.open).toBe(true);
+    expect(before.openedAt).toBeNull();
+    expect(before.reason).toMatch(/opens on the first tick/);
+    expect(db.prepare(`SELECT COUNT(*) n FROM forum_demo`).get()).toEqual({ n: 0 });
+    config.anthropicApiKey = previousKey;
+  });
+
+  it('goes quiet once the window has elapsed', () => {
+    const opened = Date.now() - 25 * 3_600_000;
+    db.prepare(`INSERT INTO forum_demo (id, opened_at, hours, posts) VALUES (1, ?, 24, 288)`).run(opened);
+
+    const w = demoWindow(db, 24);
+    expect(w.open).toBe(false);
+    expect(w.msRemaining).toBe(0);
+    expect(w.reason).toMatch(/closed after 24h — 288 post\(s\)/);
+    config.anthropicApiKey = previousKey;
+  });
+
+  it('records the close once, as an event rather than a re-derivation', () => {
+    db.prepare(`INSERT INTO forum_demo (id, opened_at, hours) VALUES (1, ?, 24)`)
+      .run(Date.now() - 25 * 3_600_000);
+    demoWindow(db, 24);
+    const first = (db.prepare(`SELECT closed_at FROM forum_demo WHERE id=1`).get() as any).closed_at;
+    expect(first).toBeGreaterThan(0);
+    demoWindow(db, 24);
+    expect((db.prepare(`SELECT closed_at FROM forum_demo WHERE id=1`).get() as any).closed_at).toBe(first);
+    config.anthropicApiKey = previousKey;
+  });
+
+  it('A RESTART DOES NOT EXTEND THE WINDOW', () => {
+    // the bug this guards: opened_at in memory means every systemctl restart
+    // grants another full day. It is the lastAutoPost mistake, in the same file.
+    const opened = Date.now() - 12 * 3_600_000;
+    db.prepare(`INSERT INTO forum_demo (id, opened_at, hours, posts) VALUES (1, ?, 24, 144)`).run(opened);
+
+    // "restart": nothing in memory survives, everything is re-read from the DB
+    const afterRestart = demoWindow(db, 24);
+    expect(afterRestart.openedAt).toBe(opened);
+    expect(afterRestart.msRemaining / 3_600_000).toBeCloseTo(12, 0);
+
+    // and the window still closes at the ORIGINAL time, not 24h from the restart
+    expect(demoWindow(db, 24, opened + 25 * 3_600_000).open).toBe(false);
+    config.anthropicApiKey = previousKey;
+  });
+
+  it('a closed window costs nothing — no limiter write, no budget read, no model call', async () => {
+    db.prepare(`INSERT INTO forum_demo (id, opened_at, hours) VALUES (1, ?, 24)`)
+      .run(Date.now() - 25 * 3_600_000);
+    config.anthropicApiKey = 'sk-ant-not-real';
+
+    const r = await forumHeartbeat(db, null as any, null as any, () => 1, { hours: 24 });
+    expect(r.spoke).toBeNull();
+    expect(r.reason).toMatch(/closed after 24h/);
+    // the rate limiter was never touched, so nothing was consumed
+    expect(db.prepare(`SELECT COUNT(*) n FROM agent_rate_limits WHERE key='forum:heartbeat'`).get())
+      .toEqual({ n: 0 });
+    config.anthropicApiKey = previousKey;
+  });
+
+  it('hours <= 0 means no window at all', () => {
+    expect(demoWindow(db, 0).open).toBe(true);
+    expect(demoWindow(db, 0).msRemaining).toBe(Infinity);
+    expect(demoWindow(db, -1).reason).toMatch(/runs indefinitely/);
     config.anthropicApiKey = previousKey;
   });
 

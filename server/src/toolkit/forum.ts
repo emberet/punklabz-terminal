@@ -329,14 +329,83 @@ export interface HeartbeatResult {
   reason: string;
 }
 
+export interface DemoWindow {
+  open: boolean;
+  openedAt: number | null;
+  closesAt: number | null;
+  msRemaining: number;
+  posts: number;
+  reason: string;
+}
+
+/**
+ * The demo window. Opens LAZILY on the first tick — not at boot — so the clock
+ * starts when the room actually starts talking, and a deploy that happens an
+ * hour before anyone looks does not burn an hour of the demo.
+ *
+ * `opened_at` lives in the database precisely so a restart cannot extend the
+ * window. Holding it in memory would mean every `systemctl restart` granted
+ * another full day, which is the same mistake the module-level `lastAutoPost`
+ * made in this very file.
+ */
+export function demoWindow(db: DB, hours = config.forumHeartbeatHours, now = Date.now()): DemoWindow {
+  if (!(hours > 0)) {
+    return { open: true, openedAt: null, closesAt: null, msRemaining: Infinity, posts: 0, reason: 'no window configured — runs indefinitely' };
+  }
+
+  const row = db.prepare(`SELECT opened_at, hours, closed_at, posts FROM forum_demo WHERE id = 1`).get() as
+    | { opened_at: number; hours: number; closed_at: number | null; posts: number }
+    | undefined;
+
+  if (!row) {
+    return {
+      open: true, openedAt: null, closesAt: null,
+      msRemaining: hours * 3_600_000, posts: 0,
+      reason: 'window has not opened yet — it opens on the first tick',
+    };
+  }
+
+  const closesAt = row.opened_at + row.hours * 3_600_000;
+  const msRemaining = closesAt - now;
+  if (msRemaining <= 0) {
+    // record the close once, so it is an event rather than a re-derivation
+    if (row.closed_at === null) {
+      db.prepare(`UPDATE forum_demo SET closed_at = ? WHERE id = 1`).run(now);
+    }
+    return {
+      open: false, openedAt: row.opened_at, closesAt, msRemaining: 0, posts: row.posts,
+      reason: `demo window closed after ${row.hours}h — ${row.posts} post(s)`,
+    };
+  }
+  return {
+    open: true, openedAt: row.opened_at, closesAt, msRemaining, posts: row.posts,
+    reason: `${(msRemaining / 3_600_000).toFixed(1)}h remaining`,
+  };
+}
+
+/** Open the window on first use, and count the post. Idempotent on open. */
+function markDemoPost(db: DB, hours: number, now = Date.now()): void {
+  if (!(hours > 0)) return;
+  db.prepare(
+    `INSERT INTO forum_demo (id, opened_at, hours, posts) VALUES (1, ?, ?, 1)
+     ON CONFLICT (id) DO UPDATE SET posts = posts + 1`,
+  ).run(now, hours);
+}
+
 export async function forumHeartbeat(
   db: DB,
   hub: WsHub,
   candles: CandleStore,
   markOf: (s: string) => number | undefined,
-  opts: { cooldownMs?: number } = {},
+  opts: { cooldownMs?: number; hours?: number } = {},
 ): Promise<HeartbeatResult> {
   if (!config.anthropicApiKey) return { spoke: null, reason: 'no ANTHROPIC_API_KEY — agents are offline' };
+
+  // Checked BEFORE the rate limit, so a closed window costs nothing — no
+  // limiter write, no budget read, no model call.
+  const hours = opts.hours ?? config.forumHeartbeatHours;
+  const window = demoWindow(db, hours);
+  if (!window.open) return { spoke: null, reason: window.reason };
 
   // Slightly under the cron interval so ordinary scheduler jitter does not
   // skip a tick, and persisted so a restart loop cannot spam the room.
@@ -399,7 +468,13 @@ export async function forumHeartbeat(
         authorKind: speaker.kind, authorId: speaker.id ?? null, authorName: speaker.name,
         body: text, replyTo: null, topic: 'heartbeat',
       });
-      return { spoke: speaker.name, reason: `quiet for ${quietFor}` };
+      // opens the window on the very first post, not on boot
+      markDemoPost(db, hours);
+      const remaining = demoWindow(db, hours);
+      return {
+        spoke: speaker.name,
+        reason: `quiet for ${quietFor}${remaining.closesAt ? `; ${remaining.reason}` : ''}`,
+      };
     } catch (e) {
       return { spoke: null, reason: `${speaker.name} failed: ${String(e).slice(0, 120)}` };
     }

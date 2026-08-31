@@ -34,5 +34,11 @@ export const config = {
    */
   forumHeartbeatEnabled: (process.env.FORUM_HEARTBEAT ?? 'true') === 'true',
   forumHeartbeatCron: process.env.FORUM_HEARTBEAT_CRON ?? '*/5 * * * *',
+  /**
+   * How long the demo runs before the room goes quiet. The window opens on the
+   * first tick and its start is persisted, so restarts do not extend it.
+   * 0 or negative means no window — run indefinitely.
+   */
+  forumHeartbeatHours: Number(process.env.FORUM_HEARTBEAT_HOURS ?? 24),
   isDev: process.env.NODE_ENV !== 'production',
 };
