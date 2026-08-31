@@ -6,8 +6,10 @@ export const FEES = {
   creationUsd: 20,
   /** clone/reuse fee, paid by cloner -> 100% to original creator */
   reuseUsd: 10,
-  /** flat per-trade tax on quant bots, owner -> platform */
-  tradeTaxUsd: 1,
+  /** per-trade tax on quant bots as a % of traded notional, owner -> manager */
+  tradeTaxPct: 1,
+  /** floor so dust trades still pay something */
+  tradeTaxMinUsd: 0.01,
   /** demo credit seeded on signup (mock billing) */
   signupSeedUsd: 100,
 } as const;

@@ -101,7 +101,7 @@ const DOCS: Doc[] = [
     body: (
       <>
         <h3>Credits</h3>
-        <p>100 credits on signup · 20 to deploy a machine · 10 to clone (all 10 go to the creator) · 1 per trade your machine makes.</p>
+        <p>100 credits on signup · 20 to deploy a machine · 10 to clone (all 10 go to the creator) · <b>1% of traded notional</b> on every trade your machine makes, collected by the manager account.</p>
         <p>
           Run dry and your machines pause (they still close open positions). Credits are demo
           currency. No payment rails exist here.

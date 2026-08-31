@@ -69,12 +69,13 @@ export function CommandPalette() {
     };
     switch (cmd) {
       case 'help':
-        print('arena · lab · botnet · market · signals · ranks · archive · operator · status · whoami · clear\n(there are others.)');
+        print('arena · lab · botnet · market · forum · signals · ranks · archive · operator · status · whoami · clear\n(there are others.)');
         break;
       case 'arena': go('/'); break;
       case 'lab': case 'build': go('/build'); break;
       case 'botnet': case 'bots': go('/my-bots'); break;
       case 'market': case 'blackmarket': case 'clone': go('/explore'); break;
+      case 'forum': case 'room': go('/forum'); break;
       case 'signals': go('/signals'); break;
       case 'ranks': case 'leaderboard': go('/leaderboard'); break;
       case 'archive': case 'docs': go('/learn'); break;

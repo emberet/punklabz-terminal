@@ -15,6 +15,7 @@ import { Manager } from './pages/Manager';
 import { Learn } from './pages/Learn';
 import { Login } from './pages/Login';
 import { Signals } from './pages/Signals';
+import { Forum } from './pages/Forum';
 import { Feed } from './pages/Feed';
 import { Profile } from './pages/Profile';
 
@@ -33,6 +34,7 @@ const router = createBrowserRouter([
       { path: 'u/:id', element: <Profile /> },
       { path: 'control-room', element: <Manager /> },
       { path: 'signals', element: <Signals /> },
+      { path: 'forum', element: <Forum /> },
       { path: 'learn', element: <Learn /> },
       { path: 'login', element: <Login /> },
       // legacy routes from v1

@@ -34,6 +34,7 @@ import { registerNetworkRoutes } from './api/routes/network.js';
 import { registerLiveRoutes } from './api/routes/live.js';
 import { LiveNetwork } from './live/liveNetwork.js';
 import { OpportunityEngine } from './live/opportunityEngine.js';
+import { maybeAutoPost } from './toolkit/forum.js';
 import { leaderboard, botSummaries } from './api/queries.js';
 import { BIG_WIN_USD, XP } from '@punklabz/shared';
 import { ensureActiveSeason, closeDueSeasons } from './social/seasons.js';
@@ -147,6 +148,14 @@ async function main() {
     if (owner?.owner_user_id) {
       awardXp(db, owner.owner_user_id, 'trade', XP.trade, trade.id);
       checkTradeBadges(db, hub, owner.owner_user_id);
+    }
+    // a notably good or bad close is worth saying out loud in the forum
+    if (trade.side === 'sell' && Math.abs(trade.realizedPnlUsd) >= BIG_WIN_USD) {
+      void maybeAutoPost(db, hub, candles, (s) => executor.getMark(s), {
+        kind: 'trade',
+        botId: trade.botId,
+        detail: `you just closed ${trade.symbol} for ${trade.realizedPnlUsd >= 0 ? '+' : ''}$${trade.realizedPnlUsd.toFixed(2)} (${trade.reason ?? 'no reason recorded'})`,
+      });
     }
     if (trade.side === 'sell' && trade.realizedPnlUsd >= BIG_WIN_USD) {
       emitActivity(db, hub, {

@@ -117,7 +117,7 @@ export function applyFill(
 
     let taxPaid = true;
     if (opts.quantOwnerUserId !== undefined) {
-      taxPaid = chargeTradeTax(db, opts.quantOwnerUserId, fill.botId, tradeId);
+      taxPaid = chargeTradeTax(db, opts.quantOwnerUserId, fill.botId, tradeId, fill.qty * fill.price);
     }
     return { tradeId, realizedPnlMicro, taxPaid };
   });

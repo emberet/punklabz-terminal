@@ -51,7 +51,11 @@ describe('backtester', () => {
     expect(res.pnlUsd).toBeGreaterThan(0);
     expect(res.trades.every((t) => t.reason.length > 0)).toBe(true);
     expect(res.equityCurve.length).toBeLessThanOrEqual(201);
-    expect(res.estimatedTradeTaxUsd).toBe(res.tradeCount);
+    // 1% of traded notional, floored at $0.01 per trade
+    expect(res.estimatedTradeTaxUsd).toBeGreaterThan(0);
+    expect(res.estimatedTradeTaxUsd).toBeCloseTo(
+      res.trades.reduce((s, x) => s + Math.max(0.01, (x.qty * x.price) / 100), 0), 6,
+    );
   });
 
   it('never writes to the database', async () => {

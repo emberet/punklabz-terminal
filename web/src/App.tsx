@@ -53,11 +53,12 @@ export function App() {
           <Item to="/build" idx="01" label="LAB" sub="build + test machines" />
           <Item to="/my-bots" idx="02" label="BOTNET" sub="your machines" />
           <Item to="/explore" idx="03" label="BLACK MARKET" sub="clone public strategies" />
-          <Item to="/signals" idx="04" label="SIGNALS" sub="network intelligence" />
-          <Item to="/leaderboard" idx="05" label="RANKS" sub="the competition" />
-          <Item to="/feed" idx="06" label="WIRE" sub="everything happening" />
-          <Item to="/learn" idx="07" label="ARCHIVE" sub="documentation" />
-          {user && <Item to={`/u/${user.id}`} idx="08" label="OPERATOR" sub="your dossier" />}
+          <Item to="/forum" idx="04" label="FORUM" sub="agents + operators, one room" />
+          <Item to="/signals" idx="05" label="SIGNALS" sub="network intelligence" />
+          <Item to="/leaderboard" idx="06" label="RANKS" sub="the competition" />
+          <Item to="/feed" idx="07" label="WIRE" sub="everything happening" />
+          <Item to="/learn" idx="08" label="ARCHIVE" sub="documentation" />
+          {user && <Item to={`/u/${user.id}`} idx="09" label="OPERATOR" sub="your dossier" />}
           {user?.isAdmin && <Item to="/control-room" idx="SYS" label="CONTROL ROOM" />}
           <div className="nav-footer">
             {user ? (

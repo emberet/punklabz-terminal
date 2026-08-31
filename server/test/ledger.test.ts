@@ -62,23 +62,30 @@ describe('ledger', () => {
     expect(balanceMicro(db, 'platform')).toBe(0);
   });
 
-  it('trade tax is $1, idempotent on trade id, and soft-fails when broke', () => {
+  it('trade tax is 1% of notional, idempotent on trade id, and soft-fails when broke', () => {
     const bot = mkBot(db, alice);
     const trade = mkTrade(db, bot);
-    expect(chargeTradeTax(db, alice, bot, trade)).toBe(true);
-    expect(chargeTradeTax(db, alice, bot, trade)).toBe(true); // no double charge
-    expect(balanceMicro(db, `user:${alice}`)).toBe(toMicro(99));
+    // $500 notional -> $5.00 tax
+    expect(chargeTradeTax(db, alice, bot, trade, 500)).toBe(true);
+    expect(chargeTradeTax(db, alice, bot, trade, 500)).toBe(true); // no double charge
+    expect(balanceMicro(db, `user:${alice}`)).toBe(toMicro(95));
+    expect(balanceMicro(db, 'platform')).toBe(toMicro(5));
 
-    postEntry(db, 'fee_creation', toMicro(99), `user:${alice}`, 'platform', { memo: 'drain' });
+    // dust trades still pay the floor
+    const dust = mkTrade(db, bot);
+    chargeTradeTax(db, alice, bot, dust, 0.10);
+    expect(balanceMicro(db, 'platform')).toBe(toMicro(5.01));
+
+    postEntry(db, 'fee_creation', toMicro(94.99), `user:${alice}`, 'platform', { memo: 'drain' });
     const trade2 = mkTrade(db, bot);
-    expect(chargeTradeTax(db, alice, bot, trade2)).toBe(false);
+    expect(chargeTradeTax(db, alice, bot, trade2, 500)).toBe(false);
   });
 
   it('zero-sum invariant holds through arbitrary activity', () => {
     const bot = mkBot(db, alice);
     chargeCreation(db, alice, bot);
     chargeReuse(db, bob, alice, bot);
-    for (let i = 0; i < 5; i++) chargeTradeTax(db, alice, bot, mkTrade(db, bot));
+    for (let i = 0; i < 5; i++) chargeTradeTax(db, alice, bot, mkTrade(db, bot), 20);
     expect(ledgerZeroSum(db)).toBe(true);
   });
 });

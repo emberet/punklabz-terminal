@@ -98,19 +98,27 @@ export function chargeReuse(db: DB, clonerUserId: number, creatorUserId: number,
 }
 
 /**
- * $1 per quant-bot trade: owner -> platform. Idempotent on ref_trade_id.
- * Returns false (instead of throwing) when the owner can't pay — caller pauses the bot.
+ * 1% of traded notional per quant-bot trade: owner -> manager (platform
+ * account). Idempotent on ref_trade_id. Returns false (instead of throwing)
+ * when the owner can't pay — caller pauses the bot.
  */
-export function chargeTradeTax(db: DB, ownerUserId: number, botId: number, tradeId: number): boolean {
+export function chargeTradeTax(
+  db: DB,
+  ownerUserId: number,
+  botId: number,
+  tradeId: number,
+  notionalUsd: number,
+): boolean {
   const exists = db
     .prepare('SELECT id FROM ledger_entries WHERE ref_trade_id = ?')
     .get(tradeId);
   if (exists) return true;
+  const taxUsd = Math.max(FEES.tradeTaxMinUsd, (notionalUsd * FEES.tradeTaxPct) / 100);
   try {
-    postEntry(db, 'fee_trade_tax', toMicro(FEES.tradeTaxUsd), `user:${ownerUserId}`, 'platform', {
+    postEntry(db, 'fee_trade_tax', toMicro(taxUsd), `user:${ownerUserId}`, 'platform', {
       refBotId: botId,
       refTradeId: tradeId,
-      memo: `trade tax bot #${botId}`,
+      memo: `${FEES.tradeTaxPct}% trade tax on $${notionalUsd.toFixed(2)} · bot #${botId}`,
     });
     return true;
   } catch (e) {

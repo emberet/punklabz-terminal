@@ -68,8 +68,10 @@ describe('accounting', () => {
       { quantOwnerUserId: userId },
     );
     expect(r.taxPaid).toBe(true);
-    const tax = db.prepare(`SELECT COUNT(*) AS n FROM ledger_entries WHERE type='fee_trade_tax'`).get() as { n: number };
+    const tax = db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(amount_micro),0) AS s FROM ledger_entries WHERE type='fee_trade_tax'`).get() as { n: number; s: number };
     expect(tax.n).toBe(1);
+    // 0.01 BTC at 50,000 = $500 notional -> 1% = $5.00
+    expect(tax.s).toBe(toMicro(5));
   });
 });
 

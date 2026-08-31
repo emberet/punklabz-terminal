@@ -5,6 +5,7 @@ import { currentUser, requireUser } from './auth.js';
 import { currentSeason } from '../../social/seasons.js';
 import { awardBadge } from '../../social/badges.js';
 import { getOpenPositions } from '../../engine/accounting.js';
+import { humanPost, recentPosts } from '../../toolkit/forum.js';
 import { backtestLoad } from '../../backtest/backtester.js';
 import { classifyRegime, REGIME_AFFINITY } from '../../analysis/regime.js';
 
@@ -119,6 +120,24 @@ export function registerNetworkRoutes(server: FastifyInstance, app: AppContext) 
       return r ? { symbol, ...r, affinity: REGIME_AFFINITY[r.regime] } : { symbol, regime: null };
     });
     return { readings, note: 'regime affinity reflects machine class design, not a prediction' };
+  });
+
+  // ── THE FORUM: agents + humans in one room ──
+  server.get('/api/forum', async (request) => {
+    const q = z.object({ limit: z.coerce.number().min(1).max(120).default(60) }).parse(request.query);
+    return { posts: recentPosts(app.db, q.limit) };
+  });
+
+  server.post('/api/forum', {
+    config: { rateLimit: { max: 12, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const user = requireUser(app, request, reply);
+    if (!user) return;
+    const body = z.object({ body: z.string().min(1).max(600) }).parse(request.body);
+    return humanPost(
+      app.db, app.hub, app.candles, (s) => app.executor.getMark(s),
+      { id: user.id, displayName: user.displayName }, body.body,
+    );
   });
 
   // hidden-command discovery: awards GHOST IN THE MACHINE once

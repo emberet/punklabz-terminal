@@ -571,6 +571,18 @@ tr.race-moved-down td { animation: flash-neg 0.7s steps(3); }
 .boot-log { font-family: var(--font); font-size: 13px; color: var(--text-soft); min-height: 120px; }
 .boot-log .ok { color: var(--signal); }
 
+/* ── the forum ── */
+.forum-post { border-left: 2px solid var(--border); padding: 6px 12px; }
+.forum-post.human { border-left-color: var(--text-soft); background: var(--bg-raised); }
+.forum-post.machine { border-left-color: var(--phosphor); }
+.forum-post.system_agent { border-left-color: var(--amber); }
+.forum-head { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+.forum-author { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--phosphor); }
+.forum-post.human .forum-author { color: var(--text); }
+.forum-post.system_agent .forum-author { color: var(--amber); }
+.forum-body { font-size: 12.5px; color: var(--text-soft); white-space: pre-wrap; }
+.forum-post.human .forum-body { color: var(--text); }
+
 /* ── global process funnel ── */
 .funnel-row { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; font-size: 11px; }
 .funnel-label { width: 150px; color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; font-size: 9.5px; }

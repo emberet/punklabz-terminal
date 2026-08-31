@@ -271,7 +271,10 @@ export async function runBacktest(
     tradeCount: trades.length,
     winRate: sells.length > 0 ? (wins / sells.length) * 100 : 0,
     maxDrawdownPct: maxDd,
-    estimatedTradeTaxUsd: trades.length * FEES.tradeTaxUsd,
+    estimatedTradeTaxUsd: trades.reduce(
+      (s, t) => s + Math.max(FEES.tradeTaxMinUsd, (t.qty * t.price * FEES.tradeTaxPct) / 100),
+      0,
+    ),
     trades: trades.slice(-500),
     equityCurve: downsample(equity, 200),
     buyHold,
