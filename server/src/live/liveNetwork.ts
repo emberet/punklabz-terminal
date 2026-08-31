@@ -17,6 +17,7 @@ import { accountForMode } from './accounts.js';
 import type { TradingSigner } from './signing/signer.js';
 import { currentWeights } from '../research/scoring.js';
 import { openEdgeClaim } from '../research/predictions.js';
+import { appendAudit } from '../audit/auditLog.js';
 
 // SHADOW pipeline: mirrors real strategy activity through the full live order
 // lifecycle — intent → risk engine → (theoretical) execution → ledger — with
@@ -99,7 +100,7 @@ export class LiveNetwork {
    * silently doing nothing looks identical to a quiet market, and the whole
    * point of the resolver is that the refusal is visible and explains itself.
    */
-  private recordUnroutable(trade: TradeView, mode: string, reason: string): void {
+  private recordUnroutable(trade: TradeView, mode: string, reason: string, forcedBy?: string): void {
     const account = accountForMode(this.db, mode as never);
     const now = Date.now();
     this.db
@@ -111,13 +112,78 @@ export class LiveNetwork {
       )
       .run(
         `plz_unmapped_${trade.botId}_${trade.symbol}_${now}`,
-        account.id, trade.botId, trade.symbol, trade.side, mode,
+        account.id, forcedBy ? null : trade.botId, trade.symbol, trade.side, mode,
         `no live instrument mapping: ${reason}`.slice(0, 300), now, now,
       );
     this.hub.publish('live', { event: 'order_rejected', symbol: trade.symbol, reason });
   }
 
-  private async mirrorTrade(trade: TradeView): Promise<void> {
+  /**
+   * OPERATOR-FORCED TRADE.
+   *
+   * Runs the REAL path — same resolver, same risk engine, same router, same
+   * adapter, same ledger writes — with a synthetic signal instead of a
+   * strategy's. It exists because the execution path cannot be proven while no
+   * strategy has fired, and an untested payment path is not a safe one.
+   *
+   * It is deliberately thin: it builds a TradeView and hands it to
+   * mirrorTrade. Anything that duplicated mirrorTrade's bookkeeping would
+   * drift from it, and then the thing being tested would not be the thing that
+   * runs in production.
+   */
+  async forceTrade(params: {
+    symbol: string;
+    side: 'buy' | 'sell';
+    notionalUsd: number;
+    actor: string;
+  }): Promise<{ orderId: number | null; state: string; detail: string }> {
+    const cfg = getLiveConfig(this.db);
+    if (cfg.halted) {
+      return { orderId: null, state: 'refused', detail: `network halted: ${cfg.haltReason}` };
+    }
+    const price = this.markOf(params.symbol);
+    if (!price || price <= 0) {
+      // No mark means no way to size the order or measure slippage against it.
+      return { orderId: null, state: 'refused', detail: `no live mark for ${params.symbol}` };
+    }
+
+    appendAudit(this.db, params.actor, 'live_force_trade', {
+      symbol: params.symbol, side: params.side, notionalUsd: params.notionalUsd, mode: cfg.mode,
+    });
+
+    const before = this.db.prepare(`SELECT COALESCE(MAX(id), 0) m FROM live_orders`).get() as { m: number };
+    await this.mirrorTrade(
+      {
+        // A forced trade has no bot behind it. botId 0 keeps it out of every
+        // real machine's lot book and win-rate stats; the order row itself
+        // stores NULL, because attributing this to a strategy would be a lie
+        // that later reads as evidence.
+        id: 0,
+        botId: 0,
+        symbol: params.symbol,
+        side: params.side,
+        qty: params.notionalUsd / price,
+        price,
+        feeUsd: 0,
+        realizedPnlUsd: 0,
+        ts: Date.now(),
+        reason: `operator force by ${params.actor}`,
+      },
+      params.actor,
+    );
+
+    const row = this.db
+      .prepare(`SELECT id, state, reject_reason, tx_ref FROM live_orders WHERE id > ? ORDER BY id DESC LIMIT 1`)
+      .get(before.m) as { id: number; state: string; reject_reason: string | null; tx_ref: string | null } | undefined;
+    if (!row) return { orderId: null, state: 'no_order', detail: 'nothing was recorded — the signal never reached the risk engine' };
+    return {
+      orderId: row.id,
+      state: row.state,
+      detail: row.reject_reason ?? (row.tx_ref ? `tx ${row.tx_ref}` : 'submitted'),
+    };
+  }
+
+  private async mirrorTrade(trade: TradeView, forcedBy?: string): Promise<void> {
     const cfg = getLiveConfig(this.db);
     if (cfg.mode === 'simulation') return; // live pipeline off
 
@@ -135,7 +201,7 @@ export class LiveNetwork {
     if (realMoney) {
       const resolution = resolveLiveInstrument(trade.symbol);
       if (!resolution.mapped || !resolution.instrument) {
-        this.recordUnroutable(trade, cfg.mode, resolution.reason);
+        this.recordUnroutable(trade, cfg.mode, resolution.reason, forcedBy);
         return;
       }
       inst = resolution.instrument;
@@ -149,17 +215,26 @@ export class LiveNetwork {
     const conf = this.confidenceFor(trade);
     const stageCap = stageCapUsd(cfg.capitalStage);
     // scale the paper notional down to live sizing (paper bots run $10k books)
-    const requested = Math.max(0.5, Math.min((stageCap * cfg.limits.maxPerTradePct) / 100, trade.qty * trade.price * (stageCap / 10_000)));
+    //
+    // A forced trade is NOT scaled: the operator named a real dollar amount,
+    // and passing it through the paper-book divisor would turn a deliberate $5
+    // test into $0.03. It is still clamped by the per-trade cap below, which is
+    // the gate that actually protects funds.
+    const perTradeCap = (stageCap * cfg.limits.maxPerTradePct) / 100;
+    const requested = forcedBy
+      ? Math.max(0.5, Math.min(perTradeCap, trade.qty * trade.price))
+      : Math.max(0.5, Math.min(perTradeCap, trade.qty * trade.price * (stageCap / 10_000)));
 
     const intent: OrderIntent = {
       intentId: `plz_${cfg.mode}_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}_${randomUUID().slice(0, 8)}`,
-      botId: trade.botId,
+      botId: forcedBy ? null : trade.botId,
       instrumentId,
       venue: inst.venue,
       side: trade.side,
       notionalUsd: requested,
       confidence: conf.composite,
       reason: trade.reason ?? 'strategy signal',
+      forcedBy,
     };
 
     // net-edge estimate from measured volatility on this instrument
@@ -210,7 +285,7 @@ export class LiveNetwork {
     // moves the confidence weights — including when we are wrong.
     openEdgeClaim(
       this.db, `bot:${trade.botId}`, trade.symbol, this.markOf(trade.symbol) ?? trade.price,
-      edge.netEdgeBps, conf.composite / 100, trade.botId,
+      edge.netEdgeBps, conf.composite / 100, forcedBy ? null : trade.botId,
     );
 
     // route through the ExecutionRouter (shadow: theoretical fill, nothing submitted)
@@ -224,7 +299,7 @@ export class LiveNetwork {
       instrumentId,
       side: trade.side,
       notionalUsd: notional,
-      maxSlippageBps: 35,
+      maxSlippageBps: cfg.limits.maxSlippageBps ?? 35,
       mode: cfg.mode,
       intentId: intent.intentId,
     };

@@ -9,6 +9,8 @@
 // never interpolated into a system prompt, never treated as instruction, and
 // always delimited and labelled when shown to a model.
 
+import { ApiXAdapter } from './apiXAdapter.js';
+
 export interface XPost {
   externalId: string;
   authorHandle: string;
@@ -107,8 +109,20 @@ export function buildXAdapter(): XAdapter {
   const provider = process.env.X_PROVIDER ?? 'none';
   if (provider === 'none') return new NullXAdapter();
   if (provider === 'recording') return new RecordingXAdapter();
+  if (provider === 'api') {
+    // Constructed even with blank credentials: a missing key must surface as a
+    // readiness failure the operator can read, never as a crash on boot that
+    // takes the whole server down with it.
+    return new ApiXAdapter({
+      appKey: process.env.X_APP_KEY ?? '',
+      appSecret: process.env.X_APP_SECRET ?? '',
+      accessToken: process.env.X_ACCESS_TOKEN ?? '',
+      accessSecret: process.env.X_ACCESS_SECRET ?? '',
+      expectedHandle: process.env.X_HANDLE ?? 'punklabz',
+      query: process.env.X_SEARCH_QUERY,
+    });
+  }
   throw new Error(
-    `X_PROVIDER=${provider} is not implemented in this build. Implement XAdapter against ` +
-      'the X API v2 with the account credentials, and do not remove the screen() call site.',
+    `X_PROVIDER=${provider} is not implemented in this build. Supported: none, recording, api.`,
   );
 }

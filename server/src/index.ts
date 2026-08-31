@@ -155,6 +155,10 @@ async function main() {
   const liveNetwork = new LiveNetwork(db, hub, candles, (s) => executor.getMark(s), signer);
   liveNetwork.attach(engine);
   liveNetwork.startSentinel(feedStatus);
+  // Routes are registered above but only run per-request, so assigning here is
+  // in time for every caller. The operator force-trade route needs the real
+  // instance — it must exercise the same object production trades go through.
+  app.liveNetwork = liveNetwork;
 
   // Constructed here, BOOTED after the feed is running — see below. A boot
   // that runs before market data exists can only ever conclude that market

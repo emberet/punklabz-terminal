@@ -40,6 +40,13 @@ export interface RiskLimits {
   minCashReservePct: number;
   leverageMax: number; // 1 = disabled
   confidenceThreshold: number; // 0-100 composite gate
+  /**
+   * Ceiling on the gap between the quoted fill and the minimum the swap will
+   * accept, enforced in the calldata that gets signed — not measured after the
+   * fact. Optional so an existing limits_json row keeps its old behaviour
+   * rather than silently loosening to a new default.
+   */
+  maxSlippageBps?: number;
 }
 
 /** capital exposed at each rollout stage — promotion is deliberate, never automatic */
@@ -59,6 +66,7 @@ export const DEFAULT_LIMITS: RiskLimits = {
   minCashReservePct: 30,
   leverageMax: 1,
   confidenceThreshold: 90,
+  maxSlippageBps: 35,
 };
 
 export interface OrderIntent {
@@ -70,6 +78,15 @@ export interface OrderIntent {
   notionalUsd: number;
   confidence: number;
   reason: string;
+  /**
+   * Set ONLY by an audited operator force. It overrides the confidence gate —
+   * the check that asks "did a strategy believe this?" — and nothing else.
+   * Every check that protects funds (notional cap, open positions, daily loss,
+   * drawdown, cash reserve, correlated exposure) still runs and can still
+   * reject. The override is written into the order's risk_json, so a forced
+   * order is distinguishable from an earned one forever.
+   */
+  forcedBy?: string;
 }
 
 export interface RiskCheck {

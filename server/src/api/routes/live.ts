@@ -363,6 +363,41 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     return { ok: true };
   });
 
+  // OPERATOR FORCE — the one way to put a trade through without a strategy.
+  //
+  // It exists because an execution path that has never carried a real
+  // transaction is not a tested path, and the strategies may stay quiet for
+  // days. It overrides the two gates that ask "did we want this trade?"
+  // (confidence, net edge) and NONE of the gates that protect funds. The
+  // override is written into the order's risk_json and the audit log, so a
+  // forced fill can never later be read as a strategy's success.
+  server.post('/api/live/force-trade', async (request, reply) => {
+    const user = requireAdmin(app, request, reply);
+    if (!user) return;
+    if (!app.liveNetwork) {
+      reply.code(503);
+      return { error: 'live pipeline not wired in this process' };
+    }
+    const cfg = getLiveConfig(app.db);
+    if (cfg.mode === 'simulation' || cfg.mode === 'shadow') {
+      reply.code(409);
+      return { error: `mode is ${cfg.mode} — a forced trade would not reach a venue` };
+    }
+    const body = z
+      .object({
+        symbol: z.string().min(3).max(20),
+        side: z.enum(['buy', 'sell']),
+        // The upper bound is the stage's own per-trade cap, applied again in
+        // the risk engine. Stating it here too means an operator typo is
+        // refused at the door rather than clamped silently.
+        notionalUsd: z.number().min(0.5).max((stageCapUsd(cfg.capitalStage) * cfg.limits.maxPerTradePct) / 100),
+      })
+      .parse(request.body ?? {});
+
+    const result = await app.liveNetwork.forceTrade({ ...body, actor: `operator:${user.id}` });
+    return { ok: result.state === 'filled' || result.state === 'pending', ...result };
+  });
+
   server.post('/api/live/limits', async (request, reply) => {
     const user = requireAdmin(app, request, reply);
     if (!user) return;

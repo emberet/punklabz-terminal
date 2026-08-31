@@ -10,6 +10,7 @@ import type { NewsFeed } from '../feeds/newsFeed.js';
 import type { OpportunityEngine } from '../live/opportunityEngine.js';
 import type { TradingSigner } from '../live/signing/signer.js';
 import type { ExecutionAdapter } from '../live/adapters.js';
+import type { LiveNetwork } from '../live/liveNetwork.js';
 
 export interface AppContext {
   db: DB;
@@ -26,4 +27,6 @@ export interface AppContext {
   opportunities?: OpportunityEngine;
   signer: TradingSigner;
   adapters: Map<string, ExecutionAdapter>;
+  /** present once the live pipeline is wired; the force-trade route needs it */
+  liveNetwork?: LiveNetwork;
 }

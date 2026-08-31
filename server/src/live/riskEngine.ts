@@ -196,17 +196,40 @@ export function evaluateIntent(
   if (cfg.mode === 'simulation') fail('mode', 'execution mode is SIMULATION — live pipeline disabled');
   else pass('mode', `mode ${cfg.mode.toUpperCase()}`);
 
-  if (intent.confidence < cfg.limits.confidenceThreshold)
-    fail('confidence', `composite ${intent.confidence} < threshold ${cfg.limits.confidenceThreshold}`);
-  else pass('confidence', `composite ${intent.confidence} ≥ ${cfg.limits.confidenceThreshold}`);
+  // AN OPERATOR FORCE OVERRIDES THE TWO "SHOULD WE WANT THIS?" GATES, AND
+  // NOTHING ELSE.
+  //
+  // `confidence` and `net_edge` ask whether a strategy believed in this trade
+  // and whether it clears its own costs. Neither protects funds — they protect
+  // returns. A deliberate test trade knowingly pays that cost, and the whole
+  // point of it is to exercise the path when no strategy has fired.
+  //
+  // Every gate below this point is a SAFETY gate — notional cap, open
+  // positions, daily loss, drawdown, cash reserve, correlated exposure — and a
+  // force does not touch any of them. If one of those rejects a forced trade,
+  // it stays rejected.
+  const forced = typeof intent.forcedBy === 'string' && intent.forcedBy.length > 0;
+
+  if (intent.confidence < cfg.limits.confidenceThreshold) {
+    if (forced)
+      pass('confidence', `composite ${intent.confidence} < threshold ${cfg.limits.confidenceThreshold} — OVERRIDDEN by ${intent.forcedBy}`);
+    else
+      fail('confidence', `composite ${intent.confidence} < threshold ${cfg.limits.confidenceThreshold}`);
+  } else pass('confidence', `composite ${intent.confidence} ≥ ${cfg.limits.confidenceThreshold}`);
 
   if (edge) {
-    if (edge.netEdgeBps <= 0)
-      fail('net_edge',
-        `edge ${(edge.grossEdgeBps / 100).toFixed(2)}% − fees ${(edge.feeBps / 100).toFixed(2)}% − slippage ${(edge.slippageBps / 100).toFixed(2)}% − buffer ${(edge.bufferBps / 100).toFixed(2)}% = ${(edge.netEdgeBps / 100).toFixed(2)}%`);
-    else
+    const detail = `edge ${(edge.grossEdgeBps / 100).toFixed(2)}% − fees ${(edge.feeBps / 100).toFixed(2)}% − slippage ${(edge.slippageBps / 100).toFixed(2)}% − buffer ${(edge.bufferBps / 100).toFixed(2)}% = ${(edge.netEdgeBps / 100).toFixed(2)}%`;
+    if (edge.netEdgeBps <= 0) {
+      if (forced) pass('net_edge', `${detail} — OVERRIDDEN by ${intent.forcedBy}`);
+      else fail('net_edge', detail);
+    } else {
       pass('net_edge', `net ${(edge.netEdgeBps / 100).toFixed(2)}% after costs (${edge.edgeModel})`);
+    }
   }
+
+  // Recorded as its own check so a forced order is never mistaken for an
+  // earned one when someone reads the risk log a month from now.
+  if (forced) pass('operator_force', `signal gates overridden by ${intent.forcedBy}; safety gates unchanged`);
 
   const snap = snapshotPortfolio(db, cfg.limits, stageCap, accountId);
   const maxPerTrade = (stageCap * cfg.limits.maxPerTradePct) / 100;
