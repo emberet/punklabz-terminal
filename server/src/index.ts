@@ -33,6 +33,9 @@ import { registerSocialRoutes } from './api/routes/social.js';
 import { registerNetworkRoutes } from './api/routes/network.js';
 import { registerLiveRoutes } from './api/routes/live.js';
 import { LiveNetwork } from './live/liveNetwork.js';
+import { buildAdapters } from './live/adapters.js';
+import { buildSigner } from './live/signing/signer.js';
+import { AutonomousSupervisor } from './live/supervisor.js';
 import { OpportunityEngine } from './live/opportunityEngine.js';
 import { maybeAutoPost } from './toolkit/forum.js';
 import { leaderboard, botSummaries } from './api/queries.js';
@@ -105,7 +108,15 @@ async function main() {
   memeFeed.start();
   newsFeed.start();
 
-  const app: AppContext = { db, engine, executor, candles, hub, holderSource, payoutQueue, feedStatus, prices, memeFeed, newsFeed };
+  // the signing boundary: this build resolves to NoSigner, which reports
+  // not-ready and keeps the live preflight failing closed
+  const signer = buildSigner();
+  const adapters = buildAdapters((s) => executor.getMark(s));
+
+  const app: AppContext = {
+    db, engine, executor, candles, hub, holderSource, payoutQueue,
+    feedStatus, prices, memeFeed, newsFeed, signer, adapters,
+  };
   registerAuthRoutes(server, app);
   registerBotRoutes(server, app);
   registerMiscRoutes(server, app);
@@ -119,6 +130,12 @@ async function main() {
   const liveNetwork = new LiveNetwork(db, hub, candles, (s) => executor.getMark(s));
   liveNetwork.attach(engine);
   liveNetwork.startSentinel(feedStatus);
+
+  // boot sequence: recover in-flight orders, reconcile against venues, re-run
+  // preflight for whatever mode we woke up in. Any failure comes up HALTED.
+  const supervisor = new AutonomousSupervisor(db, hub, signer, adapters, feedStatus);
+  await supervisor.boot();
+  supervisor.startLoops();
 
   // the busy part: scanners observe every market with real data, continuously
   const opportunities = new OpportunityEngine(db, candles, memeFeed, hub);

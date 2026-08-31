@@ -36,14 +36,15 @@ describe('risk engine', () => {
     expect(d.checks.find((c) => c.name === 'mode')?.pass).toBe(false);
   });
 
-  it('canary and live modes are structurally refused (no signer exists)', () => {
-    expect(() => setLiveMode(db, 'canary', 'test')).toThrow(/REFUSED/);
-    expect(() => setLiveMode(db, 'live', 'test')).toThrow(/REFUSED/);
+  it('canary and live require a passing preflight (which today fails closed)', () => {
+    expect(() => setLiveMode(db, 'canary', 'test')).toThrow(/preflight result is required/);
+    expect(() => setLiveMode(db, 'live', 'test', { passed: false, blockers: ['signer: none'] }))
+      .toThrow(/preflight failed/);
     expect(getLiveConfig(db).mode).toBe('simulation');
   });
 
-  it('capital stages above 1 are refused without canary evidence', () => {
-    expect(() => setCapitalStage(db, 2, 'test')).toThrow(/REFUSED/);
+  it('capital stages above 1 need real fills as evidence', () => {
+    expect(() => setCapitalStage(db, 2, 'test')).toThrow(/clean fill/);
     setCapitalStage(db, 1, 'test');
     expect(getLiveConfig(db).capitalStage).toBe(1);
   });

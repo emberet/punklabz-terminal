@@ -14,17 +14,65 @@ export interface AdapterQuote {
 
 export interface AdapterOrderResult {
   accepted: boolean;
+  /** terminal fill price, only when the venue settled synchronously */
   executedPrice?: number;
   feeUsd?: number;
   txRef?: string;
+  /** venue-side id for later status polling */
+  venueOrderId?: string;
+  /** true when the order is live at the venue but not yet resolved */
+  pending?: boolean;
   error?: string;
+}
+
+export interface AdapterBalance {
+  asset: string;
+  qty: number;
+}
+
+export interface AdapterPosition {
+  instrumentId: string;
+  qty: number;
+  avgEntry: number;
+}
+
+export interface AdapterOrderStatus {
+  state: 'pending' | 'open' | 'partial' | 'filled' | 'cancelled' | 'failed' | 'unknown';
+  filledQty: number;
+  executedPrice?: number;
+  feeUsd?: number;
+  detail: string;
+}
+
+export interface ReconciliationResult {
+  ok: boolean;
+  balances: AdapterBalance[];
+  positions: AdapterPosition[];
+  detail: string;
 }
 
 export interface ExecutionAdapter {
   readonly venue: string;
   health(): Promise<VenueHealth>;
   getQuote(inst: Instrument): Promise<AdapterQuote | null>;
-  placeOrder(inst: Instrument, side: 'buy' | 'sell', notionalUsd: number): Promise<AdapterOrderResult>;
+  /**
+   * Submit an order. `minReceive` is slippage protection that a real adapter
+   * MUST encode into the transaction itself before signing — checking slippage
+   * after a chain transaction has executed is measurement, not protection.
+   */
+  placeOrder(
+    inst: Instrument,
+    side: 'buy' | 'sell',
+    notionalUsd: number,
+    opts?: { minReceive?: number; intentId?: string },
+  ): Promise<AdapterOrderResult>;
+  /** poll a submitted order until it resolves */
+  getOrderStatus?(venueOrderId: string): Promise<AdapterOrderStatus>;
+  cancelOrder?(venueOrderId: string): Promise<void>;
+  getBalances?(): Promise<AdapterBalance[]>;
+  getPositions?(): Promise<AdapterPosition[]>;
+  /** authoritative venue state for the reconciler */
+  reconcile?(): Promise<ReconciliationResult>;
 }
 
 export class NotConfiguredAdapter implements ExecutionAdapter {
@@ -50,6 +98,18 @@ export class NotConfiguredAdapter implements ExecutionAdapter {
 
   async placeOrder(): Promise<AdapterOrderResult> {
     return { accepted: false, error: `${this.venue}: NOT_CONFIGURED — no signer/credentials in this build` };
+  }
+
+  async getBalances(): Promise<AdapterBalance[]> {
+    return [];
+  }
+
+  async getPositions(): Promise<AdapterPosition[]> {
+    return [];
+  }
+
+  async reconcile(): Promise<ReconciliationResult> {
+    return { ok: false, balances: [], positions: [], detail: `${this.venue}: not configured` };
   }
 }
 
@@ -78,6 +138,19 @@ export class ShadowAdapter implements ExecutionAdapter {
     const mark = this.markOf(inst.symbol);
     if (mark === undefined) return null;
     return { instrumentId: inst.id, price: mark, ts: Date.now() };
+  }
+
+  async getBalances(): Promise<AdapterBalance[]> {
+    return []; // shadow holds no custody — its book is the ledger
+  }
+
+  async reconcile(): Promise<ReconciliationResult> {
+    return {
+      ok: true,
+      balances: [],
+      positions: [],
+      detail: 'shadow book is authoritative by construction — nothing is custodied',
+    };
   }
 
   async placeOrder(inst: Instrument, side: 'buy' | 'sell', notionalUsd: number): Promise<AdapterOrderResult> {

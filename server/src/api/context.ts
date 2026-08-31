@@ -8,6 +8,8 @@ import type { PayoutQueue } from '../manager/payoutQueue.js';
 import type { MemeFeed } from '../feeds/memeFeed.js';
 import type { NewsFeed } from '../feeds/newsFeed.js';
 import type { OpportunityEngine } from '../live/opportunityEngine.js';
+import type { TradingSigner } from '../live/signing/signer.js';
+import type { ExecutionAdapter } from '../live/adapters.js';
 
 export interface AppContext {
   db: DB;
@@ -22,4 +24,6 @@ export interface AppContext {
   memeFeed: MemeFeed;
   newsFeed: NewsFeed;
   opportunities?: OpportunityEngine;
+  signer: TradingSigner;
+  adapters: Map<string, ExecutionAdapter>;
 }

@@ -5,9 +5,14 @@ import type { AppContext } from '../context.js';
 import { requireUser } from './auth.js';
 import { fromMicro } from '../../money.js';
 import {
-  getLiveConfig, haltNetwork, resumeNetwork, setCapitalStage, setLiveMode, stageCapUsd, updateLimits,
+  getLiveConfig, haltNetwork, promotionEvidence, resumeNetwork, setCapitalStage,
+  setLiveMode, stageCapUsd, updateLimits,
 } from '../../live/riskEngine.js';
 import { allInstruments, searchInstruments } from '../../live/instruments.js';
+import { runPreflight, preflightLines } from '../../live/preflight.js';
+import { accountBook, accountForMode, listAccounts } from '../../live/accounts.js';
+import { reconcileAll } from '../../live/reconciler.js';
+import { mappedSymbols } from '../../live/instrumentResolver.js';
 
 function requireAdmin(app: AppContext, request: any, reply: any) {
   const user = requireUser(app, request, reply);
@@ -25,25 +30,10 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     const stageCap = stageCapUsd(cfg.capitalStage);
     const dayStart = Math.floor(Date.now() / 86_400_000) * 86_400_000;
 
-    const all = app.db
-      .prepare(`SELECT COALESCE(SUM(realized_pnl_micro - fee_micro - gas_micro),0) s FROM live_ledger`)
-      .get() as { s: number };
-    const today = app.db
-      .prepare(`SELECT COALESCE(SUM(realized_pnl_micro - fee_micro - gas_micro),0) s, COALESCE(SUM(fee_micro),0) f FROM live_ledger WHERE ts >= ?`)
-      .get(dayStart) as { s: number; f: number };
-    const deployed = app.db
-      .prepare(`SELECT COALESCE(SUM(approved_notional_micro),0) s FROM live_orders WHERE state IN ('risk_approved','submitting','open','partial')`)
-      .get() as { s: number };
-
-    const rows = app.db.prepare(`SELECT realized_pnl_micro - fee_micro - gas_micro AS d FROM live_ledger ORDER BY ts ASC`).all() as { d: number }[];
-    let cum = stageCap;
-    let peak = stageCap;
-    let dd = 0;
-    for (const r of rows) {
-      cum += fromMicro(r.d);
-      peak = Math.max(peak, cum);
-      if (peak > 0) dd = Math.max(dd, ((peak - cum) / peak) * 100);
-    }
+    // NAV/drawdown are scoped to the account this mode books to — shadow P&L
+    // never leaks into a live account's figures
+    const account = accountForMode(app.db, cfg.mode);
+    const book = accountBook(app.db, account.id, stageCap);
 
     const counts = app.db
       .prepare(
@@ -52,13 +42,12 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
            SUM(CASE WHEN state IN ('risk_approved','submitting','open','partial','filled') THEN 1 ELSE 0 END) AS approved,
            SUM(CASE WHEN state = 'filled' THEN 1 ELSE 0 END) AS executed,
            SUM(CASE WHEN state = 'risk_rejected' THEN 1 ELSE 0 END) AS rejected
-         FROM live_orders WHERE created_at >= ?`,
+         FROM live_orders WHERE created_at >= ? AND execution_account_id = ?`,
       )
-      .get(dayStart) as { signals: number; approved: number | null; executed: number | null; rejected: number | null };
+      .get(dayStart, account.id) as { signals: number; approved: number | null; executed: number | null; rejected: number | null };
     const pumpCount = app.db.prepare(`SELECT COUNT(*) n FROM pump_tokens`).get() as { n: number };
 
-    const navUsd = stageCap + fromMicro(all.s);
-    const deployedUsd = fromMicro(deployed.s);
+    const signerReady = await app.signer.isReady();
     return {
       mode: cfg.mode,
       halted: cfg.halted,
@@ -67,12 +56,12 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
       stageCapUsd: stageCap,
       limits: cfg.limits,
       nav: {
-        totalUsd: navUsd,
-        deployedUsd,
-        availableUsd: Math.max(0, navUsd - deployedUsd),
+        totalUsd: book.navUsd,
+        deployedUsd: book.deployedUsd,
+        availableUsd: Math.max(0, book.navUsd - book.deployedUsd),
         reserveUsd: (stageCap * cfg.limits.minCashReservePct) / 100,
       },
-      today: { netPnlUsd: fromMicro(today.s), feesUsd: fromMicro(today.f), drawdownPct: dd },
+      today: { netPnlUsd: book.todayPnlUsd, feesUsd: book.feesUsd, drawdownPct: book.drawdownPct },
       throughput: {
         marketsWatched: allInstruments().length + pumpCount.n,
         signals: counts.signals,
@@ -80,7 +69,7 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
         executed: counts.executed ?? 0,
         rejected: counts.rejected ?? 0,
       },
-      liveSignerConfigured: false, // structurally false in this build
+      liveSignerConfigured: signerReady.ready, // reported, never asserted
     };
   });
 
@@ -185,6 +174,37 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     return { orders };
   });
 
+  // dry-run the gate for any mode without changing anything
+  server.get('/api/live/preflight', async (request) => {
+    const q = z.object({
+      mode: z.enum(['simulation', 'shadow', 'canary', 'live']).default('live'),
+    }).parse(request.query);
+    const result = await runPreflight(
+      { db: app.db, signer: app.signer, adapters: app.adapters, feedStatus: app.feedStatus },
+      q.mode,
+      'dry-run',
+    );
+    return { ...result, lines: preflightLines(result), mappedSymbols: mappedSymbols() };
+  });
+
+  server.get('/api/live/accounts', async () => {
+    const cfg = getLiveConfig(app.db);
+    const stageCap = stageCapUsd(cfg.capitalStage);
+    return {
+      accounts: listAccounts(app.db).map((a) => ({
+        ...a,
+        book: accountBook(app.db, a.id, a.mode === cfg.mode ? stageCap : a.fundedUsd),
+      })),
+      promotion: promotionEvidence(app.db),
+    };
+  });
+
+  server.post('/api/live/reconcile', async (request, reply) => {
+    const user = requireAdmin(app, request, reply);
+    if (!user) return;
+    return { passes: await reconcileAll(app.db, app.hub, app.adapters) };
+  });
+
   server.get('/api/live/venues', async () => {
     const rows = app.db.prepare(`SELECT * FROM venue_health ORDER BY venue`).all() as any[];
     return {
@@ -205,10 +225,15 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     const user = requireAdmin(app, request, reply);
     if (!user) return;
     const body = z.object({ mode: z.enum(['simulation', 'shadow', 'canary', 'live']) }).parse(request.body);
+    const preflight = await runPreflight(
+      { db: app.db, signer: app.signer, adapters: app.adapters, feedStatus: app.feedStatus },
+      body.mode,
+      `admin:${user.id}`,
+    );
     try {
-      setLiveMode(app.db, body.mode, `admin:${user.id}`);
+      setLiveMode(app.db, body.mode, `admin:${user.id}`, preflight);
     } catch (e: any) {
-      return reply.code(400).send({ error: e.message });
+      return reply.code(400).send({ error: e.message, preflight });
     }
     app.hub.publish('live', { event: 'mode_change', mode: body.mode });
     return { ok: true, mode: body.mode };
@@ -250,9 +275,12 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
   server.post('/api/live/stage', async (request, reply) => {
     const user = requireAdmin(app, request, reply);
     if (!user) return;
-    const body = z.object({ stage: z.number().int().min(0).max(4) }).parse(request.body);
+    const body = z.object({
+      stage: z.number().int().min(0).max(4),
+      force: z.boolean().optional(),
+    }).parse(request.body);
     try {
-      setCapitalStage(app.db, body.stage, `admin:${user.id}`);
+      setCapitalStage(app.db, body.stage, `admin:${user.id}`, body.force ?? false);
     } catch (e: any) {
       return reply.code(400).send({ error: e.message });
     }

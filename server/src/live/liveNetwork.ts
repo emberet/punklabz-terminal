@@ -12,6 +12,7 @@ import { ExecutionRouter } from './executionRouter.js';
 import { edgeForUniverse } from './edge.js';
 import { findInstrument } from './instruments.js';
 import { evaluateIntent, getLiveConfig, haltNetwork, stageCapUsd } from './riskEngine.js';
+import { accountForMode } from './accounts.js';
 
 // SHADOW pipeline: mirrors real strategy activity through the full live order
 // lifecycle — intent → risk engine → (theoretical) execution → ledger — with
@@ -26,7 +27,8 @@ interface Lot {
 export class LiveNetwork {
   private adapters: Map<string, ExecutionAdapter>;
   private router: ExecutionRouter;
-  private lots = new Map<string, Lot>(); // `${botId}:${instrumentId}` -> open lot
+  /** `${accountId}:${botId}:${instrumentId}` — books never mix across accounts */
+  private lots = new Map<string, Lot>();
 
   constructor(
     private db: DB,
@@ -89,6 +91,7 @@ export class LiveNetwork {
     const inst = findInstrument(instrumentId);
     if (!inst) return;
 
+    const account = accountForMode(this.db, cfg.mode, inst.venue);
     const conf = this.confidenceFor(trade);
     const stageCap = stageCapUsd(cfg.capitalStage);
     // scale the paper notional down to live sizing (paper bots run $10k books)
@@ -113,22 +116,24 @@ export class LiveNetwork {
     const edge = edgeForUniverse('majors', atrPct, 0.5);
 
     // sells that close an open shadow lot bypass the entry gates (exits are risk-managed, not blocked)
-    const lotKey = `${trade.botId}:${instrumentId}`;
+    const lotKey = `${account.id}:${trade.botId}:${instrumentId}`;
     const closingLot = trade.side === 'sell' && this.lots.has(lotKey);
 
     const now = Date.now();
     const info = this.db
       .prepare(
         `INSERT INTO live_orders
-           (intent_id, bot_id, instrument_id, venue, side, requested_notional_micro, mode, state, confidence, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?)`,
+           (intent_id, execution_account_id, bot_id, instrument_id, venue, side,
+            requested_notional_micro, mode, state, confidence, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?)`,
       )
-      .run(intent.intentId, intent.botId, instrumentId, inst.venue, intent.side, toMicro(requested), cfg.mode, conf.composite, now, now);
+      .run(intent.intentId, account.id, intent.botId, instrumentId, inst.venue, intent.side,
+        toMicro(requested), cfg.mode, conf.composite, now, now);
     const orderId = Number(info.lastInsertRowid);
 
     const decision = closingLot
       ? { approved: true, sizeUsd: 0, rejectionReason: null, checks: [{ name: 'exit', pass: true, detail: 'closing existing shadow lot — exits always allowed' }] }
-      : evaluateIntent(this.db, intent, edge);
+      : evaluateIntent(this.db, intent, edge, account.id);
 
     this.db
       .prepare(`UPDATE live_orders SET state = ?, approved_notional_micro = ?, risk_json = ?, reject_reason = ?, updated_at = ? WHERE id = ?`)
@@ -158,14 +163,29 @@ export class LiveNetwork {
       side: trade.side,
       notionalUsd: notional,
       maxSlippageBps: 35,
+      mode: cfg.mode,
+      intentId: intent.intentId,
     };
     const routed = this.router.route(routeReq);
     const result = await this.router.execute(routed, routeReq, expected);
 
-    if (!result.accepted || result.executedPrice === undefined) {
+    if (!result.accepted) {
       this.db.prepare(`UPDATE live_orders SET state = 'failed', reject_reason = ?, updated_at = ? WHERE id = ?`)
         .run(result.error ?? 'adapter refused', Date.now(), orderId);
       this.hub.publish('live', { event: 'order_failed', orderId, reason: result.error });
+      return;
+    }
+    // accepted but unresolved: the venue has it, we don't know the outcome yet.
+    // Never book a fill we haven't seen — the reconciler resolves these.
+    if (result.pending || result.executedPrice === undefined) {
+      this.db
+        .prepare(
+          `UPDATE live_orders SET state = 'pending', venue_order_id = ?, tx_ref = ?, min_receive = ?,
+           submitted_at = ?, updated_at = ? WHERE id = ?`,
+        )
+        .run(result.venueOrderId ?? null, result.txRef ?? null, result.minReceive ?? null,
+          Date.now(), Date.now(), orderId);
+      this.hub.publish('live', { event: 'order_pending', orderId, venueOrderId: result.venueOrderId });
       return;
     }
 
@@ -191,14 +211,19 @@ export class LiveNetwork {
     const ts = Date.now();
     this.db.transaction(() => {
       this.db
-        .prepare(`UPDATE live_orders SET state = 'filled', executed_price = ?, slippage_bps = ?, fee_micro = ?, tx_ref = ?, updated_at = ? WHERE id = ?`)
-        .run(result.executedPrice, slippageBps, toMicro(result.feeUsd ?? 0), result.txRef ?? null, ts, orderId);
+        .prepare(
+          `UPDATE live_orders SET state = 'filled', executed_price = ?, slippage_bps = ?, fee_micro = ?,
+           tx_ref = ?, venue_order_id = ?, min_receive = ?, filled_qty = ?, updated_at = ? WHERE id = ?`,
+        )
+        .run(result.executedPrice, slippageBps, toMicro(result.feeUsd ?? 0), result.txRef ?? null,
+          result.venueOrderId ?? null, result.minReceive ?? null, qty, ts, orderId);
       this.db
         .prepare(
-          `INSERT INTO live_ledger (order_id, bot_id, instrument_id, venue, side, qty, expected_price, executed_price, fee_micro, gas_micro, slippage_bps, realized_pnl_micro, mode, tx_ref, ts)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+          `INSERT INTO live_ledger (order_id, execution_account_id, bot_id, instrument_id, venue, side, qty,
+             expected_price, executed_price, fee_micro, gas_micro, slippage_bps, realized_pnl_micro, mode, tx_ref, ts)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
         )
-        .run(orderId, trade.botId, instrumentId, routed.venue, trade.side, qty, expected, result.executedPrice,
+        .run(orderId, account.id, trade.botId, instrumentId, routed.venue, trade.side, qty, expected, result.executedPrice,
           toMicro(result.feeUsd ?? 0), slippageBps, realizedMicro, cfg.mode, result.txRef ?? null, ts);
     })();
 
@@ -215,11 +240,19 @@ export class LiveNetwork {
   }
 
   private restoreLots(): void {
+    // Account-scoped. Previously this summed the whole ledger with no filter,
+    // which would have let a shadow book seed a live account's positions.
     const rows = this.db
-      .prepare(`SELECT bot_id, instrument_id, side, qty, executed_price FROM live_ledger ORDER BY ts ASC`)
-      .all() as { bot_id: number; instrument_id: string; side: string; qty: number; executed_price: number }[];
+      .prepare(
+        `SELECT execution_account_id, bot_id, instrument_id, side, qty, executed_price
+         FROM live_ledger ORDER BY ts ASC`,
+      )
+      .all() as {
+        execution_account_id: number; bot_id: number; instrument_id: string;
+        side: string; qty: number; executed_price: number;
+      }[];
     for (const r of rows) {
-      const key = `${r.bot_id}:${r.instrument_id}`;
+      const key = `${r.execution_account_id}:${r.bot_id}:${r.instrument_id}`;
       const lot = this.lots.get(key);
       if (r.side === 'buy') {
         if (lot) {

@@ -34,6 +34,13 @@ interface Venue {
   note: string | null;
 }
 
+interface Preflight {
+  targetMode: string;
+  passed: boolean;
+  lines: string[];
+  blockers: string[];
+}
+
 const NETWORK_MAP = `                [ PUNKLABZ ]
                      │
                [ RISK CORE ]
@@ -52,6 +59,8 @@ export function LiveNetworkPanel() {
   const [status, setStatus] = useState<LiveStatusView | null>(null);
   const [orders, setOrders] = useState<LiveOrder[]>([]);
   const [venues, setVenues] = useState<Venue[]>([]);
+  const [preflight, setPreflight] = useState<Preflight | null>(null);
+  const [pfMode, setPfMode] = useState('live');
   const [expanded, setExpanded] = useState<number | null>(null);
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
@@ -60,6 +69,7 @@ export function LiveNetworkPanel() {
     void api.get<LiveStatusView>('/api/live/status').then(setStatus).catch(() => {});
     void api.get<{ orders: LiveOrder[] }>('/api/live/orders').then((r) => setOrders(r.orders)).catch(() => {});
     void api.get<{ venues: Venue[] }>('/api/live/venues').then((r) => setVenues(r.venues)).catch(() => {});
+    void api.get<Preflight>(`/api/live/preflight?mode=${pfMode}`).then(setPreflight).catch(() => {});
   };
 
   useEffect(() => {
@@ -70,7 +80,7 @@ export function LiveNetworkPanel() {
       un();
       clearInterval(t);
     };
-  }, []);
+  }, [pfMode]);
 
   const act = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -165,11 +175,40 @@ export function LiveNetworkPanel() {
                 </button>
               )}
               <span className="dim" style={{ fontSize: 10 }}>
-                CANARY/LIVE refused by the risk engine — no signer exists in this build. Confidence gate {status.limits.confidenceThreshold}/100.
+                Canary/live open only when preflight passes — {preflight?.blockers.length ?? '…'} prerequisite(s) missing today. Confidence gate {status.limits.confidenceThreshold}/100.
               </span>
             </div>
           )}
         </div>
+      </Panel>
+
+      <Panel
+        title="LIVE PREFLIGHT"
+        sub="the gate is evidence, not an assertion — every prerequisite is checked"
+        noPad
+        right={
+          <span className="tabs" style={{ display: 'inline-flex' }}>
+            {['shadow', 'canary', 'live'].map((m) => (
+              <button key={m} className={m === pfMode ? 'active' : ''} onClick={() => setPfMode(m)}>{m}</button>
+            ))}
+          </span>
+        }
+      >
+        {preflight && (
+          <>
+            <div className={`banner ${preflight.passed ? 'ok' : 'bad'}`}>
+              {preflight.passed
+                ? `✓ ${preflight.targetMode.toUpperCase()} PREREQUISITES MET`
+                : `✗ ${preflight.targetMode.toUpperCase()} BLOCKED — ${preflight.blockers.length} PREREQUISITE(S) MISSING`}
+            </div>
+            <div className="syslog" style={{ whiteSpace: 'pre-wrap' }}>
+              {preflight.lines.map((l, i) => {
+                const verdict = l.includes(' PASS ') ? 'phos' : l.includes(' WARN ') ? 'amber' : 'red';
+                return <div key={i} className={verdict}>{l}</div>;
+              })}
+            </div>
+          </>
+        )}
       </Panel>
 
       <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', gap: 12, alignItems: 'start' }}>

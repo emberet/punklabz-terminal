@@ -34,17 +34,32 @@ export function getLiveConfig(db: DB): {
   };
 }
 
-export function setLiveMode(db: DB, mode: ExecutionMode, actor: string): void {
+/**
+ * Change execution mode. Modes that can move real funds must pass a full
+ * preflight first — the caller supplies the result. Nothing here asserts a
+ * refusal: the gate is the evidence. Today the preflight fails (no signer, no
+ * adapter, no instrument mapping), so canary and live remain closed for
+ * reasons an operator can read and fix.
+ */
+export function setLiveMode(
+  db: DB,
+  mode: ExecutionMode,
+  actor: string,
+  preflight?: { passed: boolean; blockers: string[] },
+): void {
   getLiveConfig(db); // ensure the config row exists
-  // structural gate: canary/live need a signer, and none exists in this build.
   if (mode === 'canary' || mode === 'live') {
-    throw new Error(
-      'REFUSED: canary/live execution requires a configured signing service and funded venue credentials. ' +
-      'This build has none — top mode is SHADOW.',
-    );
+    if (!preflight) {
+      throw new Error('BLOCKED: a preflight result is required to enter canary or live mode');
+    }
+    if (!preflight.passed) {
+      throw new Error(
+        `BLOCKED: ${mode} preflight failed —\n  ${preflight.blockers.join('\n  ')}`,
+      );
+    }
   }
   db.prepare(`UPDATE live_config SET mode = ?, updated_at = ? WHERE id = 1`).run(mode, Date.now());
-  appendAudit(db, actor, 'live_mode_change', { mode });
+  appendAudit(db, actor, 'live_mode_change', { mode, preflightPassed: preflight?.passed ?? null });
 }
 
 export function haltNetwork(db: DB, reason: string, actor: string): void {
@@ -72,19 +87,23 @@ interface PortfolioSnapshot {
   navUsd: number;
 }
 
-function snapshotPortfolio(db: DB, limits: RiskLimits, stageCap: number): PortfolioSnapshot {
+function snapshotPortfolio(
+  db: DB,
+  limits: RiskLimits,
+  stageCap: number,
+  accountId?: number,
+): PortfolioSnapshot {
+  // Scope every figure to ONE execution account. Shadow P&L must never appear
+  // in a live account's NAV or drawdown.
+  const acctFilter = accountId !== undefined ? ' AND execution_account_id = ?' : '';
+  const acctArgs = accountId !== undefined ? [accountId] : [];
   const dayStart = Math.floor(Date.now() / 86_400_000) * 86_400_000;
-  const open = db
-    .prepare(
-      `SELECT bot_id, approved_notional_micro FROM live_orders WHERE state IN ('risk_approved','submitting','open','partial','filled')
-       AND created_at >= ?`,
-    )
-    .all(Date.now() - 7 * 86_400_000) as { bot_id: number | null; approved_notional_micro: number | null }[];
-  // deployed = filled-side exposure still on book: this build closes shadow
-  // round-trips immediately, so open exposure comes from unclosed states only
   const openStates = db
-    .prepare(`SELECT bot_id, approved_notional_micro FROM live_orders WHERE state IN ('risk_approved','submitting','open','partial')`)
-    .all() as { bot_id: number | null; approved_notional_micro: number | null }[];
+    .prepare(
+      `SELECT bot_id, approved_notional_micro FROM live_orders
+       WHERE state IN ('risk_approved','submitting','submitted','pending','open','partial')${acctFilter}`,
+    )
+    .all(...acctArgs) as { bot_id: number | null; approved_notional_micro: number | null }[];
   const perBot = new Map<number, number>();
   let deployed = 0;
   for (const o of openStates) {
@@ -93,21 +112,31 @@ function snapshotPortfolio(db: DB, limits: RiskLimits, stageCap: number): Portfo
     if (o.bot_id !== null) perBot.set(o.bot_id, (perBot.get(o.bot_id) ?? 0) + usd);
   }
   const today = db
-    .prepare(`SELECT COALESCE(SUM(realized_pnl_micro - fee_micro - gas_micro),0) s FROM live_ledger WHERE ts >= ?`)
-    .get(dayStart) as { s: number };
+    .prepare(
+      `SELECT COALESCE(SUM(realized_pnl_micro - fee_micro - gas_micro),0) s
+       FROM live_ledger WHERE ts >= ?${acctFilter}`,
+    )
+    .get(dayStart, ...acctArgs) as { s: number };
   const allTime = db
-    .prepare(`SELECT COALESCE(SUM(realized_pnl_micro - fee_micro - gas_micro),0) s FROM live_ledger`)
-    .get() as { s: number };
+    .prepare(
+      `SELECT COALESCE(SUM(realized_pnl_micro - fee_micro - gas_micro),0) s
+       FROM live_ledger WHERE 1=1${acctFilter}`,
+    )
+    .get(...acctArgs) as { s: number };
   const navUsd = stageCap + fromMicro(allTime.s);
   // peak NAV from running ledger cumulative
-  const rows = db.prepare(`SELECT realized_pnl_micro - fee_micro - gas_micro AS d FROM live_ledger ORDER BY ts ASC`).all() as { d: number }[];
+  const rows = db
+    .prepare(
+      `SELECT realized_pnl_micro - fee_micro - gas_micro AS d
+       FROM live_ledger WHERE 1=1${acctFilter} ORDER BY ts ASC`,
+    )
+    .all(...acctArgs) as { d: number }[];
   let cum = stageCap;
   let peak = stageCap;
   for (const r of rows) {
     cum += fromMicro(r.d);
     peak = Math.max(peak, cum);
   }
-  void open;
   void limits;
   return {
     deployedUsd: deployed,
@@ -133,7 +162,12 @@ export interface EdgeInput {
  * When an edge breakdown is supplied the net-edge rule applies:
  *   expected edge must survive fees + slippage + safety buffer.
  */
-export function evaluateIntent(db: DB, intent: OrderIntent, edge?: EdgeInput): RiskDecision {
+export function evaluateIntent(
+  db: DB,
+  intent: OrderIntent,
+  edge?: EdgeInput,
+  accountId?: number,
+): RiskDecision {
   const cfg = getLiveConfig(db);
   const stageCap = stageCapUsd(cfg.capitalStage);
   const checks: RiskCheck[] = [];
@@ -158,7 +192,7 @@ export function evaluateIntent(db: DB, intent: OrderIntent, edge?: EdgeInput): R
       pass('net_edge', `net ${(edge.netEdgeBps / 100).toFixed(2)}% after costs (${edge.edgeModel})`);
   }
 
-  const snap = snapshotPortfolio(db, cfg.limits, stageCap);
+  const snap = snapshotPortfolio(db, cfg.limits, stageCap, accountId);
   const maxPerTrade = (stageCap * cfg.limits.maxPerTradePct) / 100;
   const size = Math.min(intent.notionalUsd, maxPerTrade);
 
@@ -229,14 +263,61 @@ export function updateLimits(db: DB, patch: Partial<RiskLimits>, actor: string):
   return next;
 }
 
-export function setCapitalStage(db: DB, stage: number, actor: string): void {
+export interface PromotionEvidence {
+  cleanFills: number;
+  drawdownPct: number;
+  reconciliationClean: boolean;
+  failedOrders: number;
+}
+
+/** what a stage must show before the next one unlocks */
+export function promotionEvidence(db: DB): PromotionEvidence {
+  const fills = db
+    .prepare(`SELECT COUNT(*) n FROM live_orders WHERE state = 'filled' AND mode IN ('canary','live')`)
+    .get() as { n: number };
+  const failed = db
+    .prepare(`SELECT COUNT(*) n FROM live_orders WHERE state IN ('failed','reconciling')`)
+    .get() as { n: number };
+  const lastRecon = db
+    .prepare(`SELECT within_tolerance FROM balance_snapshots ORDER BY id DESC LIMIT 1`)
+    .get() as { within_tolerance: number } | undefined;
+  const cfg = getLiveConfig(db);
+  const snap = snapshotPortfolio(db, cfg.limits, stageCapUsd(cfg.capitalStage));
+  const dd = snap.peakNavUsd > 0 ? ((snap.peakNavUsd - snap.navUsd) / snap.peakNavUsd) * 100 : 0;
+  return {
+    cleanFills: fills.n,
+    drawdownPct: dd,
+    reconciliationClean: lastRecon ? lastRecon.within_tolerance === 1 : true,
+    failedOrders: failed.n,
+  };
+}
+
+/**
+ * Promote or demote the capital stage. Demotion is always allowed. Promotion
+ * requires evidence from the stage below: real clean fills, controlled
+ * drawdown, clean reconciliation and no unresolved orders.
+ */
+export function setCapitalStage(db: DB, stage: number, actor: string, force = false): void {
   getLiveConfig(db); // ensure the config row exists
+  const cfg = getLiveConfig(db);
   const clamped = Math.max(0, Math.min(CAPITAL_STAGES.length - 1, Math.floor(stage)));
-  // structural gate: stages >0 meaningless without a signer, but allow staging
-  // config for shadow-accounting realism up to stage 1 only.
-  if (clamped > 1) {
-    throw new Error('REFUSED: stages above 1 ($5) require a configured signer and validated canary evidence.');
+
+  if (clamped > cfg.capitalStage && !force) {
+    const ev = promotionEvidence(db);
+    const blockers: string[] = [];
+    // stage 1 is the first real-capital step; it needs infrastructure, not fills
+    const requiredFills = clamped === 1 ? 0 : 10 * clamped;
+    if (ev.cleanFills < requiredFills)
+      blockers.push(`${ev.cleanFills} clean fill(s), ${requiredFills} required for stage ${clamped}`);
+    if (ev.drawdownPct > cfg.limits.maxTotalDrawdownPct / 2)
+      blockers.push(`drawdown ${ev.drawdownPct.toFixed(1)}% is more than half the kill threshold`);
+    if (!ev.reconciliationClean) blockers.push('last reconciliation did not match the venue');
+    if (ev.failedOrders > 0) blockers.push(`${ev.failedOrders} failed/unresolved order(s) outstanding`);
+    if (blockers.length) {
+      throw new Error(`BLOCKED: stage ${clamped} promotion needs —\n  ${blockers.join('\n  ')}`);
+    }
   }
+
   db.prepare(`UPDATE live_config SET capital_stage = ?, updated_at = ? WHERE id = 1`).run(clamped, Date.now());
-  appendAudit(db, actor, 'capital_stage_change', { stage: clamped });
+  appendAudit(db, actor, 'capital_stage_change', { stage: clamped, forced: force });
 }

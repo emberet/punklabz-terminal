@@ -12,6 +12,9 @@ export interface RouteRequest {
   side: 'buy' | 'sell';
   notionalUsd: number;
   maxSlippageBps: number;
+  /** the mode decides which adapters are even eligible */
+  mode: 'simulation' | 'shadow' | 'canary' | 'live';
+  intentId?: string;
 }
 
 export interface RouteDecision {
@@ -25,12 +28,22 @@ export interface RouteDecision {
 export class ExecutionRouter {
   constructor(private adapters: Map<string, ExecutionAdapter>) {}
 
-  /** pick a destination for an intent — or explain why there isn't one */
+  /**
+   * Pick a destination for an intent — or explain why there isn't one.
+   *
+   * There is deliberately NO fallback. A previous version fell back to the
+   * shadow adapter when a venue was missing, which meant an order intended for
+   * a real venue could be silently simulated and booked as though it had
+   * happened. Modes that can move funds must reach their exact adapter or the
+   * order is rejected.
+   */
   route(req: RouteRequest): RouteDecision {
     const instrument = findInstrument(req.instrumentId);
     if (!instrument) {
       return { venue: 'none', adapter: null, instrument: null, routable: false, reason: 'unknown instrument' };
     }
+
+    const realMoney = req.mode === 'canary' || req.mode === 'live';
     if (!instrument.tradable) {
       return {
         venue: instrument.venue,
@@ -49,9 +62,29 @@ export class ExecutionRouter {
         reason: `below venue minimum $${instrument.minNotionalUsd}`,
       };
     }
-    const adapter = this.adapters.get(instrument.venue) ?? this.adapters.get('shadow') ?? null;
+    // simulation and shadow book against the shadow adapter by design;
+    // canary and live must reach the instrument's own venue, exactly.
+    const adapter = realMoney
+      ? this.adapters.get(instrument.venue) ?? null
+      : this.adapters.get(instrument.venue) ?? this.adapters.get('shadow') ?? null;
+
     if (!adapter) {
-      return { venue: instrument.venue, adapter: null, instrument, routable: false, reason: 'no adapter for venue' };
+      return {
+        venue: instrument.venue,
+        adapter: null,
+        instrument,
+        routable: false,
+        reason: `ADAPTER_UNAVAILABLE for ${instrument.venue} — refusing to route (no shadow fallback in ${req.mode} mode)`,
+      };
+    }
+    if (realMoney && (adapter.venue === 'shadow' || adapter.venue === 'paper')) {
+      return {
+        venue: adapter.venue,
+        adapter: null,
+        instrument,
+        routable: false,
+        reason: `refusing to route ${req.mode} order to a simulated venue`,
+      };
     }
     return {
       venue: adapter.venue,
@@ -62,30 +95,54 @@ export class ExecutionRouter {
     };
   }
 
-  /** execute a routed intent; enforces the slippage ceiling after the fill */
+  /**
+   * Execute a routed intent.
+   *
+   * `minReceive` is computed here and handed to the adapter, which must encode
+   * it into the transaction BEFORE signing. Post-fill slippage below is
+   * measurement for the ledger, not protection — on-chain, a check after the
+   * transaction lands is too late to prevent anything.
+   */
   async execute(
     decision: RouteDecision,
     req: RouteRequest,
     expectedPrice: number,
-  ): Promise<AdapterOrderResult & { slippageBps: number }> {
+  ): Promise<AdapterOrderResult & { slippageBps: number; minReceive: number }> {
     if (!decision.routable || !decision.adapter || !decision.instrument) {
-      return { accepted: false, error: decision.reason, slippageBps: 0 };
+      return { accepted: false, error: decision.reason, slippageBps: 0, minReceive: 0 };
     }
-    const result = await decision.adapter.placeOrder(decision.instrument, req.side, req.notionalUsd);
-    if (!result.accepted || result.executedPrice === undefined) {
-      return { ...result, slippageBps: 0 };
+    const tolerance = req.maxSlippageBps / 10_000;
+    const minReceive =
+      req.side === 'buy'
+        ? (req.notionalUsd / (expectedPrice * (1 + tolerance)))  // min base units received
+        : req.notionalUsd * (1 - tolerance);                     // min quote received
+    const result = await decision.adapter.placeOrder(decision.instrument, req.side, req.notionalUsd, {
+      minReceive,
+      intentId: req.intentId,
+    });
+    if (!result.accepted) {
+      return { ...result, slippageBps: 0, minReceive };
+    }
+    // an order that is live at the venue but unresolved is not a fill
+    if (result.pending || result.executedPrice === undefined) {
+      return { ...result, slippageBps: 0, minReceive };
     }
     const slippageBps =
       expectedPrice > 0
         ? ((result.executedPrice - expectedPrice) / expectedPrice) * 10_000 * (req.side === 'buy' ? 1 : -1)
         : 0;
     if (slippageBps > req.maxSlippageBps) {
+      // For a simulated venue this is a rejection. For a real one the fill has
+      // already happened — the ceiling was supposed to be enforced by
+      // minReceive inside the transaction. Record it loudly either way.
       return {
-        accepted: false,
+        ...result,
+        accepted: decision.adapter.venue !== 'shadow',
         error: `slippage ${slippageBps.toFixed(1)}bps exceeded ceiling ${req.maxSlippageBps}bps`,
         slippageBps,
+        minReceive,
       };
     }
-    return { ...result, slippageBps };
+    return { ...result, slippageBps, minReceive };
   }
 }
