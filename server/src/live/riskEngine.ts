@@ -119,8 +119,21 @@ function snapshotPortfolio(db: DB, limits: RiskLimits, stageCap: number): Portfo
   };
 }
 
-/** The gate. Pure decision + audit trail; caller persists the order row. */
-export function evaluateIntent(db: DB, intent: OrderIntent): RiskDecision {
+export interface EdgeInput {
+  grossEdgeBps: number;
+  feeBps: number;
+  slippageBps: number;
+  bufferBps: number;
+  netEdgeBps: number;
+  edgeModel: string;
+}
+
+/**
+ * The gate. Pure decision + audit trail; caller persists the order row.
+ * When an edge breakdown is supplied the net-edge rule applies:
+ *   expected edge must survive fees + slippage + safety buffer.
+ */
+export function evaluateIntent(db: DB, intent: OrderIntent, edge?: EdgeInput): RiskDecision {
   const cfg = getLiveConfig(db);
   const stageCap = stageCapUsd(cfg.capitalStage);
   const checks: RiskCheck[] = [];
@@ -136,6 +149,14 @@ export function evaluateIntent(db: DB, intent: OrderIntent): RiskDecision {
   if (intent.confidence < cfg.limits.confidenceThreshold)
     fail('confidence', `composite ${intent.confidence} < threshold ${cfg.limits.confidenceThreshold}`);
   else pass('confidence', `composite ${intent.confidence} ≥ ${cfg.limits.confidenceThreshold}`);
+
+  if (edge) {
+    if (edge.netEdgeBps <= 0)
+      fail('net_edge',
+        `edge ${(edge.grossEdgeBps / 100).toFixed(2)}% − fees ${(edge.feeBps / 100).toFixed(2)}% − slippage ${(edge.slippageBps / 100).toFixed(2)}% − buffer ${(edge.bufferBps / 100).toFixed(2)}% = ${(edge.netEdgeBps / 100).toFixed(2)}%`);
+    else
+      pass('net_edge', `net ${(edge.netEdgeBps / 100).toFixed(2)}% after costs (${edge.edgeModel})`);
+  }
 
   const snap = snapshotPortfolio(db, cfg.limits, stageCap);
   const maxPerTrade = (stageCap * cfg.limits.maxPerTradePct) / 100;
@@ -188,6 +209,7 @@ export function evaluateIntent(db: DB, intent: OrderIntent): RiskDecision {
     instrument: intent.instrumentId,
     sizeUsd: decision.sizeUsd,
     rejectionReason: decision.rejectionReason,
+    netEdgeBps: edge?.netEdgeBps ?? null,
   });
   return decision;
 }

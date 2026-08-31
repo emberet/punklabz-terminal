@@ -33,6 +33,7 @@ import { registerSocialRoutes } from './api/routes/social.js';
 import { registerNetworkRoutes } from './api/routes/network.js';
 import { registerLiveRoutes } from './api/routes/live.js';
 import { LiveNetwork } from './live/liveNetwork.js';
+import { OpportunityEngine } from './live/opportunityEngine.js';
 import { leaderboard, botSummaries } from './api/queries.js';
 import { BIG_WIN_USD, XP } from '@punklabz/shared';
 import { ensureActiveSeason, closeDueSeasons } from './social/seasons.js';
@@ -117,6 +118,11 @@ async function main() {
   const liveNetwork = new LiveNetwork(db, hub, candles, (s) => executor.getMark(s));
   liveNetwork.attach(engine);
   liveNetwork.startSentinel(feedStatus);
+
+  // the busy part: scanners observe every market with real data, continuously
+  const opportunities = new OpportunityEngine(db, candles, memeFeed, hub);
+  app.opportunities = opportunities;
+  opportunities.start();
 
   // ── wiring: feed -> candles/prices -> engine/hub ──
   feed.on('tick', (t: { symbol: string; price: number; changePct24h: number }) => {

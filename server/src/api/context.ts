@@ -7,6 +7,7 @@ import type { HolderSource } from '../manager/holderSource.js';
 import type { PayoutQueue } from '../manager/payoutQueue.js';
 import type { MemeFeed } from '../feeds/memeFeed.js';
 import type { NewsFeed } from '../feeds/newsFeed.js';
+import type { OpportunityEngine } from '../live/opportunityEngine.js';
 
 export interface AppContext {
   db: DB;
@@ -20,4 +21,5 @@ export interface AppContext {
   prices: Record<string, { price: number; changePct24h: number }>;
   memeFeed: MemeFeed;
   newsFeed: NewsFeed;
+  opportunities?: OpportunityEngine;
 }

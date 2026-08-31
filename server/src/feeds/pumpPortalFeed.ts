@@ -31,6 +31,7 @@ export class PumpPortalFeed extends EventEmitter {
 
   start(): void {
     this.stopped = false;
+    this.restoreTracked();
     this.connect();
     this.evictTimer = setInterval(() => this.evictOld(), 60_000);
   }
@@ -39,6 +40,26 @@ export class PumpPortalFeed extends EventEmitter {
     this.stopped = true;
     if (this.evictTimer) clearInterval(this.evictTimer);
     this.ws?.close();
+  }
+
+  /** reload recently-launched mints so a restart resumes their trade streams */
+  private restoreTracked(): void {
+    const rows = this.db
+      .prepare(
+        `SELECT mint, name, symbol, launched_at, last_price_sol
+         FROM pump_tokens WHERE launched_at > ? ORDER BY launched_at DESC LIMIT 200`,
+      )
+      .all(Date.now() - TRACK_MAX_AGE_MS) as any[];
+    for (const r of rows) {
+      this.tracked.set(r.mint, {
+        stats: {
+          mint: r.mint, name: r.name, symbol: r.symbol,
+          launchedAt: r.launched_at, lastPriceSol: r.last_price_sol ?? 0,
+          buys60s: 0, vol60s: 0, uniqueBuyers60s: 0,
+        },
+        trades: [],
+      });
+    }
   }
 
   private connect() {

@@ -5,8 +5,11 @@ import type { Engine } from '../engine/engine.js';
 import type { WsHub } from '../realtime/wsHub.js';
 import { toMicro, fromMicro } from '../money.js';
 import { classifyRegime, REGIME_AFFINITY } from '../analysis/regime.js';
+import { atr } from '../engine/indicators.js';
 import type { CandleStore } from '../feeds/candles.js';
 import { buildAdapters, type ExecutionAdapter } from './adapters.js';
+import { ExecutionRouter } from './executionRouter.js';
+import { edgeForUniverse } from './edge.js';
 import { findInstrument } from './instruments.js';
 import { evaluateIntent, getLiveConfig, haltNetwork, stageCapUsd } from './riskEngine.js';
 
@@ -22,6 +25,7 @@ interface Lot {
 
 export class LiveNetwork {
   private adapters: Map<string, ExecutionAdapter>;
+  private router: ExecutionRouter;
   private lots = new Map<string, Lot>(); // `${botId}:${instrumentId}` -> open lot
 
   constructor(
@@ -31,6 +35,7 @@ export class LiveNetwork {
     private markOf: (s: string) => number | undefined,
   ) {
     this.adapters = buildAdapters(markOf);
+    this.router = new ExecutionRouter(this.adapters);
     this.restoreLots();
   }
 
@@ -100,6 +105,13 @@ export class LiveNetwork {
       reason: trade.reason ?? 'strategy signal',
     };
 
+    // net-edge estimate from measured volatility on this instrument
+    const hist = this.candles.history(trade.symbol, '15m', 60);
+    const price = this.markOf(trade.symbol) ?? trade.price;
+    const a = atr(hist, 14);
+    const atrPct = a !== null && price > 0 ? (a / price) * 100 : 0;
+    const edge = edgeForUniverse('majors', atrPct, 0.5);
+
     // sells that close an open shadow lot bypass the entry gates (exits are risk-managed, not blocked)
     const lotKey = `${trade.botId}:${instrumentId}`;
     const closingLot = trade.side === 'sell' && this.lots.has(lotKey);
@@ -116,14 +128,14 @@ export class LiveNetwork {
 
     const decision = closingLot
       ? { approved: true, sizeUsd: 0, rejectionReason: null, checks: [{ name: 'exit', pass: true, detail: 'closing existing shadow lot — exits always allowed' }] }
-      : evaluateIntent(this.db, intent);
+      : evaluateIntent(this.db, intent, edge);
 
     this.db
       .prepare(`UPDATE live_orders SET state = ?, approved_notional_micro = ?, risk_json = ?, reject_reason = ?, updated_at = ? WHERE id = ?`)
       .run(
         decision.approved ? 'risk_approved' : 'risk_rejected',
         toMicro(decision.sizeUsd),
-        JSON.stringify({ checks: decision.checks, confidence: conf }),
+        JSON.stringify({ checks: decision.checks, confidence: conf, edge }),
         decision.rejectionReason,
         Date.now(),
         orderId,
@@ -134,15 +146,21 @@ export class LiveNetwork {
       return;
     }
 
-    // execute through the adapter (shadow: theoretical fill, nothing submitted)
-    const adapter = this.adapters.get(inst.venue) ?? this.adapters.get('shadow')!;
+    // route through the ExecutionRouter (shadow: theoretical fill, nothing submitted)
     const expected = this.markOf(trade.symbol) ?? trade.price;
     this.db.prepare(`UPDATE live_orders SET state = 'submitting', expected_price = ?, updated_at = ? WHERE id = ?`)
       .run(expected, Date.now(), orderId);
 
     const lot = this.lots.get(lotKey);
     const notional = closingLot && lot ? lot.qty * expected : decision.sizeUsd;
-    const result = await adapter.placeOrder(inst, trade.side, notional);
+    const routeReq = {
+      instrumentId,
+      side: trade.side,
+      notionalUsd: notional,
+      maxSlippageBps: 35,
+    };
+    const routed = this.router.route(routeReq);
+    const result = await this.router.execute(routed, routeReq, expected);
 
     if (!result.accepted || result.executedPrice === undefined) {
       this.db.prepare(`UPDATE live_orders SET state = 'failed', reject_reason = ?, updated_at = ? WHERE id = ?`)
@@ -152,7 +170,7 @@ export class LiveNetwork {
     }
 
     const qty = notional / result.executedPrice;
-    const slippageBps = expected > 0 ? ((result.executedPrice - expected) / expected) * 10_000 * (trade.side === 'buy' ? 1 : -1) : 0;
+    const slippageBps = result.slippageBps;
 
     // realized pnl on closes, avg-cost
     let realizedMicro = 0;
@@ -180,7 +198,7 @@ export class LiveNetwork {
           `INSERT INTO live_ledger (order_id, bot_id, instrument_id, venue, side, qty, expected_price, executed_price, fee_micro, gas_micro, slippage_bps, realized_pnl_micro, mode, tx_ref, ts)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
         )
-        .run(orderId, trade.botId, instrumentId, inst.venue, trade.side, qty, expected, result.executedPrice,
+        .run(orderId, trade.botId, instrumentId, routed.venue, trade.side, qty, expected, result.executedPrice,
           toMicro(result.feeUsd ?? 0), slippageBps, realizedMicro, cfg.mode, result.txRef ?? null, ts);
     })();
 

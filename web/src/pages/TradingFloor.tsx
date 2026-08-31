@@ -7,6 +7,7 @@ import { Panel } from '../components/Panel';
 import { Sparkline } from '../components/Sparkline';
 import { MemesPanel } from '../components/MemesPanel';
 import { MarketChart } from '../components/MarketChart';
+import { GlobalProcess } from '../components/GlobalProcess';
 import { useRef } from 'react';
 import { arrow, fmtUsd, fmtPct, fmtPx, fmtTime, pillClass, pnlClass, shortAddr } from '../lib/format';
 import { asciiSpark, machineAvatar, machineId, CLASS_LABELS, HOUSE_TAGLINES } from '../lib/ascii';
@@ -93,6 +94,8 @@ export function TradingFloor() {
           </div>
         </div>
       </div>
+
+      <GlobalProcess />
 
       <MarketChart />
 

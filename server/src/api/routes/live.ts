@@ -84,6 +84,80 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     };
   });
 
+  // GLOBAL PROCESS: the funnel, every number measured
+  server.get('/api/live/process', async () => {
+    const dayStart = Math.floor(Date.now() / 86_400_000) * 86_400_000;
+    const hourAgo = Date.now() - 3_600_000;
+
+    const lastPass = app.db.prepare(`SELECT * FROM scan_passes ORDER BY id DESC LIMIT 1`).get() as any;
+    const window = app.db
+      .prepare(
+        `SELECT COALESCE(SUM(markets_observed),0) obs, COALESCE(SUM(candidates),0) c,
+                COALESCE(SUM(signals),0) s, COALESCE(SUM(high_confidence),0) h,
+                COUNT(*) passes, COALESCE(AVG(duration_ms),0) avg_ms,
+                COALESCE(MAX(markets_observed),0) universe
+         FROM scan_passes WHERE ts >= ?`,
+      )
+      .get(hourAgo) as any;
+    const rejected = app.db
+      .prepare(`SELECT COUNT(*) n FROM opportunities WHERE state = 'rejected' AND ts >= ?`)
+      .get(hourAgo) as { n: number };
+    const orders = app.db
+      .prepare(
+        `SELECT
+           SUM(CASE WHEN state IN ('risk_approved','submitting','open','partial','filled') THEN 1 ELSE 0 END) approved,
+           SUM(CASE WHEN state IN ('submitting','open','partial','filled') THEN 1 ELSE 0 END) routed,
+           SUM(CASE WHEN state = 'filled' THEN 1 ELSE 0 END) executed
+         FROM live_orders WHERE created_at >= ?`,
+      )
+      .get(dayStart) as any;
+
+    return {
+      live: app.opportunities?.counts() ?? null,
+      lastPass: lastPass
+        ? { ts: lastPass.ts, durationMs: lastPass.duration_ms, marketsObserved: lastPass.markets_observed, scansPerformed: lastPass.scans_performed }
+        : null,
+      universeSize: window.universe,
+      funnel: {
+        marketsObserved: window.obs,
+        candidates: window.c,
+        signals: window.s,
+        highConfidence: window.h,
+        riskApproved: orders.approved ?? 0,
+        routed: orders.routed ?? 0,
+        executed: orders.executed ?? 0,
+        rejectedOnEdge: rejected.n,
+      },
+      passesLastHour: window.passes,
+      avgPassMs: Math.round(window.avg_ms),
+      note: 'scanner opportunities are advisory — only a machine committing capital reaches execution',
+    };
+  });
+
+  // recent opportunities with their full edge math
+  server.get('/api/live/opportunities', async (request) => {
+    const q = z.object({
+      limit: z.coerce.number().min(1).max(80).default(30),
+      state: z.enum(['all', 'high_confidence', 'rejected']).default('all'),
+    }).parse(request.query);
+    const where = q.state === 'all' ? '' : `WHERE state = '${q.state}'`;
+    const rows = app.db
+      .prepare(`SELECT * FROM opportunities ${where} ORDER BY id DESC LIMIT ?`)
+      .all(q.limit) as any[];
+    return {
+      opportunities: rows.map((o) => ({
+        id: o.id, ts: o.ts, scanner: o.scanner, universe: o.universe,
+        symbol: o.symbol, direction: o.direction, confidence: o.confidence,
+        edge: {
+          grossEdgeBps: o.gross_edge_bps, feeBps: o.fee_bps, slippageBps: o.slippage_bps,
+          bufferBps: o.buffer_bps, netEdgeBps: o.net_edge_bps, edgeModel: o.edge_model,
+        },
+        evidence: JSON.parse(o.evidence_json),
+        state: o.state, rejectReason: o.reject_reason, advisory: o.advisory === 1,
+      })),
+    };
+  });
+
   server.get('/api/live/orders', async (request) => {
     const q = z.object({ limit: z.coerce.number().min(1).max(100).default(40) }).parse(request.query);
     const orders = (app.db

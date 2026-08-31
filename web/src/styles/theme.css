@@ -571,6 +571,29 @@ tr.race-moved-down td { animation: flash-neg 0.7s steps(3); }
 .boot-log { font-family: var(--font); font-size: 13px; color: var(--text-soft); min-height: 120px; }
 .boot-log .ok { color: var(--signal); }
 
+/* ── global process funnel ── */
+.funnel-row { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; font-size: 11px; }
+.funnel-label { width: 150px; color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; font-size: 9.5px; }
+.funnel-value { width: 66px; text-align: right; color: var(--text); font-variant-numeric: tabular-nums; font-size: 13px; }
+.funnel-bar { flex: 1; height: 10px; background: var(--bg-raised); max-width: 460px; }
+.funnel-bar > span { display: block; height: 100%; background: var(--phosphor); transition: width 0.4s steps(8); }
+
+/* net-edge rejection block */
+.edge-block {
+  padding: 7px 14px 9px 26px;
+  font-family: var(--font);
+  font-size: 11px;
+  line-height: 1.5;
+  background: var(--tint-hover);
+  border-left: 2px solid var(--border-hot);
+  white-space: pre;
+}
+
+/* capital core */
+.capital-core { display: flex; gap: 26px; flex-wrap: wrap; align-items: center; }
+.capital-core .core-amount { font-family: var(--font-display); font-size: 44px; color: var(--phosphor); line-height: 1; }
+.capital-mission { border-left: 2px solid var(--phosphor); padding-left: 12px; font-size: 11px; letter-spacing: 1px; }
+
 /* ── mobile: handheld diagnostic device ── */
 .nav-toggle { display: none; }
 .nav-backdrop { display: none; }
