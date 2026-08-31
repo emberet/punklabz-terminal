@@ -194,3 +194,56 @@ describe('buildSigner', () => {
     process.env.SIGNER_PROVIDER = previous;
   });
 });
+
+describe('the transaction Privy is asked to sign is COMPLETE', () => {
+  /** capture the body without a network call */
+  function capturing(over: Partial<PrivyConfig> = {}) {
+    const signer = new PrivySigner(cfg(over));
+    const sent: any[] = [];
+    (signer as any).isReady = async () => ({ ready: true, address: WALLET, detail: 'stubbed' });
+    (signer as any).call = async (_m: string, _p: string, body: any) => {
+      sent.push(body);
+      return { data: { signed_transaction: '0x02f8aa' } };
+    };
+    return { signer, sent };
+  }
+
+  it('carries nonce and BOTH fee fields', async () => {
+    const { signer, sent } = capturing();
+    await signer.signTransaction({
+      chainId: 4663, to: ZEROX, data: '0xdeadbeef', value: 0n, gas: 250000n,
+      nonce: 7, maxFeePerGas: 2_000_000_000n, maxPriorityFeePerGas: 1_000_000n,
+      intentId: 'i1',
+    });
+    const tx = sent[0].params.transaction;
+    // Privy defaults anything omitted to ZERO, and a transaction offering zero
+    // gas price is valid, signable, and never mined — an order stuck pending
+    // forever while the ledger believes it was submitted.
+    expect(tx.nonce).toBe(7);
+    expect(tx.max_fee_per_gas).toBe('0x77359400');
+    expect(tx.max_priority_fee_per_gas).toBe('0xf4240');
+    expect(tx.chain_id).toBe(4663);
+    expect(tx.gas_limit).toBe('0x3d090');
+  });
+
+  it('does NOT send caip2 — eth_signTransaction rejects it outright', async () => {
+    const { signer, sent } = capturing();
+    await signer.signTransaction({
+      chainId: 4663, to: ZEROX, data: '0xdeadbeef', value: 0n, nonce: 0,
+      maxFeePerGas: 1n, maxPriorityFeePerGas: 1n, intentId: 'i2',
+    });
+    expect(sent[0]).not.toHaveProperty('caip2');
+    expect(sent[0].method).toBe('eth_signTransaction');
+  });
+
+  it('omits fee fields entirely when the caller supplies none, rather than sending zeros', async () => {
+    const { signer, sent } = capturing();
+    await signer.signTransaction({
+      chainId: 4663, to: ZEROX, data: '0xdeadbeef', value: 0n, intentId: 'i3',
+    });
+    const tx = sent[0].params.transaction;
+    // an absent field is a caller bug we can find; an explicit zero is one we cannot
+    expect(tx).not.toHaveProperty('max_fee_per_gas');
+    expect(tx).not.toHaveProperty('nonce');
+  });
+});

@@ -329,6 +329,10 @@ export class PrivySigner implements TradingSigner {
           data: req.data,
           chain_id: req.chainId,
           ...(req.gas !== undefined ? { gas_limit: `0x${req.gas.toString(16)}` } : {}),
+          ...(req.nonce !== undefined ? { nonce: req.nonce } : {}),
+          ...(req.maxFeePerGas !== undefined ? { max_fee_per_gas: `0x${req.maxFeePerGas.toString(16)}` } : {}),
+          ...(req.maxPriorityFeePerGas !== undefined
+            ? { max_priority_fee_per_gas: `0x${req.maxPriorityFeePerGas.toString(16)}` } : {}),
         },
       },
     };

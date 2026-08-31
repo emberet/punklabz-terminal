@@ -20,6 +20,17 @@ export interface SignRequest {
   data: string;
   value: bigint;
   gas?: bigint;
+  /**
+   * Nonce and fees are supplied BY THE CALLER, not left to the signing service.
+   *
+   * Privy fills anything omitted with zero. A transaction offering zero gas
+   * price is perfectly valid and never mined, so the failure is not an error
+   * anywhere — it is an order that sits pending forever while the ledger
+   * believes it was submitted. The caller knows the chain; it supplies these.
+   */
+  nonce?: number;
+  maxFeePerGas?: bigint;
+  maxPriorityFeePerGas?: bigint;
   /** the order intent this signature belongs to — signers should refuse duplicates */
   intentId: string;
 }

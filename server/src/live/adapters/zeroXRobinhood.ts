@@ -1,4 +1,4 @@
-import { createPublicClient, formatUnits, getAddress, http, parseUnits, type Address, type Hex } from 'viem';
+import { createPublicClient, encodeFunctionData, formatUnits, getAddress, http, parseUnits, type Address, type Hex } from 'viem';
 import { ROBINHOOD_MAINNET_CHAIN_ID, type Instrument, type VenueHealth } from '@punklabz/shared';
 import type {
   AdapterBalance, AdapterOrderResult, AdapterOrderStatus, AdapterPosition,
@@ -37,6 +37,7 @@ const APPROVED_TARGETS = new Set([ZEROX_ALLOWANCE_HOLDER.toLowerCase()]);
 const ERC20_ABI = [
   { name: 'balanceOf', type: 'function', stateMutability: 'view', inputs: [{ type: 'address' }], outputs: [{ type: 'uint256' }] },
   { name: 'allowance', type: 'function', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'address' }], outputs: [{ type: 'uint256' }] },
+  { name: 'approve', type: 'function', stateMutability: 'nonpayable', inputs: [{ name: 'spender', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: [{ type: 'bool' }] },
 ] as const;
 
 export interface ZeroXQuote {
@@ -316,34 +317,87 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
       return { accepted: false, error: `QUOTE_REJECTED: ${verdict.failures.join('; ')}` };
     }
 
-    // ── sign, then broadcast ourselves so the receipt is ours to track ──
-    let raw: string;
+    // ── the allowance, without which the swap simply reverts ──
+    //
+    // 0x pulls the sell token through its AllowanceHolder. With no approval in
+    // place the swap reverts and the gas is spent for nothing, so this is a
+    // precondition rather than an afterthought.
+    //
+    // BOUNDED, deliberately: approve exactly what this trade needs, not the
+    // unlimited approval that is conventional and leaves a standing claim on
+    // the wallet for as long as the contract exists. The extra transaction
+    // costs a fraction of a cent on an L2; an unlimited allowance costs
+    // whatever the balance is on the day something goes wrong.
+    const spender = getAddress(ZEROX_ALLOWANCE_HOLDER) as Address;
     try {
-      raw = await this.opts.signer.signTransaction({
-        chainId: this.chainId,
-        to: quote.to,
-        data: quote.data,
-        value: 0n,
-        gas: quote.gas ? BigInt(quote.gas) : undefined,
-        intentId: opts.intentId,
-      });
+      const current = (await this.client.readContract({
+        address: getAddress(sellTok.address) as Address, abi: ERC20_ABI,
+        functionName: 'allowance', args: [getAddress(signerAddress) as Address, spender],
+      })) as bigint;
+
+      if (current < sellAmount) {
+        const approveData = encodeFunctionData({
+          abi: ERC20_ABI, functionName: 'approve', args: [spender, sellAmount],
+        });
+        const approveHash = await this.signAndSend(
+          getAddress(sellTok.address), approveData, 120_000n, `${opts.intentId}_approve`, signerAddress,
+        );
+        // Wait. Broadcasting the swap against an unconfirmed approval is a race
+        // that costs the gas when it goes the wrong way.
+        const receipt = await this.client.waitForTransactionReceipt({ hash: approveHash as Hex, timeout: 90_000 });
+        if (receipt.status !== 'success') {
+          return { accepted: false, error: `APPROVAL_FAILED: reverted in block ${receipt.blockNumber}` };
+        }
+      }
     } catch (e) {
-      return { accepted: false, error: `SIGNER_REFUSED: ${String(e instanceof Error ? e.message : e).slice(0, 200)}` };
+      return { accepted: false, error: `APPROVAL_FAILED: ${String(e instanceof Error ? e.message : e).slice(0, 180)}` };
     }
 
+    // ── sign, then broadcast ourselves so the receipt is ours to track ──
     try {
-      const hash = await this.client.sendRawTransaction({ serializedTransaction: raw as Hex });
+      const hash = await this.signAndSend(
+        quote.to, quote.data, quote.gas ? BigInt(quote.gas) : 400_000n, opts.intentId, signerAddress,
+      );
       // PENDING, not filled. A hash means the network accepted the bytes, not
       // that the swap happened at a price anyone would like.
-      return {
-        accepted: true,
-        pending: true,
-        txRef: hash,
-        venueOrderId: hash,
-      };
+      return { accepted: true, pending: true, txRef: hash, venueOrderId: hash };
     } catch (e) {
-      return { accepted: false, error: `BROADCAST_FAILED: ${String(e instanceof Error ? e.message : e).slice(0, 200)}` };
+      return { accepted: false, error: `SUBMIT_FAILED: ${String(e instanceof Error ? e.message : e).slice(0, 200)}` };
     }
+  }
+
+  /**
+   * Build a COMPLETE transaction, sign it, broadcast it.
+   *
+   * Nonce and fees are read from the chain here rather than left to the signing
+   * service to fill in. Privy defaults anything omitted to zero, and a
+   * transaction offering zero gas price is valid, signable, and never mined —
+   * so the failure is not an error anywhere: the order sits pending forever
+   * while our ledger believes it was submitted. Verified by decoding a
+   * signature Privy actually returned.
+   */
+  private async signAndSend(
+    to: string,
+    data: string,
+    gas: bigint,
+    intentId: string,
+    signerAddress: string,
+  ): Promise<string> {
+    const [nonce, fees] = await Promise.all([
+      // 'pending' so an approval and its swap do not collide on the same nonce
+      this.client.getTransactionCount({ address: getAddress(signerAddress) as Address, blockTag: 'pending' }),
+      this.client.estimateFeesPerGas(),
+    ]);
+    const maxPriorityFeePerGas = fees.maxPriorityFeePerGas ?? 1_000_000n;
+    const maxFeePerGas = fees.maxFeePerGas ?? maxPriorityFeePerGas * 2n;
+
+    const raw = await this.opts.signer.signTransaction({
+      chainId: this.chainId,
+      to, data, value: 0n, gas,
+      nonce, maxFeePerGas, maxPriorityFeePerGas,
+      intentId,
+    });
+    return this.client.sendRawTransaction({ serializedTransaction: raw as Hex });
   }
 
   /** Resolve a broadcast transaction from its receipt. The chain decides. */
