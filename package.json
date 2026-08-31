@@ -14,5 +14,8 @@
     "build": "npm run build --workspace=shared && npm run build --workspace=server && npm run build --workspace=web",
     "test": "npm run test --workspace=server",
     "start": "node server/dist/index.js"
+  },
+  "overrides": {
+    "axios": "^1.20.0"
   }
 }

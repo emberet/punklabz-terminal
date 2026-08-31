@@ -247,6 +247,17 @@ export async function runPreflight(
   add('usdg_reference', pegPass, pegDetail);
 
   const account = accountForMode(db, targetMode, ROBINHOOD_VENUE);
+  const fundingProof = db.prepare(
+    `SELECT COUNT(*) total,
+            SUM(CASE WHEN tx_ref IS NULL OR log_index IS NULL THEN 1 ELSE 0 END) unproven
+     FROM execution_account_funding WHERE execution_account_id=?`,
+  ).get(account.id) as { total: number; unproven: number | null };
+  add('funding_provenance', fundingProof.total > 0 && (fundingProof.unproven ?? 0) === 0,
+    fundingProof.total === 0
+      ? 'no decoded funding transactions recorded for the trader account'
+      : (fundingProof.unproven ?? 0) === 0
+        ? `${fundingProof.total} decoded funding transfer(s) have transaction and log/trace references`
+        : `${fundingProof.unproven} funding transfer(s) lack transaction or log/trace references`);
   const lastRecon = db.prepare(
     `SELECT status, completed_at FROM reconciliation_runs
      WHERE execution_account_id=? ORDER BY id DESC LIMIT 1`,

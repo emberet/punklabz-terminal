@@ -42,6 +42,7 @@ ZEROX_API_KEY=<0x key>
 RPC_ROBINHOOD_PRIMARY=<chain 4663 private RPC>
 RPC_ROBINHOOD_SECONDARY=<independent chain 4663 RPC>
 OPERATOR_ALERT_WEBHOOK_URL=<private incident webhook>
+ROBINHOOD_TRACE_API_URL=https://robinscan.io/api
 EOF
 chown punklabz:punklabz /opt/punklabz/.env && chmod 600 /opt/punklabz/.env
 ```

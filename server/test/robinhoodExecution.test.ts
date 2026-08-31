@@ -521,4 +521,24 @@ describe('external funding vs reconciliation', () => {
     expect(() => recordFunding(db, accountId, [entry], 'operator:test')).toThrow(/UNIQUE/);
     expect((db.prepare(`SELECT COUNT(*) n FROM execution_asset_ledger WHERE event_type='funding'`).get() as any).n).toBe(1);
   });
+
+  it('does not let hashless legacy attestations collateralize a canary', async () => {
+    db.prepare(
+      `INSERT INTO execution_account_funding
+        (execution_account_id, asset, qty, tx_ref, actor, note, audit_hash, ts, log_index)
+       VALUES (?, 'USDG', 5, NULL, 'legacy', 'unproven', 'hash', 1, NULL)`,
+    ).run(accountId);
+    const signer = {
+      kind: 'test',
+      async isReady() { return { ready: false, detail: 'test' }; },
+      async getAddress() { return null; },
+    } as any;
+    const result = await runPreflight({
+      db, signer, adapters: new Map(), feedStatus: {}, ethUsd: null,
+    }, 'canary', 'test', { persist: false, targetStage: 1 });
+    expect(result.checks.find((check) => check.name === 'funding_provenance')).toMatchObject({
+      pass: false,
+      blocking: true,
+    });
+  });
 });

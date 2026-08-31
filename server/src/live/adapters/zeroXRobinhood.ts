@@ -241,6 +241,46 @@ export interface ZeroXAdapterOptions {
   probeImpl?: typeof probeEndpoints;
 }
 
+interface IndexedInternalTransfer {
+  index?: unknown;
+  txHash?: unknown;
+  blockNumber?: unknown;
+  to?: unknown;
+  value?: unknown;
+  success?: unknown;
+}
+
+export function parseIndexedEthFunding(
+  body: unknown,
+  txHash: string,
+  walletAddress: string,
+): Array<FundingTransfer & { blockNumber: bigint; valueWei: bigint }> {
+  const items = (body as { items?: unknown })?.items;
+  if (!Array.isArray(items)) throw new Error('trace indexer returned an invalid response');
+  const expectedHash = txHash.toLowerCase();
+  const wallet = walletAddress.toLowerCase();
+  const transfers: Array<FundingTransfer & { blockNumber: bigint; valueWei: bigint }> = [];
+  for (const raw of items as IndexedInternalTransfer[]) {
+    if (raw.success !== true || String(raw.txHash).toLowerCase() !== expectedHash) continue;
+    if (String(raw.to).toLowerCase() !== wallet) continue;
+    const index = Number(raw.index);
+    const blockNumber = BigInt(String(raw.blockNumber));
+    const valueWei = BigInt(String(raw.value));
+    if (!Number.isInteger(index) || index < 0 || blockNumber < 1n || valueWei <= 0n) {
+      throw new Error('trace indexer returned a malformed ETH transfer');
+    }
+    transfers.push({
+      asset: 'ETH',
+      qty: Number(formatUnits(valueWei, 18)),
+      txRef: txHash,
+      logIndex: index,
+      blockNumber,
+      valueWei,
+    });
+  }
+  return transfers;
+}
+
 export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
   readonly venue = 'evm:robinhood';
   private readonly chainId: number;
@@ -839,6 +879,39 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
         txRef: txHash,
         logIndex: Number(log.logIndex ?? transfers.length),
       });
+    }
+
+    // Privy funding can be delivered by a guarded contract call rather than a
+    // top-level native transfer. In that case the receipt proves the parent
+    // transaction succeeded but contains no native-transfer log. Require an
+    // indexed call trace, then independently prove its value against the
+    // wallet's archive balance delta at the exact block.
+    if (!transfers.some((transfer) => transfer.asset === 'ETH')) {
+      const traceApi = process.env.ROBINHOOD_TRACE_API_URL?.replace(/\/$/, '');
+      if (traceApi) {
+        const response = await this.fetch(
+          `${traceApi}/internal-txs?page=1&pageSize=50&transactionHash=${encodeURIComponent(txHash)}`,
+          { signal: AbortSignal.timeout(10_000), headers: { accept: 'application/json' } },
+        );
+        if (!response.ok) throw new Error(`trace indexer rejected funding proof (${response.status})`);
+        const indexed = parseIndexedEthFunding(await response.json(), txHash, walletAddress);
+        if (indexed.length > 0) {
+          const blockNumber = indexed[0]!.blockNumber;
+          if (indexed.some((entry) => entry.blockNumber !== blockNumber) || tx.blockNumber !== blockNumber) {
+            throw new Error('trace indexer block does not match the funding transaction');
+          }
+          const address = getAddress(walletAddress) as Address;
+          const [before, after] = await Promise.all([
+            this.client.getBalance({ address, blockNumber: blockNumber - 1n }),
+            this.client.getBalance({ address, blockNumber }),
+          ]);
+          const indexedWei = indexed.reduce((sum, entry) => sum + entry.valueWei, 0n);
+          if (after - before < indexedWei) {
+            throw new Error('archive balance delta does not prove the indexed ETH funding amount');
+          }
+          transfers.push(...indexed.map(({ blockNumber: _block, valueWei: _wei, ...entry }) => entry));
+        }
+      }
     }
     return transfers;
   }

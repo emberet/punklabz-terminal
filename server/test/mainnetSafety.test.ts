@@ -10,10 +10,33 @@ import { evaluateIntent, getLiveConfig } from '../src/live/riskEngine.js';
 import { runPreflight } from '../src/live/preflight.js';
 import { buildPolicy, USDG_ADDRESS, WETH_ADDRESS, ZEROX_ALLOWANCE_HOLDER } from '../src/live/signing/provisionPrivy.js';
 import { LiveNetwork } from '../src/live/liveNetwork.js';
-import { ZeroXRobinhoodAdapter } from '../src/live/adapters/zeroXRobinhood.js';
+import { parseIndexedEthFunding, ZeroXRobinhoodAdapter } from '../src/live/adapters/zeroXRobinhood.js';
 
 const WALLET = '0x1111111111111111111111111111111111111111';
 const TARGET = '0x2222222222222222222222222222222222222222';
+
+describe('historical native funding proofs', () => {
+  it('accepts only a successful trace into the exact wallet and transaction', () => {
+    const hash = `0x${'12'.repeat(32)}`;
+    const transfers = parseIndexedEthFunding({ items: [
+      { index: 3, txHash: hash, blockNumber: 123, to: WALLET, value: '2024330000000000', success: true },
+      { index: 4, txHash: hash, blockNumber: 123, to: TARGET, value: '999', success: true },
+      { index: 5, txHash: hash, blockNumber: 123, to: WALLET, value: '999', success: false },
+    ] }, hash, WALLET);
+    expect(transfers).toHaveLength(1);
+    expect(transfers[0]).toMatchObject({
+      asset: 'ETH', qty: 0.00202433, txRef: hash, logIndex: 3, blockNumber: 123n,
+      valueWei: 2024330000000000n,
+    });
+  });
+
+  it('rejects malformed trace evidence', () => {
+    const hash = `0x${'34'.repeat(32)}`;
+    expect(() => parseIndexedEthFunding({ items: [
+      { index: -1, txHash: hash, blockNumber: 123, to: WALLET, value: '1', success: true },
+    ] }, hash, WALLET)).toThrow(/malformed ETH transfer/);
+  });
+});
 
 function insertOrder(db: DB, accountId: number, intent = 'safety-order'): number {
   const info = db.prepare(
