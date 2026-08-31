@@ -12,6 +12,8 @@
 // its own auth, its own audit trail, and a spending policy that is enforced on
 // the signer side as well as here — so a bug in PunkLabz cannot drain a wallet.
 
+import { PrivySigner, privyConfigFromEnv } from './privySigner.js';
+
 export interface SignRequest {
   chainId: number;
   to: string;
@@ -62,12 +64,15 @@ export class NoSigner implements TradingSigner {
   }
 }
 
-/** Resolve the signer from config. Only 'none' is implemented here. */
+/** Resolve the signer from config. */
 export function buildSigner(): TradingSigner {
   const provider = process.env.SIGNER_PROVIDER ?? 'none';
   if (provider === 'none') return new NoSigner();
-  // A remote signer implementation belongs here, written and reviewed by the
-  // operator who owns the key material and the spending policy.
+  if (provider === 'privy') {
+    // Constructed lazily so a missing credential surfaces through isReady()
+    // as a readable preflight blocker rather than crashing the boot.
+    return new PrivySigner(privyConfigFromEnv());
+  }
   throw new Error(
     `SIGNER_PROVIDER=${provider} is not implemented in this build. ` +
       'Implement TradingSigner against your signing service before enabling live execution.',
