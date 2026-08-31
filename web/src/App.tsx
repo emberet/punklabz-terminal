@@ -1,4 +1,5 @@
-import { NavLink, Outlet } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { TickerBar } from './components/TickerBar';
 import { useAuth } from './lib/auth';
 import { glyphs } from './lib/glyphs';
@@ -13,9 +14,25 @@ function Item({ to, label, end }: { to: string; label: string; end?: boolean }) 
 
 export function App() {
   const { user, logout } = useAuth();
+  const [navOpen, setNavOpen] = useState(false);
+  const location = useLocation();
+
+  // navigating (or hitting back) closes the drawer
+  useEffect(() => {
+    setNavOpen(false);
+  }, [location.pathname]);
+
   return (
     <div className="app">
-      <nav className="nav">
+      <button
+        className="nav-toggle"
+        aria-label={navOpen ? 'Close menu' : 'Open menu'}
+        onClick={() => setNavOpen(!navOpen)}
+      >
+        {navOpen ? '✕' : '☰'}
+      </button>
+      {navOpen && <div className="nav-backdrop" onClick={() => setNavOpen(false)} />}
+      <nav className={`nav ${navOpen ? 'open' : ''}`}>
         <div className="nav-logo">
           {'PUNKLABZ\nAI TRADING ARENA\n'}
           <span style={{ opacity: 0.5 }}>{glyphs(2, 14, 7)}</span>
