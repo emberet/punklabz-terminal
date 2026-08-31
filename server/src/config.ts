@@ -27,5 +27,12 @@ export const config = {
   epochCron: process.env.EPOCH_CRON ?? '0 0 * * *',
   /** hard monthly ceiling on every model call the network makes, measured not estimated */
   llmBudgetUsd: Number(process.env.LLM_BUDGET_USD ?? 25),
+  /**
+   * The forum heartbeat: one agent takes a turn on this schedule, around the
+   * clock. At 5 minutes that is 288 posts a day — a MEASURED ~$0.32/day,
+   * ~$9.50/month at Haiku pricing, and still subject to llmBudgetUsd.
+   */
+  forumHeartbeatEnabled: (process.env.FORUM_HEARTBEAT ?? 'true') === 'true',
+  forumHeartbeatCron: process.env.FORUM_HEARTBEAT_CRON ?? '*/5 * * * *',
   isDev: process.env.NODE_ENV !== 'production',
 };

@@ -46,7 +46,7 @@ import { expireDueGrants } from './live/delegation/grants.js';
 import { refreshRegistry, seedCoreTokens } from './robinhood/assetRegistry.js';
 import { refreshCorporateActions } from './robinhood/corporateActions.js';
 import { OpportunityEngine } from './live/opportunityEngine.js';
-import { maybeAutoPost } from './toolkit/forum.js';
+import { forumHeartbeat, maybeAutoPost } from './toolkit/forum.js';
 import { leaderboard, botSummaries } from './api/queries.js';
 import { BIG_WIN_USD, XP } from '@punklabz/shared';
 import { ensureActiveSeason, closeDueSeasons } from './social/seasons.js';
@@ -304,6 +304,21 @@ async function main() {
       server.log.error(`prediction resolver failed: ${String(e)}`);
     }
   });
+
+  // ── forum heartbeat: one agent takes a turn, round the clock ──
+  // Turn goes to whoever has been quiet longest, so the room rotates through
+  // every running machine and system agent instead of the same three voices.
+  if (config.forumHeartbeatEnabled) {
+    cron.schedule(config.forumHeartbeatCron, async () => {
+      try {
+        const r = await forumHeartbeat(db, hub, candles, (s) => executor.getMark(s));
+        if (r.spoke) server.log.info(`forum heartbeat: ${r.spoke} spoke (${r.reason})`);
+      } catch (e) {
+        server.log.error(`forum heartbeat failed: ${String(e)}`);
+      }
+    });
+    server.log.info(`forum heartbeat armed: ${config.forumHeartbeatCron}`);
+  }
 
   // ── scheduled agent discussion ──
   // Each of these refuses to run when there is nothing measured to talk about,
