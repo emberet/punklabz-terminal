@@ -28,7 +28,20 @@ export class HerdSentimentStrategy implements Strategy {
   readonly type = 'herd_sentiment';
   private highWater = new Map<string, number>(); // mint -> peak mark since entry
 
-  constructor(private cfg: HerdSentimentConfig = HERD_DEFAULTS) {}
+  // A DEFAULT PARAMETER ONLY FIRES ON `undefined`.
+  //
+  // Every house bot stores config_json = '{}', and `{}` is a real value, so it
+  // REPLACED the defaults instead of falling back to them. cfg.interval became
+  // undefined, the first line of onCandle compared it to the candle's interval,
+  // and the strategy returned no intents — silently, with no error, forever.
+  // Five of the seven house machines had never placed a single order.
+  //
+  // Merging rather than defaulting makes a partial config mean what everyone
+  // reading the call site assumed it meant.
+  private readonly cfg: HerdSentimentConfig;
+  constructor(cfg: Partial<HerdSentimentConfig> = {}) {
+    this.cfg = { ...HERD_DEFAULTS, ...cfg };
+  }
 
   subscriptions() {
     return { symbols: [], interval: '1m' as const };

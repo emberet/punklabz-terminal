@@ -31,7 +31,20 @@ export const MEAN_REVERSION_DEFAULTS: MeanReversionConfig = {
 /** Mean Reversion: buys RSI<30 + below lower Bollinger, exits at RSI>50 or stop. */
 export class MeanReversionStrategy implements Strategy {
   readonly type = 'mean_reversion';
-  constructor(private cfg: MeanReversionConfig = MEAN_REVERSION_DEFAULTS) {}
+  // A DEFAULT PARAMETER ONLY FIRES ON `undefined`.
+  //
+  // Every house bot stores config_json = '{}', and `{}` is a real value, so it
+  // REPLACED the defaults instead of falling back to them. cfg.interval became
+  // undefined, the first line of onCandle compared it to the candle's interval,
+  // and the strategy returned no intents — silently, with no error, forever.
+  // Five of the seven house machines had never placed a single order.
+  //
+  // Merging rather than defaulting makes a partial config mean what everyone
+  // reading the call site assumed it meant.
+  private readonly cfg: MeanReversionConfig;
+  constructor(cfg: Partial<MeanReversionConfig> = {}) {
+    this.cfg = { ...MEAN_REVERSION_DEFAULTS, ...cfg };
+  }
 
   subscriptions() {
     return { symbols: this.cfg.symbols, interval: this.cfg.interval };

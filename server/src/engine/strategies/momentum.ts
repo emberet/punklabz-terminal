@@ -27,7 +27,20 @@ export const MOMENTUM_DEFAULTS: MomentumConfig = {
 /** Momentum Runner: EMA crossover + volume confirmation, rides trend, exits on cross-down or stop. */
 export class MomentumStrategy implements Strategy {
   readonly type = 'momentum';
-  constructor(private cfg: MomentumConfig = MOMENTUM_DEFAULTS) {}
+  // A DEFAULT PARAMETER ONLY FIRES ON `undefined`.
+  //
+  // Every house bot stores config_json = '{}', and `{}` is a real value, so it
+  // REPLACED the defaults instead of falling back to them. cfg.interval became
+  // undefined, the first line of onCandle compared it to the candle's interval,
+  // and the strategy returned no intents — silently, with no error, forever.
+  // Five of the seven house machines had never placed a single order.
+  //
+  // Merging rather than defaulting makes a partial config mean what everyone
+  // reading the call site assumed it meant.
+  private readonly cfg: MomentumConfig;
+  constructor(cfg: Partial<MomentumConfig> = {}) {
+    this.cfg = { ...MOMENTUM_DEFAULTS, ...cfg };
+  }
 
   subscriptions() {
     return { symbols: this.cfg.symbols, interval: this.cfg.interval };

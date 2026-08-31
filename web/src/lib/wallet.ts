@@ -72,21 +72,28 @@ export class WalletError extends Error {}
 async function walletConnectProvider(): Promise<Eip1193Provider> {
   if (wcProvider) return wcProvider;
   const { EthereumProvider } = await import('@walletconnect/ethereum-provider');
-  // REQUIRED vs OPTIONAL CHAINS IS THE WHOLE GAME HERE.
+  // THERE ARE NO REQUIRED CHAINS. THIS IS DELIBERATE AND IT IS LOAD-BEARING.
   //
-  // Robinhood Chain is new, and a WalletConnect session fails outright if the
-  // wallet cannot serve a *required* chain. Demanding 4663 would therefore
-  // reject nearly every phone wallet in existence today, before the user got
-  // as far as the QR code.
+  // Requiring mainnet looks harmless — every wallet has it — but it breaks the
+  // session, and the failure is invisible until someone actually scans:
   //
-  // We do not need it. personal_sign is chain-agnostic, and every balance on
-  // this site is read from 4663 by our own server regardless of where the
-  // wallet thinks it is. So we require mainnet — which every wallet has — and
-  // merely offer 4663.
+  //   "Missing or invalid. request() chainId: eip155:1"
+  //
+  // The provider does `setChainIds(rpc.chains.length ? rpc.chains : approved)`.
+  // A non-empty required list pins the active chain to chains[0] REGARDLESS of
+  // what the wallet approved. Modern wallets ignore requiredNamespaces — the
+  // spec deprecated them — and approve only the optional set. So the provider
+  // sits on eip155:1 while the session contains everything except eip155:1,
+  // and every request, personal_sign included, is refused.
+  //
+  // With an empty list no requiredNamespaces is sent at all and the active
+  // chain comes from what the wallet actually approved. We can afford that
+  // because personal_sign is chain-agnostic and every balance on this site is
+  // read from 4663 by our own server, wherever the wallet thinks it is.
   const provider = await EthereumProvider.init({
     projectId: WALLETCONNECT_PROJECT_ID,
-    chains: [1],
-    optionalChains: [ROBINHOOD_CHAIN_ID, 8453, 42161],
+    chains: [],
+    optionalChains: [1, ROBINHOOD_CHAIN_ID, 8453, 42161],
     rpcMap: { 1: 'https://eth.llamarpc.com', [ROBINHOOD_CHAIN_ID]: ROBINHOOD_RPC },
     showQrModal: true,
     metadata: {
