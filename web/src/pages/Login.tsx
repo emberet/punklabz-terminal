@@ -5,6 +5,7 @@ import { Panel } from '../components/Panel';
 import { AsciiEntity } from '../components/AsciiEntity';
 import { DecryptText } from '../components/motion/DecryptText';
 import { useAuth } from '../lib/auth';
+import { hasWallet, walletSignIn } from '../lib/wallet';
 
 interface NetStats {
   machinesOnline: number;
@@ -81,17 +82,7 @@ export function Login() {
     setBusy(true);
     setErr('');
     try {
-      const provider = (window as any).solana;
-      if (!provider) throw new Error('no solana wallet found — install Phantom or use email');
-      const { publicKey } = await provider.connect();
-      const address = publicKey.toString();
-      const { message } = await api.get<{ nonce: string; message: string }>(
-        `/api/auth/wallet/nonce?address=${encodeURIComponent(address)}`,
-      );
-      const encoded = new TextEncoder().encode(message);
-      const signed = await provider.signMessage(encoded, 'utf8');
-      const sigBytes: Uint8Array = signed.signature ?? signed;
-      await api.post('/api/auth/wallet/verify', { address, signature: b58encode(sigBytes) });
+      await walletSignIn();
       await done();
     } catch (e: any) {
       setErr(e.message);
@@ -139,10 +130,16 @@ export function Login() {
             </div>
             <div className="login-col">
               <div className="phos">WALLET</div>
-              <p className="dim">Sign a message with your Solana wallet. No password, no email.</p>
-              <button className="primary" onClick={walletLogin} disabled={busy}>
-                [ Connect wallet ]
+              <p className="dim">
+                Sign a message with your EVM wallet. No password, no email. A signature is not a
+                transaction — it costs nothing and moves nothing.
+              </p>
+              <button className="primary" onClick={walletLogin} disabled={busy || !hasWallet()}>
+                {busy ? '[ waiting for signature… ]' : '[ Connect wallet ]'}
               </button>
+              {!hasWallet() && (
+                <p className="dim">No EVM wallet in this browser — use email, and connect a wallet later.</p>
+              )}
             </div>
             <div className="login-col">
               <div className="phos">{mode === 'login' ? 'CREDENTIALS' : 'NEW OPERATOR'}</div>
@@ -177,20 +174,4 @@ export function Login() {
       </div>
     </div>
   );
-}
-
-const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-function b58encode(bytes: Uint8Array): string {
-  let n = 0n;
-  for (const b of bytes) n = (n << 8n) | BigInt(b);
-  let out = '';
-  while (n > 0n) {
-    out = B58[Number(n % 58n)] + out;
-    n /= 58n;
-  }
-  for (const b of bytes) {
-    if (b !== 0) break;
-    out = '1' + out;
-  }
-  return out;
 }

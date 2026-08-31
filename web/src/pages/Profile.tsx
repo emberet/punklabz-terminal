@@ -6,6 +6,8 @@ import { api } from '../lib/api';
 import { Panel } from '../components/Panel';
 import { arrow, fmtUsd, fmtPct, fmtDate, pillClass } from '../lib/format';
 import { useAuth } from '../lib/auth';
+import { WalletPanel } from '../components/WalletPanel';
+import { LinkEmailPanel } from '../components/LinkEmailPanel';
 
 export function Profile() {
   const { id } = useParams();
@@ -47,6 +49,11 @@ export function Profile() {
           </button>
         )}
       </div>
+
+      {/* Your own dossier is where you manage how you get in: connect a wallet
+          to an email account, or add an email to a wallet account. */}
+      {isMe && <WalletPanel />}
+      {isMe && <LinkEmailPanel />}
 
       <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', marginBottom: 14 }}>
         <div className="stat-tile invert">

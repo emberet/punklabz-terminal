@@ -43,6 +43,8 @@ import { runSession } from './research/discussion.js';
 import { runInternCycle } from './intern/intern.js';
 import { buildXAdapter } from './intern/xAdapter.js';
 import { expireDueGrants } from './live/delegation/grants.js';
+import { refreshRegistry, seedCoreTokens } from './robinhood/assetRegistry.js';
+import { refreshCorporateActions } from './robinhood/corporateActions.js';
 import { OpportunityEngine } from './live/opportunityEngine.js';
 import { maybeAutoPost } from './toolkit/forum.js';
 import { leaderboard, botSummaries } from './api/queries.js';
@@ -332,6 +334,27 @@ async function main() {
       server.log.error(`intern cycle failed: ${String(e)}`);
     }
   });
+
+  // ── Robinhood Chain asset registry ──
+  // Ingest the official asset list, then verify a slice of it against the
+  // chain each pass. Verification round-robins by staleness so a full sweep of
+  // ~194 contracts spreads across passes instead of hammering the RPC.
+  seedCoreTokens(db);
+  const refreshRh = async () => {
+    try {
+      const r = await refreshRegistry(db, { verifyLimit: 20 });
+      if (r.error) server.log.warn(`asset registry refresh failed (keeping last snapshot): ${r.error}`);
+      else server.log.info(`asset registry: ${r.seen} seen, ${r.verified} verified, ${r.rejected} rejected`);
+      const ca = await refreshCorporateActions(db);
+      if (ca.newlyBlocking.length) {
+        server.log.warn(`corporate actions pausing: ${ca.newlyBlocking.join(', ')}`);
+      }
+    } catch (e) {
+      server.log.error(`asset registry cron failed: ${String(e)}`);
+    }
+  };
+  void refreshRh();
+  cron.schedule('*/20 * * * *', refreshRh);
 
   // ── expire lapsed delegation grants ──
   cron.schedule('0 * * * *', () => {

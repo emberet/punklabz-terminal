@@ -7,6 +7,8 @@ export interface Me {
   walletAddress: string | null;
   displayName: string;
   isAdmin: boolean;
+  hasEmail?: boolean;
+  hasWallet?: boolean;
 }
 
 interface AuthState {

@@ -14,7 +14,13 @@ export const config = {
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? '',
   feedMode: (process.env.FEED_MODE ?? 'binance') as 'binance' | 'coinbase' | 'replay',
   pumpFeedEnabled: (process.env.PUMP_FEED_ENABLED ?? 'true') === 'true',
-  adminEmails: (process.env.ADMIN_EMAILS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+  /**
+   * THE OPERATOR WALLET. Exactly one address may reach the Control Room, and
+   * admin is derived from a signature proving control of it — never from a
+   * database column, an email address, or anything a request can assert.
+   * Stored lowercase; every comparison is lowercase.
+   */
+  adminWallet: (process.env.ADMIN_WALLET ?? '0xfB047FE60FFac1D1A840a6f8C518C28A5f280d23').toLowerCase(),
   // relative DB paths resolve against the repo root, not the workspace cwd
   dbPath: path.resolve(__dirname, '../../', process.env.DB_PATH ?? './data/punklabz.db'),
   autoApproveCapUsd: Number(process.env.AUTO_APPROVE_CAP_USD ?? 500),

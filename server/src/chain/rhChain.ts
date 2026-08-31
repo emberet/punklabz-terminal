@@ -44,6 +44,13 @@ export function rhChainDef(chainId: number) {
     nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
     rpcUrls: { default: { http: [meta.publicRpcUrl] } },
     blockExplorers: { default: { name: 'Blockscout', url: meta.explorerUrl } },
+    // Multicall3 is deployed at the canonical cross-chain address here —
+    // verified by reading 3,808 bytes of code at it on mainnet. Declaring it
+    // turns a 194-token balance scan into one RPC round trip; without the
+    // declaration viem refuses to batch at all.
+    contracts: {
+      multicall3: { address: '0xcA11bde05977b3631167028862bE2a173976CA11' as const },
+    },
     testnet: meta.isTestnet,
   });
 }
