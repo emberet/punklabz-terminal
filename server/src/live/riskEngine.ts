@@ -1,10 +1,15 @@
 import {
-  CAPITAL_STAGES, DEFAULT_LIMITS,
+  CAPITAL_STAGES, DEFAULT_LIMITS, MIN_TRADE_USD,
   type ExecutionMode, type OrderIntent, type RiskCheck, type RiskDecision, type RiskLimits,
 } from '@punklabz/shared';
 import type { DB } from '../db/db.js';
 import { fromMicro, toMicro } from '../money.js';
 import { appendAudit } from '../audit/auditLog.js';
+// Circular by design: delegationPolicy needs getLiveConfig/promotionEvidence
+// from here, and the gate needs the delegation checks. Safe only because both
+// sides are hoisted `function` declarations used inside call bodies, never at
+// module-evaluation time. Do not convert either to a `const` arrow.
+import { evaluateDelegation, grantHeadroomUsd } from './delegation/delegationPolicy.js';
 
 // The independent gate. Every proposed order — from any agent, any strategy,
 // any mode above simulation — passes through here. It can always say no, and
@@ -162,11 +167,22 @@ export interface EdgeInput {
  * When an edge breakdown is supplied the net-edge rule applies:
  *   expected edge must survive fees + slippage + safety buffer.
  */
+export interface DelegationContext {
+  grantId: number;
+  /**
+   * Whether this order closes a position the machine already holds. The gate
+   * cannot work this out — lots live in LiveNetwork's memory — so the caller
+   * states it rather than the risk engine guessing.
+   */
+  hasOpenLot: boolean;
+}
+
 export function evaluateIntent(
   db: DB,
   intent: OrderIntent,
   edge?: EdgeInput,
   accountId?: number,
+  delegation?: DelegationContext,
 ): RiskDecision {
   const cfg = getLiveConfig(db);
   const stageCap = stageCapUsd(cfg.capitalStage);
@@ -194,12 +210,24 @@ export function evaluateIntent(
 
   const snap = snapshotPortfolio(db, cfg.limits, stageCap, accountId);
   const maxPerTrade = (stageCap * cfg.limits.maxPerTradePct) / 100;
-  const size = Math.min(intent.notionalUsd, maxPerTrade);
+
+  // A delegated order can never exceed the wallet owner's own remaining
+  // headroom, and the clamp lands HERE — before min_size, cash_reserve and
+  // per_machine — so every one of those evaluates the size that would actually
+  // be sent, not a larger one. An exit is not a spend, so it is not clamped:
+  // clamping it to a spent-out cap would trap the owner in the position.
+  // Without a grant this is Math.min(a, b, Infinity), which is exactly
+  // Math.min(a, b) — the non-delegated path is unchanged, bit for bit.
+  const isDelegatedExit = !!delegation && intent.side === 'sell' && delegation.hasOpenLot;
+  const delegatedHeadroom =
+    delegation && !isDelegatedExit ? grantHeadroomUsd(db, delegation.grantId) : Infinity;
+  const size = Math.min(intent.notionalUsd, maxPerTrade, delegatedHeadroom);
 
   if (stageCap <= 0) fail('capital_stage', 'stage 0: $0 deployable — shadow accounting only');
   else pass('capital_stage', `stage ${cfg.capitalStage}: cap $${stageCap}`);
 
-  if (size < 0.5) fail('min_size', 'approved size below $0.50 — not worth fees');
+  if (size < MIN_TRADE_USD)
+    fail('min_size', `size $${size.toFixed(2)} below the $${MIN_TRADE_USD.toFixed(2)} floor — not worth fees`);
   else pass('min_size', `size $${size.toFixed(2)}`);
 
   if (snap.openPositions >= cfg.limits.maxSimultaneousPositions)
@@ -229,6 +257,14 @@ export function evaluateIntent(
     fail('drawdown', `drawdown ${ddPct.toFixed(1)}% ≥ kill threshold ${cfg.limits.maxTotalDrawdownPct}% — HALTING`);
     haltNetwork(db, `automatic circuit breaker: drawdown ${ddPct.toFixed(1)}%`, 'risk-engine');
   } else pass('drawdown', `drawdown ${ddPct.toFixed(1)}%`);
+
+  // The wallet owner's own limits, applied ON TOP of every network limit above.
+  // A delegated order must satisfy both; neither can widen the other.
+  if (delegation) {
+    for (const c of evaluateDelegation(db, delegation.grantId, intent, size, delegation.hasOpenLot)) {
+      checks.push(c);
+    }
+  }
 
   const failed = checks.filter((c) => !c.pass);
   const decision: RiskDecision = {

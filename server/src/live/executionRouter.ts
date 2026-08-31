@@ -1,6 +1,7 @@
 import type { Instrument } from '@punklabz/shared';
 import type { ExecutionAdapter, AdapterOrderResult } from './adapters.js';
 import { findInstrument } from './instruments.js';
+import { revocationCache } from './delegation/revocationCache.js';
 
 // THE ROUTER. Strategies and agents never name a venue, never call 0x, never
 // call a broker. They emit a standardized intent; this service decides where
@@ -15,6 +16,8 @@ export interface RouteRequest {
   /** the mode decides which adapters are even eligible */
   mode: 'simulation' | 'shadow' | 'canary' | 'live';
   intentId?: string;
+  /** present when this order spends a delegated wallet rather than the house book */
+  delegation?: { grantId: number; isExit: boolean };
 }
 
 export interface RouteDecision {
@@ -111,6 +114,22 @@ export class ExecutionRouter {
     if (!decision.routable || !decision.adapter || !decision.instrument) {
       return { accepted: false, error: decision.reason, slippageBps: 0, minReceive: 0 };
     }
+
+    // THE LAST GATE BEFORE SOMEONE ELSE'S MONEY MOVES.
+    //
+    // Risk approval and venue submission are not the same instant. An owner who
+    // revokes in that window has revoked, and this is the only place left to
+    // honour it — synchronous, in-process, no DB round trip, no await. Exits
+    // pass: revocation must never trap someone in a position.
+    if (req.delegation && !req.delegation.isExit && revocationCache.isRevoked(req.delegation.grantId)) {
+      return {
+        accepted: false,
+        error: `DELEGATION_REVOKED: grant ${req.delegation.grantId} is not authorised to spend — order not submitted`,
+        slippageBps: 0,
+        minReceive: 0,
+      };
+    }
+
     const tolerance = req.maxSlippageBps / 10_000;
     const minReceive =
       req.side === 'buy'

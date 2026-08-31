@@ -32,10 +32,17 @@ import { registerMiscRoutes } from './api/routes/misc.js';
 import { registerSocialRoutes } from './api/routes/social.js';
 import { registerNetworkRoutes } from './api/routes/network.js';
 import { registerLiveRoutes } from './api/routes/live.js';
+import { registerDelegationRoutes } from './api/routes/delegation.js';
+import { registerInternRoutes } from './api/routes/intern.js';
 import { LiveNetwork } from './live/liveNetwork.js';
 import { buildAdapters } from './live/adapters.js';
 import { buildSigner } from './live/signing/signer.js';
 import { AutonomousSupervisor } from './live/supervisor.js';
+import { resolvePredictions } from './research/predictions.js';
+import { runSession } from './research/discussion.js';
+import { runInternCycle } from './intern/intern.js';
+import { buildXAdapter } from './intern/xAdapter.js';
+import { expireDueGrants } from './live/delegation/grants.js';
 import { OpportunityEngine } from './live/opportunityEngine.js';
 import { maybeAutoPost } from './toolkit/forum.js';
 import { leaderboard, botSummaries } from './api/queries.js';
@@ -123,6 +130,8 @@ async function main() {
   registerSocialRoutes(server, app);
   registerNetworkRoutes(server, app);
   registerLiveRoutes(server, app);
+  registerDelegationRoutes(server, app);
+  registerInternRoutes(server, app);
   ensureActiveSeason(db, hub);
 
   // live-execution safety spine: shadow pipeline + sentinel (no signer exists;
@@ -273,6 +282,64 @@ async function main() {
       checkStreakBadges(db, hub);
     } catch (e) {
       server.log.error(`streak cron failed: ${String(e)}`);
+    }
+  });
+
+  // ── settle due predictions and re-derive the confidence weights ──
+  // Pure arithmetic on resolved outcomes; no model is consulted. This is the
+  // only thing in the system allowed to change what the network believes about
+  // its own components.
+  cron.schedule('*/15 * * * *', () => {
+    try {
+      const r = resolvePredictions(db, candles, (s) => executor.getMark(s) ?? null);
+      if (r.resolved || r.voided) {
+        server.log.info(
+          `predictions: ${r.resolved} resolved, ${r.voided} voided${r.weightsMoved ? ', weights updated' : ''}`,
+        );
+        if (r.weightsMoved) hub.publish('process', { event: 'confidence_weights_updated' });
+      }
+    } catch (e) {
+      server.log.error(`prediction resolver failed: ${String(e)}`);
+    }
+  });
+
+  // ── scheduled agent discussion ──
+  // Each of these refuses to run when there is nothing measured to talk about,
+  // and every turn passes the persistent rate limit and the monthly budget.
+  const discuss = (kind: 'standup' | 'debate' | 'retro') => async () => {
+    try {
+      const r = await runSession(db, hub, candles, (s) => executor.getMark(s), kind);
+      server.log.info(`${kind}: ${r.ran ? `${r.turns} turn(s)` : `skipped — ${r.reason}`}`);
+    } catch (e) {
+      server.log.error(`${kind} failed: ${String(e)}`);
+    }
+  };
+  cron.schedule('0 */4 * * *', discuss('standup'));
+  cron.schedule('30 13 * * *', discuss('debate'));
+  cron.schedule('0 9 * * 1', discuss('retro'));
+
+  // ── the intern: read, draft, screen, log. Publishes nothing in shadow. ──
+  const xAdapter = buildXAdapter();
+  cron.schedule('0 */2 * * *', async () => {
+    try {
+      const r = await runInternCycle(db, hub, xAdapter);
+      if (r.ran) {
+        server.log.info(
+          `intern: ${r.verdict}${r.blockedRules.length ? ` [${r.blockedRules.join(', ')}]` : ''} — ${r.reason}`,
+        );
+      }
+    } catch (e) {
+      server.log.error(`intern cycle failed: ${String(e)}`);
+    }
+  });
+
+  // ── expire lapsed delegation grants ──
+  cron.schedule('0 * * * *', () => {
+    try {
+      const n = expireDueGrants(db);
+      if (n) server.log.info(`delegation: ${n} grant(s) expired`);
+    } catch (e) {
+      server.log.error(`delegation expiry cron failed: ${String(e)}`);
     }
   });
 

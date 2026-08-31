@@ -45,6 +45,9 @@ export interface RiskLimits {
 /** capital exposed at each rollout stage — promotion is deliberate, never automatic */
 export const CAPITAL_STAGES = [0, 5, 20, 50, 100] as const;
 
+/** below this an order costs more in fees than the edge is worth */
+export const MIN_TRADE_USD = 0.5;
+
 export const DEFAULT_LIMITS: RiskLimits = {
   totalCapitalUsd: 100,
   maxPerTradePct: 5,

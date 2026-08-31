@@ -5,6 +5,10 @@ import type { TradingSigner } from './signing/signer.js';
 import { mappedSymbols, validateMappings } from './instrumentResolver.js';
 import { accountForMode } from './accounts.js';
 import { appendAudit } from '../audit/auditLog.js';
+import { delegationCeiling } from './delegation/delegationPolicy.js';
+import { buildDelegationProvider } from './delegation/provider.js';
+import { revocationCache } from './delegation/revocationCache.js';
+import { getLiveConfig } from './riskEngine.js';
 
 // LIVE PREFLIGHT.
 //
@@ -147,8 +151,68 @@ export async function runPreflight(
       `${canaryFills.n} clean canary fill(s) — 10 required before live`);
   }
 
+  // Delegation status is reported here but never blocks the operator's own
+  // mode change. Blocking would be a deadlock: tier 1 requires a live track
+  // record, and a live track record requires live mode. Delegation has its own
+  // strict gate below, applied where it matters — at grant activation.
+  const ceiling = delegationCeiling(db);
+  add('delegation_ceiling', ceiling.tier > 0,
+    ceiling.tier > 0
+      ? `tier ${ceiling.tier}: $${ceiling.perTradeUsd}/trade, $${ceiling.cumulativeUsd} lifetime`
+      : `tier 0 — user delegation is closed (${ceiling.blockers.join('; ') || 'no evidence yet'})`,
+    false);
+
+  const delegationProvider = await buildDelegationProvider().isReady();
+  add('delegation_provider', delegationProvider.ready, delegationProvider.detail, false);
+
   const passed = checks.filter((c) => c.blocking).every((c) => c.pass);
   return record(db, targetMode, passed, checks, actor);
+}
+
+/**
+ * The gate a GRANT must pass before it is allowed to bind a signer. Unlike the
+ * mode preflight this is strictly blocking: the money at stake is not the
+ * operator's, so an unknown answer is a refusal.
+ */
+export async function runDelegationPreflight(
+  deps: Pick<PreflightDeps, 'db' | 'signer'>,
+  actor = 'system',
+): Promise<PreflightResult> {
+  const { db, signer } = deps;
+  const checks: PreflightCheck[] = [];
+  const add = (name: string, pass: boolean, detail: string, blocking = true) =>
+    checks.push({ name, pass, detail, blocking });
+
+  const provider = await buildDelegationProvider().isReady();
+  add('delegation_provider', provider.ready, provider.detail);
+
+  const ceiling = delegationCeiling(db);
+  add('delegation_ceiling', ceiling.tier > 0,
+    ceiling.tier > 0
+      ? `tier ${ceiling.tier} in force`
+      : `tier 0 — $0 authorised (${ceiling.blockers.join('; ') || 'no evidence yet'})`);
+
+  // a grant cannot outrun the network's own readiness to execute
+  const readiness = await signer.isReady();
+  add('delegation_signer', readiness.ready, readiness.detail);
+
+  const symbols = mappedSymbols();
+  const mappings = validateMappings();
+  add('delegation_instruments', symbols.length > 0 && mappings.ok,
+    symbols.length === 0
+      ? 'no paper→live instrument mappings — a grant could name no tradable pair'
+      : mappings.ok ? `${symbols.length} mapping(s) validated` : mappings.problems.join('; '));
+
+  add('delegation_revocation_cache', revocationCache.isHydrated(),
+    revocationCache.isHydrated()
+      ? `${revocationCache.size()} non-spendable grant(s) cached`
+      : 'revocation cache not hydrated — every grant would fail closed');
+
+  const cfg = getLiveConfig(db);
+  add('network_active', !cfg.halted, cfg.halted ? `network halted: ${cfg.haltReason}` : 'network active');
+
+  const passed = checks.filter((c) => c.blocking).every((c) => c.pass);
+  return record(db, cfg.mode, passed, checks, actor);
 }
 
 function record(

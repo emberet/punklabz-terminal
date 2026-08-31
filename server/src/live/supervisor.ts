@@ -6,6 +6,8 @@ import { runPreflight, preflightLines, type PreflightResult } from './preflight.
 import { recoverPendingOrders, reconcileAll } from './reconciler.js';
 import { getLiveConfig, haltNetwork, stageCapUsd } from './riskEngine.js';
 import { accountForMode, accountBook } from './accounts.js';
+import { revocationCache } from './delegation/revocationCache.js';
+import { expireDueGrants } from './delegation/grants.js';
 
 // AUTONOMOUS SUPERVISOR.
 //
@@ -48,6 +50,13 @@ export class AutonomousSupervisor {
       `${label} ${'.'.repeat(Math.max(2, 24 - label.length))} ${value}`;
 
     lines.push(pad('DATABASE', 'OK'));
+
+    // Before anything else: the revocation cache fails closed, so an
+    // un-hydrated cache would refuse every delegated order. Hydrate first, then
+    // expire whatever lapsed while the process was down.
+    revocationCache.hydrate(this.db);
+    const expired = expireDueGrants(this.db);
+    lines.push(pad('DELEGATION', `${revocationCache.size()} non-spendable${expired ? `, ${expired} expired on boot` : ''}`));
 
     const readiness = await this.signer.isReady();
     lines.push(pad('SIGNER', readiness.ready ? 'OK' : 'NOT CONFIGURED'));

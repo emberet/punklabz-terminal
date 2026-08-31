@@ -1,0 +1,114 @@
+// THE X BOUNDARY.
+//
+// Shaped exactly like buildSigner(): an interface, a null implementation that
+// refuses, a recording implementation for tests, and a factory that throws for
+// anything it has not been given credentials for. The real API client is the
+// last thing written, and it is written behind X_PROVIDER=api.
+//
+// Everything read through this interface is UNTRUSTED. A tweet is data. It is
+// never interpolated into a system prompt, never treated as instruction, and
+// always delimited and labelled when shown to a model.
+
+export interface XPost {
+  externalId: string;
+  authorHandle: string;
+  body: string;
+  metrics: { likes: number; reposts: number; replies: number };
+  postedAt: number;
+}
+
+export interface XQuota {
+  readsRemaining: number | null;
+  postsRemaining: number | null;
+  resetAt: number | null;
+}
+
+export interface XPublishResult {
+  publishedId: string;
+  quota: XQuota;
+}
+
+export interface XAdapter {
+  readonly kind: string;
+  isReady(): Promise<{ ready: boolean; detail: string }>;
+  /** read the timeline. `max` is a budget, not a target. */
+  read(max: number): Promise<{ posts: XPost[]; quota: XQuota }>;
+  /**
+   * Publish. The ONLY method that reaches the public account, and the only
+   * caller permitted to invoke it is intern.ts, downstream of screen().
+   */
+  publish(text: string, inReplyTo?: string): Promise<XPublishResult>;
+}
+
+const EMPTY_QUOTA: XQuota = { readsRemaining: null, postsRemaining: null, resetAt: null };
+
+export class NullXAdapter implements XAdapter {
+  readonly kind = 'none';
+
+  async isReady() {
+    return {
+      ready: false,
+      detail:
+        'no X credentials configured — set X_PROVIDER=api and supply the account tokens. ' +
+        'The intern runs in shadow mode until then: it drafts, filters and logs, and publishes nothing.',
+    };
+  }
+
+  async read(): Promise<{ posts: XPost[]; quota: XQuota }> {
+    return { posts: [], quota: EMPTY_QUOTA };
+  }
+
+  async publish(): Promise<XPublishResult> {
+    throw new Error('NullXAdapter: refusing to publish — no X provider is configured');
+  }
+}
+
+/**
+ * Records what would have been published without sending it. This is what the
+ * shadow period runs against, and what the tests drive.
+ */
+export class RecordingXAdapter implements XAdapter {
+  readonly kind = 'recording';
+  readonly published: { text: string; inReplyTo?: string; at: number }[] = [];
+  private feed: XPost[];
+  private readsRemaining: number;
+  private postsRemaining: number;
+
+  constructor(feed: XPost[] = [], readsRemaining = 8000, postsRemaining = 3000) {
+    this.feed = feed;
+    this.readsRemaining = readsRemaining;
+    this.postsRemaining = postsRemaining;
+  }
+
+  async isReady() {
+    return { ready: true, detail: 'recording adapter — nothing leaves this process' };
+  }
+
+  async read(max: number): Promise<{ posts: XPost[]; quota: XQuota }> {
+    const posts = this.feed.slice(0, max);
+    this.readsRemaining -= posts.length;
+    return {
+      posts,
+      quota: { readsRemaining: this.readsRemaining, postsRemaining: this.postsRemaining, resetAt: null },
+    };
+  }
+
+  async publish(text: string, inReplyTo?: string): Promise<XPublishResult> {
+    this.published.push({ text, inReplyTo, at: Date.now() });
+    this.postsRemaining -= 1;
+    return {
+      publishedId: `rec_${this.published.length}`,
+      quota: { readsRemaining: this.readsRemaining, postsRemaining: this.postsRemaining, resetAt: null },
+    };
+  }
+}
+
+export function buildXAdapter(): XAdapter {
+  const provider = process.env.X_PROVIDER ?? 'none';
+  if (provider === 'none') return new NullXAdapter();
+  if (provider === 'recording') return new RecordingXAdapter();
+  throw new Error(
+    `X_PROVIDER=${provider} is not implemented in this build. Implement XAdapter against ` +
+      'the X API v2 with the account credentials, and do not remove the screen() call site.',
+  );
+}

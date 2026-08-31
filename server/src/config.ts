@@ -19,5 +19,7 @@ export const config = {
   dbPath: path.resolve(__dirname, '../../', process.env.DB_PATH ?? './data/punklabz.db'),
   autoApproveCapUsd: Number(process.env.AUTO_APPROVE_CAP_USD ?? 500),
   epochCron: process.env.EPOCH_CRON ?? '0 0 * * *',
+  /** hard monthly ceiling on every model call the network makes, measured not estimated */
+  llmBudgetUsd: Number(process.env.LLM_BUDGET_USD ?? 25),
   isDev: process.env.NODE_ENV !== 'production',
 };

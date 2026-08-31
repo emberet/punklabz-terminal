@@ -8,6 +8,7 @@ import { atr, bollinger, ema, rsi, sma } from '../engine/indicators.js';
 import { classifyRegime } from '../analysis/regime.js';
 import { edgeForUniverse, type EdgeBreakdown, type Universe } from './edge.js';
 import { INTERVAL_MS } from '@punklabz/shared';
+import { openDirectionClaim } from '../research/predictions.js';
 
 // THE BUSY PART. Scanners observe every market the network has real data for
 // and produce candidates → signals → high-confidence opportunities. Almost
@@ -129,9 +130,27 @@ export class OpportunityEngine {
       this.db.prepare(`DELETE FROM scan_passes WHERE ts < ?`).run(ts - 7 * 86_400_000);
     })();
 
+    this.emitPredictions(found);
     this.lastCounts = counts;
     this.hub.publishThrottled('process', { counts, ts }, 2000);
     return counts;
+  }
+
+  /**
+   * A high-confidence idea that survived the net-edge gate stakes a claim about
+   * direction. Only where a real reference price exists — a claim we could not
+   * settle later is worse than no claim, because unsettleable rows quietly
+   * become an inflated track record.
+   */
+  private emitPredictions(found: Opportunity[]): void {
+    for (const o of found) {
+      if (o.confidence < HIGH_CONFIDENCE || !o.edge.viable || o.universe !== 'majors') continue;
+      const last = this.candles.history(o.symbol, '15m', 2).at(-1);
+      if (!last || !(last.c > 0)) continue;
+      openDirectionClaim(
+        this.db, `scanner:${o.scanner}`, o.symbol, last.c, o.direction, o.confidence / 100,
+      );
+    }
   }
 
   // ── universe 1: majors, real candles and indicators ──

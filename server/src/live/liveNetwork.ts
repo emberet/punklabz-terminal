@@ -13,6 +13,8 @@ import { edgeForUniverse } from './edge.js';
 import { findInstrument } from './instruments.js';
 import { evaluateIntent, getLiveConfig, haltNetwork, stageCapUsd } from './riskEngine.js';
 import { accountForMode } from './accounts.js';
+import { currentWeights } from '../research/scoring.js';
+import { openEdgeClaim } from '../research/predictions.js';
 
 // SHADOW pipeline: mirrors real strategy activity through the full live order
 // lifecycle — intent → risk engine → (theoretical) execution → ledger — with
@@ -77,8 +79,14 @@ export class LiveNetwork {
     // confirmation: the strategy stated a concrete reason
     const confirmation = trade.reason && trade.reason.length > 4 ? 85 : 55;
 
+    // Weights come from resolved predictions, not from anything an agent said.
+    // With no resolved predictions they equal the constants this line used to
+    // hardcode (0.3 / 0.25 / 0.15 / 0.15 / 0.15), so a freshly migrated network
+    // scores exactly as it did before the research loop existed.
+    const w = currentWeights(this.db);
     const composite = Math.round(
-      strategy * 0.3 + regime * 0.25 + liquidity * 0.15 + cost * 0.15 + confirmation * 0.15,
+      strategy * w.strategy + regime * w.regime + liquidity * w.liquidity +
+      cost * w.cost + confirmation * w.confirmation,
     );
     return { strategy, regime, liquidity, cost, confirmation, composite };
   }
@@ -150,6 +158,14 @@ export class LiveNetwork {
       this.hub.publish('live', { event: 'order_rejected', orderId, reason: decision.rejectionReason });
       return;
     }
+
+    // Every approved intent stakes a falsifiable claim: the edge we priced this
+    // on will actually show up. Resolved later by arithmetic, and it is what
+    // moves the confidence weights — including when we are wrong.
+    openEdgeClaim(
+      this.db, `bot:${trade.botId}`, trade.symbol, this.markOf(trade.symbol) ?? trade.price,
+      edge.netEdgeBps, conf.composite / 100, trade.botId,
+    );
 
     // route through the ExecutionRouter (shadow: theoretical fill, nothing submitted)
     const expected = this.markOf(trade.symbol) ?? trade.price;
