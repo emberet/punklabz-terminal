@@ -15,6 +15,8 @@ import { BinanceFeed } from './feeds/binanceFeed.js';
 import { CoinbaseFeed } from './feeds/coinbaseFeed.js';
 import { ReplayFeed } from './feeds/replayFeed.js';
 import { PumpPortalFeed } from './feeds/pumpPortalFeed.js';
+import { MemeFeed } from './feeds/memeFeed.js';
+import { NewsFeed } from './feeds/newsFeed.js';
 import type { Feed } from './feeds/feed.js';
 import { PaperExecutor } from './execution/paperExecutor.js';
 import { Engine } from './engine/engine.js';
@@ -92,7 +94,13 @@ async function main() {
   const payoutQueue = new PayoutQueue(db, new StubSigner());
   const hub = new WsHub(server.server);
 
-  const app: AppContext = { db, engine, executor, candles, hub, holderSource, payoutQueue, feedStatus, prices };
+  const memeFeed = new MemeFeed();
+  const newsFeed = new NewsFeed();
+  memeFeed.on('update', (tokens) => hub.publishThrottled('memes', tokens, 2000));
+  memeFeed.start();
+  newsFeed.start();
+
+  const app: AppContext = { db, engine, executor, candles, hub, holderSource, payoutQueue, feedStatus, prices, memeFeed, newsFeed };
   registerAuthRoutes(server, app);
   registerBotRoutes(server, app);
   registerMiscRoutes(server, app);
@@ -138,7 +146,10 @@ async function main() {
   // pump.fun feed
   if (config.pumpFeedEnabled && config.feedMode !== 'replay') {
     const pump = new PumpPortalFeed(db);
-    pump.on('launch', (t) => engine.pumpLaunch(t));
+    pump.on('launch', (t) => {
+      engine.pumpLaunch(t);
+      memeFeed.addPumpLaunch(t.mint, t.name, t.symbol);
+    });
     pump.on('update', (t) => engine.pumpUpdate(t));
     pump.on('status', (s: { connected: boolean; stale: boolean }) => {
       feedStatus['pumpportal'] = s;

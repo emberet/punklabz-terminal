@@ -5,6 +5,7 @@ import { api } from '../lib/api';
 import { wsClient } from '../lib/ws';
 import { Panel } from '../components/Panel';
 import { Sparkline } from '../components/Sparkline';
+import { AgentPanel } from '../components/AgentPanel';
 import { arrow, fmtUsd, fmtPct, fmtPx, fmtTime, pillClass, pnlClass, shortAddr } from '../lib/format';
 import { useAuth } from '../lib/auth';
 
@@ -94,6 +95,13 @@ export function BotDetail() {
         </div>
       </div>
 
+      <AgentPanel
+        botId={bot.id}
+        botName={bot.name}
+        isDsl={bot.strategyType === 'dsl'}
+        config={detail.config}
+      />
+
       <Panel title="Equity curve" noPad>
         <div style={{ padding: '12px 16px' }}>
           <Sparkline values={detail.metrics.map((m) => m.equityUsd)} height={90} />
@@ -178,9 +186,17 @@ export function BotDetail() {
         }
       >
         {showJson ? (
-          <div className="config-preview">{JSON.stringify(detail.config, null, 2)}</div>
+          <div className="config-preview" onClick={() => setShowJson(false)} style={{ cursor: 'pointer' }}>
+            {JSON.stringify(detail.config, null, 2)}
+          </div>
         ) : (
-          <div className="panel-body dim">Raw strategy config — click show.</div>
+          <div
+            className="panel-body dim"
+            onClick={() => setShowJson(true)}
+            style={{ cursor: 'pointer' }}
+          >
+            Raw strategy config — tap to show ▼
+          </div>
         )}
       </Panel>
 

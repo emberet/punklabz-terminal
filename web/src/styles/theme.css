@@ -211,6 +211,80 @@ input:focus, textarea:focus { border-color: var(--acid); }
 .ticker .feed-stale { color: var(--amber); }
 .ticker .feed-down { color: var(--red); }
 
+/* ── news strip: sliding dotted wire (flat, no glow) ── */
+.news-strip {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  font-family: var(--font);
+  font-size: 11.5px;
+  overflow: hidden;
+}
+.news-label {
+  color: var(--bg);
+  background: var(--acid);
+  padding: 3px 10px;
+  font-size: 9.5px;
+  letter-spacing: 1.5px;
+  flex-shrink: 0;
+}
+.news-window {
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.news-track {
+  display: inline-block;
+  white-space: nowrap;
+  animation: news-scroll 90s linear infinite;
+  padding: 3px 0;
+}
+.news-track:hover { animation-play-state: paused; }
+.news-run a { color: var(--text-soft); }
+.news-run a:hover { color: var(--acid); }
+.news-src {
+  color: var(--acid);
+  text-transform: uppercase;
+  font-size: 9px;
+  letter-spacing: 1px;
+}
+.news-dot { color: var(--text-dim); letter-spacing: 2px; }
+@keyframes news-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+/* ── playground ── */
+.playground {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.pg-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-family: var(--font);
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.pg-field input[type='range'] { accent-color: var(--acid); padding: 0; border: none; background: transparent; }
+
+/* ── alive: flashes and pulses (background tints only, still no glow) ── */
+@keyframes flash-pos { from { background: var(--tint-pos); } to { background: transparent; } }
+@keyframes flash-neg { from { background: var(--tint-neg); } to { background: transparent; } }
+.flash-pos { animation: flash-pos 0.9s ease-out; }
+.flash-neg { animation: flash-neg 0.9s ease-out; }
+@keyframes launch-pulse {
+  0% { background: var(--tint-pos); }
+  50% { background: transparent; }
+  100% { background: var(--tint-pos); }
+}
+.meme-launch td { animation: launch-pulse 2.4s ease-in-out 3; }
+
 /* ── panels ── */
 .panel { border: 1px solid var(--border); background: var(--bg-panel); margin-bottom: 14px; }
 .panel-title {

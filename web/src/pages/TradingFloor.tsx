@@ -5,6 +5,7 @@ import { api } from '../lib/api';
 import { wsClient } from '../lib/ws';
 import { Panel } from '../components/Panel';
 import { Sparkline } from '../components/Sparkline';
+import { MemesPanel } from '../components/MemesPanel';
 import { arrow, fmtUsd, fmtPct, fmtPx, fmtTime, pillClass, pnlClass, shortAddr } from '../lib/format';
 
 const STRAT_META: Record<string, { label: string; market: string; tf: string; risk: string }> = {
@@ -142,6 +143,8 @@ export function TradingFloor() {
           );
         })}
       </div>
+
+      <MemesPanel />
 
       <Panel title="TAPE ▸ ALL BOTS" term noPad right={<span className="chip chip-running">LIVE</span>}>
         <div className="tape">

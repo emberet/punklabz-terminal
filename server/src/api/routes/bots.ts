@@ -4,6 +4,8 @@ import { MAX_BOTS_PER_USER, QUANT_INITIAL_BALANCE_USD, XP } from '@punklabz/shar
 import { awardXp } from '../../social/xp.js';
 import { awardBadge, checkCloneBadges } from '../../social/badges.js';
 import { emitActivity } from '../../social/activity.js';
+import { botChat } from '../../toolkit/botChat.js';
+import { rrProbability } from '../../analysis/rr.js';
 import type { AppContext } from '../context.js';
 import { botSummaries } from '../queries.js';
 import { requireUser } from './auth.js';
@@ -142,6 +144,38 @@ export function registerBotRoutes(server: FastifyInstance, app: AppContext) {
         return reply.code(402).send({ error: 'insufficient balance for $10 clone fee' });
       throw e;
     }
+  });
+
+  // chat with the agent — grounded on its live state
+  server.post('/api/bots/:id/chat', {
+    config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const user = requireUser(app, request, reply);
+    if (!user) return;
+    const { id } = z.object({ id: z.coerce.number() }).parse(request.params);
+    const body = z.object({
+      messages: z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string().max(2000) })).min(1).max(24),
+    }).parse(request.body);
+    const bot = app.db.prepare('SELECT id FROM bots WHERE id = ?').get(id);
+    if (!bot) return reply.code(404).send({ error: 'bot not found' });
+    return botChat({ db: app.db, candles: app.candles, markOf }, id, body.messages);
+  });
+
+  // playground: empirical RR probability from this bot's market history
+  server.get('/api/bots/:id/rr', async (request, reply) => {
+    const { id } = z.object({ id: z.coerce.number() }).parse(request.params);
+    const q = z.object({
+      symbol: z.enum(['BTCUSDT', 'ETHUSDT', 'SOLUSDT']).default('BTCUSDT'),
+      stopPct: z.coerce.number().min(0.1).max(50),
+      targetPct: z.coerce.number().min(0.1).max(200),
+      leverage: z.coerce.number().min(1).max(25).default(1),
+    }).parse(request.query);
+    const bot = app.db.prepare('SELECT id FROM bots WHERE id = ?').get(id);
+    if (!bot) return reply.code(404).send({ error: 'bot not found' });
+    const candles = app.candles.history(q.symbol, '1m', 10_080); // up to 7d of 1m
+    if (candles.length < 200)
+      return reply.code(400).send({ error: 'not enough 1m history yet — try again in a few hours' });
+    return rrProbability(candles, { stopPct: q.stopPct, targetPct: q.targetPct, leverage: q.leverage });
   });
 
   server.post('/api/bots/:id/start', async (request, reply) => botToggle(request, reply, 'running'));

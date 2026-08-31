@@ -5,6 +5,8 @@ import type { CandleStore } from '../feeds/candles.js';
 import type { WsHub } from '../realtime/wsHub.js';
 import type { HolderSource } from '../manager/holderSource.js';
 import type { PayoutQueue } from '../manager/payoutQueue.js';
+import type { MemeFeed } from '../feeds/memeFeed.js';
+import type { NewsFeed } from '../feeds/newsFeed.js';
 
 export interface AppContext {
   db: DB;
@@ -16,4 +18,6 @@ export interface AppContext {
   payoutQueue: PayoutQueue;
   feedStatus: Record<string, { connected: boolean; stale: boolean }>;
   prices: Record<string, { price: number; changePct24h: number }>;
+  memeFeed: MemeFeed;
+  newsFeed: NewsFeed;
 }

@@ -151,6 +151,10 @@ export function registerMiscRoutes(server: FastifyInstance, app: AppContext) {
   // ── market ──
   server.get('/api/market/prices', async () => ({ prices: app.prices, feeds: app.feedStatus }));
 
+  server.get('/api/memes', async () => ({ tokens: app.memeFeed.snapshot() }));
+
+  server.get('/api/news', async () => ({ items: app.newsFeed.snapshot() }));
+
   server.get('/api/market/candles', async (request) => {
     const q = z.object({
       symbol: z.string(),

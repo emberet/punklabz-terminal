@@ -9,16 +9,33 @@ type Feeds = Record<string, { connected: boolean; stale: boolean }>;
 export function TickerBar() {
   const [prices, setPrices] = useState<Prices>({});
   const [feeds, setFeeds] = useState<Feeds>({});
+  const [flashes, setFlashes] = useState<Record<string, 'flash-pos' | 'flash-neg'>>({});
+
+  // flash a symbol's price cell when it ticks (tinted background, fades out)
+  const applyPrices = (next: Prices) => {
+    setPrices((prev) => {
+      const f: Record<string, 'flash-pos' | 'flash-neg'> = {};
+      for (const [sym, p] of Object.entries(next)) {
+        const old = prev[sym]?.price;
+        if (old !== undefined && p.price !== old) f[sym] = p.price > old ? 'flash-pos' : 'flash-neg';
+      }
+      if (Object.keys(f).length) {
+        setFlashes(f);
+        setTimeout(() => setFlashes({}), 900);
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
     void api
       .get<{ prices: Prices; feeds: Feeds }>('/api/market/prices')
       .then((r) => {
-        setPrices(r.prices);
+        applyPrices(r.prices);
         setFeeds(r.feeds);
       })
       .catch(() => {});
-    const un1 = wsClient.sub('prices', (d) => setPrices(d as Prices));
+    const un1 = wsClient.sub('prices', (d) => applyPrices(d as Prices));
     const un2 = wsClient.sub('feedstatus', (d) => setFeeds(d as Feeds));
     return () => {
       un1();
@@ -34,7 +51,7 @@ export function TickerBar() {
       {['BTCUSDT', 'ETHUSDT', 'SOLUSDT'].map((sym) => {
         const p = prices[sym];
         return (
-          <span key={sym}>
+          <span key={sym} className={flashes[sym] ?? ''}>
             <span className="sym">{sym.replace('USDT', '')} </span>
             {p ? (
               <>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { TickerBar } from './components/TickerBar';
+import { NewsStrip } from './components/NewsStrip';
 import { useAuth } from './lib/auth';
 import { glyphs } from './lib/glyphs';
 
@@ -62,6 +63,7 @@ export function App() {
       </nav>
       <div className="main">
         <TickerBar />
+        <NewsStrip />
         <div className="content">
           <Outlet />
         </div>
