@@ -5,7 +5,7 @@ import { api } from '../lib/api';
 import { wsClient } from '../lib/ws';
 import { Panel } from '../components/Panel';
 import { Sparkline } from '../components/Sparkline';
-import { fmtUsd, fmtPct, fmtPx, fmtTime, pnlClass, shortAddr } from '../lib/format';
+import { arrow, fmtUsd, fmtPct, fmtPx, fmtTime, pillClass, pnlClass, shortAddr } from '../lib/format';
 import { useAuth } from '../lib/auth';
 
 interface Detail {
@@ -20,6 +20,7 @@ export function BotDetail() {
   const { id } = useParams();
   const { user } = useAuth();
   const [detail, setDetail] = useState<Detail | null>(null);
+  const [showJson, setShowJson] = useState(false);
   const [err, setErr] = useState('');
 
   const load = () =>
@@ -36,127 +37,154 @@ export function BotDetail() {
   const { bot } = detail;
   const isOwner = user && (user.isAdmin || bot.ownerName === user.displayName);
   const totalPnl = bot.equityUsd - bot.initialBalanceUsd;
+  const totalPnlPct = (totalPnl / bot.initialBalanceUsd) * 100;
 
   return (
     <div>
-      <Panel
-        title={`BOT // ${bot.name}`}
-        right={
-          <span className="row" style={{ gap: 8 }}>
-            <span className={`led ${bot.status}`} />
-            <span className="dim">{bot.status}</span>
-            {isOwner && bot.kind === 'quant' && (
-              <>
-                {bot.status !== 'running' ? (
-                  <button className="primary" onClick={() => api.post(`/api/bots/${id}/start`).then(load)}>
-                    start
-                  </button>
-                ) : (
-                  <button className="danger" onClick={() => api.post(`/api/bots/${id}/stop`).then(load)}>
-                    stop
-                  </button>
-                )}
-              </>
+      <div className="page-head">
+        <div>
+          <div className="page-title row" style={{ gap: 12 }}>
+            {bot.name}
+            <span className={`chip chip-${bot.status}`}>● {bot.status}</span>
+            {bot.kind === 'house' && <span className="chip chip-house">house</span>}
+          </div>
+          <div className="page-sub">
+            {bot.strategyType}
+            {bot.ownerName ? ` · by ${bot.ownerName}` : ' · house bot'}
+          </div>
+        </div>
+        {isOwner && bot.kind === 'quant' && (
+          <div>
+            {bot.status !== 'running' ? (
+              <button className="primary" onClick={() => api.post(`/api/bots/${id}/start`).then(load)}>
+                Start bot
+              </button>
+            ) : (
+              <button className="danger" onClick={() => api.post(`/api/bots/${id}/stop`).then(load)}>
+                Stop bot
+              </button>
             )}
-          </span>
+          </div>
+        )}
+      </div>
+
+      <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', marginBottom: 14 }}>
+        <div className="stat-tile">
+          <div className="label">Equity</div>
+          <div className="value">${fmtUsd(bot.equityUsd, 0)}</div>
+        </div>
+        <div className={`stat-tile ${totalPnl > 0 ? 'pos' : totalPnl < 0 ? 'neg' : ''}`}>
+          <div className="label">Total P&L</div>
+          <div className="value" style={{ whiteSpace: 'nowrap' }}>
+            {totalPnl >= 0 ? '+' : '−'}${fmtUsd(Math.abs(totalPnl), 0)} {arrow(totalPnl)}
+          </div>
+          <div className="dim" style={{ fontSize: 12 }}>{fmtPct(totalPnlPct)}</div>
+        </div>
+        <div className={`stat-tile ${bot.pnlPct24h > 0 ? 'pos' : bot.pnlPct24h < 0 ? 'neg' : ''}`}>
+          <div className="label">24h</div>
+          <div className="value">{fmtPct(bot.pnlPct24h)}</div>
+        </div>
+        <div className="stat-tile">
+          <div className="label">Trades</div>
+          <div className="value">{bot.tradeCount}</div>
+        </div>
+        <div className="stat-tile">
+          <div className="label">Cash</div>
+          <div className="value">${fmtUsd(bot.cashUsd, 0)}</div>
+        </div>
+      </div>
+
+      <Panel title="Equity curve" noPad>
+        <div style={{ padding: '12px 16px' }}>
+          <Sparkline values={detail.metrics.map((m) => m.equityUsd)} height={90} />
+        </div>
+      </Panel>
+
+      <Panel title="Open positions" noPad>
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>symbol</th>
+                <th className="num">qty</th>
+                <th className="num">avg entry</th>
+                <th className="num">mark</th>
+                <th className="num">unrealized</th>
+              </tr>
+            </thead>
+            <tbody>
+              {detail.positions.length === 0 && (
+                <tr><td colSpan={5} className="dim">Flat — no open positions.</td></tr>
+              )}
+              {detail.positions.map((p) => (
+                <tr key={p.symbol}>
+                  <td>{p.symbol.length > 20 ? shortAddr(p.symbol) : p.symbol}</td>
+                  <td className="num">{p.qty.toPrecision(6)}</td>
+                  <td className="num">{fmtPx(p.avgEntry)}</td>
+                  <td className="num">{fmtPx(p.markPrice)}</td>
+                  <td className="num">
+                    <span className={`pill ${pillClass(p.unrealizedPnlUsd)}`}>
+                      {p.unrealizedPnlUsd >= 0 ? '+' : ''}{fmtUsd(p.unrealizedPnlUsd)}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+
+      <Panel title="Trade log" noPad>
+        <div className="table-scroll">
+          <table style={{ minWidth: 760 }}>
+            <thead>
+              <tr>
+                <th>time</th>
+                <th>side</th>
+                <th>symbol</th>
+                <th className="num">qty</th>
+                <th className="num">price</th>
+                <th>why</th>
+                <th className="num">realized</th>
+              </tr>
+            </thead>
+            <tbody>
+              {detail.trades.map((t) => (
+                <tr key={t.id}>
+                  <td className="dim">{fmtTime(t.ts)}</td>
+                  <td className={t.side === 'buy' ? 'side-buy' : 'side-sell'}>{t.side.toUpperCase()}</td>
+                  <td>{t.symbol.length > 20 ? shortAddr(t.symbol) : t.symbol}</td>
+                  <td className="num">{t.qty.toPrecision(6)}</td>
+                  <td className="num">{fmtPx(t.price)}</td>
+                  <td className="soft">{t.reason ?? '—'}</td>
+                  <td className={`num ${pnlClass(t.realizedPnlUsd)}`}>
+                    {t.side === 'sell' ? `${t.realizedPnlUsd >= 0 ? '+' : ''}${fmtUsd(t.realizedPnlUsd)}` : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+
+      <Panel
+        title="CONFIG ▸ JSON"
+        term
+        noPad
+        right={
+          <a onClick={() => setShowJson(!showJson)} style={{ cursor: 'pointer' }}>
+            {showJson ? 'hide' : 'show'}
+          </a>
         }
       >
-        <div className="row" style={{ gap: 32 }}>
-          <div>
-            <div className="dim">EQUITY</div>
-            <div className="bot-equity">${fmtUsd(bot.equityUsd)}</div>
-          </div>
-          <div>
-            <div className="dim">TOTAL P&L</div>
-            <div className={pnlClass(totalPnl)}>
-              {totalPnl >= 0 ? '+' : ''}
-              {fmtUsd(totalPnl)} ({fmtPct((totalPnl / bot.initialBalanceUsd) * 100)})
-            </div>
-          </div>
-          <div>
-            <div className="dim">24H</div>
-            <div className={pnlClass(bot.pnlPct24h)}>{fmtPct(bot.pnlPct24h)}</div>
-          </div>
-          <div>
-            <div className="dim">TRADES</div>
-            <div>{bot.tradeCount}</div>
-          </div>
-          <div>
-            <div className="dim">CASH</div>
-            <div>${fmtUsd(bot.cashUsd)}</div>
-          </div>
-        </div>
-        <div style={{ marginTop: 12 }}>
-          <Sparkline values={detail.metrics.map((m) => m.equityUsd)} height={80} />
-        </div>
+        {showJson ? (
+          <div className="config-preview">{JSON.stringify(detail.config, null, 2)}</div>
+        ) : (
+          <div className="panel-body dim">Raw strategy config — click show.</div>
+        )}
       </Panel>
 
-      <Panel title="OPEN POSITIONS" noPad>
-        <table>
-          <thead>
-            <tr>
-              <th>symbol</th>
-              <th className="num">qty</th>
-              <th className="num">avg entry</th>
-              <th className="num">mark</th>
-              <th className="num">unrealized</th>
-            </tr>
-          </thead>
-          <tbody>
-            {detail.positions.length === 0 && (
-              <tr><td colSpan={5} className="dim">flat — no open positions</td></tr>
-            )}
-            {detail.positions.map((p) => (
-              <tr key={p.symbol}>
-                <td>{p.symbol.length > 20 ? shortAddr(p.symbol) : p.symbol}</td>
-                <td className="num">{p.qty.toPrecision(6)}</td>
-                <td className="num">{fmtPx(p.avgEntry)}</td>
-                <td className="num">{fmtPx(p.markPrice)}</td>
-                <td className={`num ${pnlClass(p.unrealizedPnlUsd)}`}>
-                  {p.unrealizedPnlUsd >= 0 ? '+' : ''}{fmtUsd(p.unrealizedPnlUsd)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </Panel>
-
-      <Panel title="TRADE LOG" noPad>
-        <table>
-          <thead>
-            <tr>
-              <th>time</th>
-              <th>side</th>
-              <th>symbol</th>
-              <th className="num">qty</th>
-              <th className="num">price</th>
-              <th className="num">fee</th>
-              <th className="num">realized</th>
-            </tr>
-          </thead>
-          <tbody>
-            {detail.trades.map((t) => (
-              <tr key={t.id}>
-                <td className="dim">{fmtTime(t.ts)}</td>
-                <td className={t.side === 'buy' ? 'side-buy' : 'side-sell'}>{t.side.toUpperCase()}</td>
-                <td>{t.symbol.length > 20 ? shortAddr(t.symbol) : t.symbol}</td>
-                <td className="num">{t.qty.toPrecision(6)}</td>
-                <td className="num">{fmtPx(t.price)}</td>
-                <td className="num dim">{fmtUsd(t.feeUsd)}</td>
-                <td className={`num ${pnlClass(t.realizedPnlUsd)}`}>
-                  {t.side === 'sell' ? `${t.realizedPnlUsd >= 0 ? '+' : ''}${fmtUsd(t.realizedPnlUsd)}` : '—'}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </Panel>
-
-      <Panel title="CONFIG">
-        <div className="mono-block">{JSON.stringify(detail.config, null, 2)}</div>
-      </Panel>
-
-      <Link to="/" className="dim">← back to trading floor</Link>
+      <Link to="/" className="dim">← Back to the arena</Link>
     </div>
   );
 }

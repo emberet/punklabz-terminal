@@ -37,10 +37,10 @@ export class PaperExecutor implements Executor {
       const fillPrice = this.slippage(req.symbol, req.side, mark);
       const info = this.db
         .prepare(
-          `INSERT INTO orders (bot_id, symbol, side, type, qty, status, created_at, filled_at)
-           VALUES (?, ?, ?, 'market', ?, 'filled', ?, ?)`,
+          `INSERT INTO orders (bot_id, symbol, side, type, qty, status, created_at, filled_at, reason)
+           VALUES (?, ?, ?, 'market', ?, 'filled', ?, ?, ?)`,
         )
-        .run(req.botId, req.symbol, req.side, req.qty, now, now);
+        .run(req.botId, req.symbol, req.side, req.qty, now, now, req.reason ?? null);
       const orderId = Number(info.lastInsertRowid);
       this.emit({
         orderId,
@@ -51,6 +51,7 @@ export class PaperExecutor implements Executor {
         price: fillPrice,
         feeMicro: toMicro((req.qty * fillPrice * PAPER.feeBps) / 10_000),
         ts: now,
+        reason: req.reason,
       });
       return { orderId };
     }
@@ -58,10 +59,10 @@ export class PaperExecutor implements Executor {
     if (req.limitPrice === undefined) throw new Error('limit order needs limitPrice');
     const info = this.db
       .prepare(
-        `INSERT INTO orders (bot_id, symbol, side, type, qty, limit_price, status, created_at)
-         VALUES (?, ?, ?, 'limit', ?, ?, 'open', ?)`,
+        `INSERT INTO orders (bot_id, symbol, side, type, qty, limit_price, status, created_at, reason)
+         VALUES (?, ?, ?, 'limit', ?, ?, 'open', ?, ?)`,
       )
-      .run(req.botId, req.symbol, req.side, req.qty, req.limitPrice, now);
+      .run(req.botId, req.symbol, req.side, req.qty, req.limitPrice, now, req.reason ?? null);
     return { orderId: Number(info.lastInsertRowid) };
   }
 
@@ -76,10 +77,10 @@ export class PaperExecutor implements Executor {
     this.marks.set(symbol, price);
     const open = this.db
       .prepare(
-        `SELECT id, bot_id, side, qty, limit_price FROM orders
+        `SELECT id, bot_id, side, qty, limit_price, reason FROM orders
          WHERE status = 'open' AND symbol = ? AND type = 'limit'`,
       )
-      .all(symbol) as { id: number; bot_id: number; side: 'buy' | 'sell'; qty: number; limit_price: number }[];
+      .all(symbol) as { id: number; bot_id: number; side: 'buy' | 'sell'; qty: number; limit_price: number; reason: string | null }[];
     const now = Date.now();
     for (const o of open) {
       const crosses = o.side === 'buy' ? price <= o.limit_price : price >= o.limit_price;
@@ -96,6 +97,7 @@ export class PaperExecutor implements Executor {
         price: o.limit_price, // limits fill at their price
         feeMicro: toMicro((o.qty * o.limit_price * PAPER.feeBps) / 10_000),
         ts: now,
+        reason: o.reason ?? undefined,
       });
     }
   }

@@ -98,8 +98,8 @@ export function applyFill(
 
     const info = db
       .prepare(
-        `INSERT INTO trades (bot_id, order_id, symbol, side, qty, price, fee_micro, realized_pnl_micro, ts)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO trades (bot_id, order_id, symbol, side, qty, price, fee_micro, realized_pnl_micro, ts, reason)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         fill.botId,
@@ -111,6 +111,7 @@ export function applyFill(
         fill.feeMicro,
         realizedPnlMicro,
         fill.ts,
+        fill.reason ?? null,
       );
     const tradeId = Number(info.lastInsertRowid);
 

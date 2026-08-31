@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { openTestDb } from '../src/db/db.js';
+import { config } from '../src/config.js';
+
+// these tests exercise the no-key fallback path deterministically — never let
+// a real ANTHROPIC_API_KEY from .env leak in (it would call the live API)
+beforeAll(() => {
+  (config as { anthropicApiKey: string }).anthropicApiKey = '';
+});
 import { runEpoch, approveEpoch } from '../src/manager/managerAgent.js';
 import { MockHolderSource } from '../src/manager/holderSource.js';
 import { PayoutQueue } from '../src/manager/payoutQueue.js';

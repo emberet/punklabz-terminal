@@ -1,7 +1,7 @@
 import type { BotSummary, LeaderboardRow } from '@punklabz/shared';
 import type { DB } from '../db/db.js';
 import { computeEquity } from '../engine/accounting.js';
-import { fromMicro } from '../money.js';
+import { fromMicro, toMicro } from '../money.js';
 
 export function botSummaries(db: DB, markOf: (s: string) => number | undefined): BotSummary[] {
   const rows = db
@@ -101,6 +101,34 @@ export function leaderboard(
 
   rows.sort((a, b) => b.pnlPct - a.pnlPct);
   rows.forEach((r, i) => (r.rank = i + 1));
+
+  // 24h rank movement: rank bots by yesterday's pnl (equity@-24h vs @-48h)
+  if (windowMs === 86_400_000) {
+    const now = Date.now();
+    const prev = bots.map((b) => {
+      const at = (ts: number) =>
+        (db
+          .prepare(`SELECT equity_micro FROM bot_metrics WHERE bot_id = ? AND ts <= ? ORDER BY ts DESC LIMIT 1`)
+          .get(b.id, ts) as { equity_micro: number } | undefined)?.equity_micro ?? null;
+      const e24 = at(now - 86_400_000);
+      const e48 = at(now - 2 * 86_400_000);
+      const base = e48 ?? toMicro(b.initialBalanceUsd);
+      return {
+        botId: b.id,
+        hadHistory: e24 !== null,
+        prevPnlPct: e24 !== null && base > 0 ? ((e24 - base) / base) * 100 : null,
+      };
+    });
+    const ranked = prev
+      .filter((p) => p.prevPnlPct !== null)
+      .sort((a, b) => (b.prevPnlPct! - a.prevPnlPct!));
+    const prevRank = new Map(ranked.map((p, i) => [p.botId, i + 1]));
+    for (const r of rows) {
+      const pr = prevRank.get(r.botId);
+      (r as LeaderboardRow & { rankDelta24h?: number | null }).rankDelta24h =
+        pr === undefined ? null : pr - r.rank;
+    }
+  }
   return rows;
 }
 

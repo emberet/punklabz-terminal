@@ -5,6 +5,7 @@ import {
   createSession, destroySession, issueNonce, loginEmail, loginMessage,
   registerEmail, userFromSession, verifyWallet,
 } from '../../auth/auth.js';
+import { awardDailyLogin, xpProfile } from '../../social/xp.js';
 
 const COOKIE = 'plz_session';
 
@@ -81,6 +82,8 @@ export function registerAuthRoutes(server: FastifyInstance, app: AppContext) {
 
   server.get('/api/me', async (request) => {
     const user = currentUser(app, request);
-    return { user };
+    if (!user) return { user: null };
+    awardDailyLogin(app.db, user.id); // idempotent per UTC day
+    return { user: { ...user, ...xpProfile(app.db, user.id) } };
   });
 }

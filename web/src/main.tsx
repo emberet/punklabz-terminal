@@ -1,16 +1,20 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { createBrowserRouter, RouterProvider } from 'react-router-dom';
+import { createBrowserRouter, Navigate, RouterProvider } from 'react-router-dom';
 import './styles/theme.css';
 import { App } from './App';
 import { AuthProvider } from './lib/auth';
 import { TradingFloor } from './pages/TradingFloor';
 import { BotDetail } from './pages/BotDetail';
 import { Leaderboard } from './pages/Leaderboard';
-import { Toolkit } from './pages/Toolkit';
+import { Build } from './pages/Build';
+import { Explore } from './pages/Explore';
+import { MyBots } from './pages/MyBots';
 import { Manager } from './pages/Manager';
-import { Docs } from './pages/Docs';
+import { Learn } from './pages/Learn';
 import { Login } from './pages/Login';
+import { Feed } from './pages/Feed';
+import { Profile } from './pages/Profile';
 
 const router = createBrowserRouter([
   {
@@ -20,10 +24,18 @@ const router = createBrowserRouter([
       { index: true, element: <TradingFloor /> },
       { path: 'bots/:id', element: <BotDetail /> },
       { path: 'leaderboard', element: <Leaderboard /> },
-      { path: 'toolkit', element: <Toolkit /> },
-      { path: 'manager', element: <Manager /> },
-      { path: 'docs', element: <Docs /> },
+      { path: 'build', element: <Build /> },
+      { path: 'explore', element: <Explore /> },
+      { path: 'my-bots', element: <MyBots /> },
+      { path: 'feed', element: <Feed /> },
+      { path: 'u/:id', element: <Profile /> },
+      { path: 'admin/payouts', element: <Manager /> },
+      { path: 'learn', element: <Learn /> },
       { path: 'login', element: <Login /> },
+      // legacy routes from v1
+      { path: 'toolkit', element: <Navigate to="/build" replace /> },
+      { path: 'manager', element: <Navigate to="/admin/payouts" replace /> },
+      { path: 'docs', element: <Navigate to="/learn" replace /> },
     ],
   },
 ]);

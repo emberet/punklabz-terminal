@@ -69,8 +69,8 @@ export function Manager() {
   return (
     <div>
       <Panel
-        title="MANAGER AGENT // PROFIT DISTRIBUTION"
-        right={user?.isAdmin ? <button onClick={runNow} disabled={busy}>close epoch now</button> : undefined}
+        title="Payouts" sub="daily distribution of house-bot profits to PunkLabz holders"
+        right={user?.isAdmin ? <button onClick={runNow} disabled={busy}>Close epoch now</button> : undefined}
       >
         <p className="dim">
           House-bot profits are distributed pro-rata to PunkLabz holders with ≥ 1,000,000 tokens.
@@ -79,7 +79,7 @@ export function Manager() {
         </p>
       </Panel>
 
-      <Panel title="EPOCHS" noPad>
+      <Panel title="Epochs" noPad>
         <table>
           <thead>
             <tr>
@@ -131,7 +131,7 @@ export function Manager() {
             </div>
           )}
 
-          <Panel title={`EPOCH ${detail.id} // PAYOUTS`} noPad>
+          <Panel title={`Epoch ${detail.id} payouts`} noPad>
             <table>
               <thead>
                 <tr>
@@ -155,7 +155,7 @@ export function Manager() {
         </>
       )}
 
-      <Panel title={`AUDIT LOG // CHAIN ${audit?.chain.ok ? '✓ INTACT' : '✗ BROKEN'}`} noPad>
+      <Panel title={`AUDIT LOG ▸ CHAIN ${audit?.chain.ok ? '✓ INTACT' : '✗ BROKEN'}`} term noPad>
         <table>
           <thead>
             <tr><th>time</th><th>actor</th><th>action</th><th>hash</th></tr>

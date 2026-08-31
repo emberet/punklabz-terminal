@@ -67,12 +67,16 @@ export async function registerEmail(db: DB, email: string, password: string, dis
   if (password.length < 8) throw new Error('password must be at least 8 characters');
   const exists = db.prepare('SELECT id FROM users WHERE email = ?').get(normalized);
   if (exists) throw new Error('email already registered');
+  // display names are cosmetic (users are id-addressed) but keep new ones unique
+  const requestedName = displayName.slice(0, 40) || normalized.split('@')[0];
+  const nameTaken = db.prepare('SELECT id FROM users WHERE display_name = ?').get(requestedName);
+  if (nameTaken) throw new Error('display name already taken');
   const hash = await argon2.hash(password, { type: argon2.argon2id });
   const isAdmin = config.adminEmails.includes(normalized) ? 1 : 0;
   const tx = db.transaction(() => {
     const info = db
       .prepare('INSERT INTO users (email, password_hash, display_name, is_admin, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(normalized, hash, displayName.slice(0, 40) || normalized.split('@')[0], isAdmin, Date.now());
+      .run(normalized, hash, requestedName, isAdmin, Date.now());
     const userId = Number(info.lastInsertRowid);
     seedUser(db, userId);
     return userId;

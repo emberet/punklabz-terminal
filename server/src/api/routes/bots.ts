@@ -1,6 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { MAX_BOTS_PER_USER, QUANT_INITIAL_BALANCE_USD } from '@punklabz/shared';
+import { MAX_BOTS_PER_USER, QUANT_INITIAL_BALANCE_USD, XP } from '@punklabz/shared';
+import { awardXp } from '../../social/xp.js';
+import { awardBadge, checkCloneBadges } from '../../social/badges.js';
+import { emitActivity } from '../../social/activity.js';
 import type { AppContext } from '../context.js';
 import { botSummaries } from '../queries.js';
 import { requireUser } from './auth.js';
@@ -25,13 +28,14 @@ export function registerBotRoutes(server: FastifyInstance, app: AppContext) {
     }));
     const trades = app.db
       .prepare(
-        `SELECT id, symbol, side, qty, price, fee_micro, realized_pnl_micro, ts
+        `SELECT id, symbol, side, qty, price, fee_micro, realized_pnl_micro, ts, reason
          FROM trades WHERE bot_id = ? ORDER BY ts DESC LIMIT 100`,
       )
       .all(id)
       .map((t: any) => ({
         id: t.id, botId: id, symbol: t.symbol, side: t.side, qty: t.qty, price: t.price,
         feeUsd: fromMicro(t.fee_micro), realizedPnlUsd: fromMicro(t.realized_pnl_micro), ts: t.ts,
+        reason: t.reason ?? undefined,
       }));
     const metrics = app.db
       .prepare(`SELECT ts, equity_micro FROM bot_metrics WHERE bot_id = ? ORDER BY ts ASC LIMIT 2880`)
@@ -72,6 +76,14 @@ export function registerBotRoutes(server: FastifyInstance, app: AppContext) {
         return id;
       })();
       app.engine.loadBots();
+      awardXp(app.db, user.id, 'deploy', XP.deploy, botId);
+      awardBadge(app.db, app.hub, user.id, 'first_deploy');
+      emitActivity(app.db, app.hub, {
+        type: 'deploy',
+        actorUserId: user.id,
+        botId,
+        payload: { name: result.config.name },
+      });
       return { ok: true, botId };
     } catch (e) {
       if (e instanceof InsufficientFunds)
@@ -116,6 +128,14 @@ export function registerBotRoutes(server: FastifyInstance, app: AppContext) {
         return newId;
       })();
       app.engine.loadBots();
+      awardXp(app.db, source.owner_user_id, 'clone_received', XP.cloneReceived, botId);
+      checkCloneBadges(app.db, app.hub, source.owner_user_id);
+      emitActivity(app.db, app.hub, {
+        type: 'clone',
+        actorUserId: user.id,
+        botId: id,
+        payload: { newBotId: botId, creatorUserId: source.owner_user_id },
+      });
       return { ok: true, botId };
     } catch (e) {
       if (e instanceof InsufficientFunds)

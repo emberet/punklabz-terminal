@@ -27,7 +27,13 @@ import type { AppContext } from './api/context.js';
 import { registerAuthRoutes } from './api/routes/auth.js';
 import { registerBotRoutes } from './api/routes/bots.js';
 import { registerMiscRoutes } from './api/routes/misc.js';
-import { leaderboard } from './api/queries.js';
+import { registerSocialRoutes } from './api/routes/social.js';
+import { leaderboard, botSummaries } from './api/queries.js';
+import { BIG_WIN_USD, XP } from '@punklabz/shared';
+import { ensureActiveSeason, closeDueSeasons } from './social/seasons.js';
+import { awardXp } from './social/xp.js';
+import { checkStreakBadges, checkTradeBadges } from './social/badges.js';
+import { emitActivity } from './social/activity.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -90,6 +96,8 @@ async function main() {
   registerAuthRoutes(server, app);
   registerBotRoutes(server, app);
   registerMiscRoutes(server, app);
+  registerSocialRoutes(server, app);
+  ensureActiveSeason(db, hub);
 
   // ── wiring: feed -> candles/prices -> engine/hub ──
   feed.on('tick', (t: { symbol: string; price: number; changePct24h: number }) => {
@@ -107,6 +115,22 @@ async function main() {
   engine.on('trade', (trade) => {
     hub.publish('tape', trade);
     hub.publish(`bot:${trade.botId}`, { trade });
+    // social hooks for quant-owned bots
+    const owner = db.prepare('SELECT owner_user_id FROM bots WHERE id = ?').get(trade.botId) as
+      | { owner_user_id: number | null }
+      | undefined;
+    if (owner?.owner_user_id) {
+      awardXp(db, owner.owner_user_id, 'trade', XP.trade, trade.id);
+      checkTradeBadges(db, hub, owner.owner_user_id);
+    }
+    if (trade.side === 'sell' && trade.realizedPnlUsd >= BIG_WIN_USD) {
+      emitActivity(db, hub, {
+        type: 'big_win',
+        actorUserId: owner?.owner_user_id ?? undefined,
+        botId: trade.botId,
+        payload: { pnlUsd: trade.realizedPnlUsd, symbol: trade.symbol },
+      });
+    }
   });
   engine.on('botUpdate', (u) => hub.publish(`bot:${u.botId}`, u));
   engine.on('botPaused', (p) => hub.publish(`bot:${p.botId}`, p));
@@ -123,10 +147,30 @@ async function main() {
     pump.start();
   }
 
-  // leaderboard broadcast
+  // leaderboard broadcast + top-3 rank-change feed events.
+  // First pass after boot only seeds prevTop (no boot burst); afterwards emit
+  // only when a bot ENTERS the top 3, throttled to one event per bot per 30min.
+  let prevTop: Set<number> | null = null;
   setInterval(() => {
     try {
-      hub.publish('leaderboard', leaderboard(db, (s) => executor.getMark(s), 86_400_000));
+      const rows = leaderboard(db, (s) => executor.getMark(s), 86_400_000);
+      hub.publish('leaderboard', rows);
+      const top3 = new Set(rows.slice(0, 3).map((r) => r.botId));
+      if (prevTop !== null) {
+        for (const r of rows.slice(0, 3)) {
+          if (prevTop.has(r.botId)) continue;
+          const recent = db
+            .prepare(`SELECT MAX(ts) AS ts FROM activity_events WHERE type = 'rank_change' AND bot_id = ?`)
+            .get(r.botId) as { ts: number | null };
+          if (recent.ts !== null && Date.now() - recent.ts < 30 * 60_000) continue;
+          emitActivity(db, hub, {
+            type: 'rank_change',
+            botId: r.botId,
+            payload: { rank: r.rank, pnlPct: r.pnlPct },
+          });
+        }
+      }
+      prevTop = top3;
     } catch (e) {
       console.error('leaderboard broadcast:', e);
     }
@@ -155,6 +199,28 @@ async function main() {
   }
   await feed.start();
   engine.start();
+
+  // ── season lifecycle: close due seasons every minute ──
+  const equityOf = (botId: number) => {
+    const b = botSummaries(db, (s) => executor.getMark(s)).find((x) => x.id === botId);
+    return b ? Math.round(b.equityUsd * 1_000_000) : 0;
+  };
+  cron.schedule('* * * * *', () => {
+    try {
+      closeDueSeasons(db, hub, equityOf);
+    } catch (e) {
+      server.log.error(`season cron failed: ${String(e)}`);
+    }
+  });
+
+  // ── daily streak-badge check ──
+  cron.schedule('5 0 * * *', () => {
+    try {
+      checkStreakBadges(db, hub);
+    } catch (e) {
+      server.log.error(`streak cron failed: ${String(e)}`);
+    }
+  });
 
   // ── manager epoch cron ──
   cron.schedule(config.epochCron, async () => {

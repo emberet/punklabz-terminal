@@ -57,6 +57,7 @@ export interface TradeView {
   feeUsd: number;
   realizedPnlUsd: number;
   ts: number;
+  reason?: string;
 }
 
 export interface LeaderboardRow {

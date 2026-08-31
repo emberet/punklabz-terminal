@@ -202,6 +202,7 @@ export class Engine extends EventEmitter {
             type: intent.orderType ?? 'market',
             qty: notional / mark,
             limitPrice: intent.limitPrice,
+            reason: intent.reason,
           })
           .catch((e) => console.error(`bot ${bot.row.id} buy failed:`, e.message));
       } else {
@@ -217,6 +218,7 @@ export class Engine extends EventEmitter {
             type: intent.orderType ?? 'market',
             qty,
             limitPrice: intent.limitPrice,
+            reason: intent.reason,
           })
           .catch((e) => console.error(`bot ${bot.row.id} sell failed:`, e.message));
       }
@@ -239,6 +241,7 @@ export class Engine extends EventEmitter {
       feeUsd: fromMicro(fill.feeMicro),
       realizedPnlUsd: fromMicro(result.realizedPnlMicro),
       ts: fill.ts,
+      reason: fill.reason,
     };
     this.emit('trade', trade);
 

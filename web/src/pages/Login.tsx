@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Panel } from '../components/Panel';
+import { glyphs } from '../lib/glyphs';
 import { useAuth } from '../lib/auth';
 
 export function Login() {
@@ -16,7 +17,7 @@ export function Login() {
 
   const done = async () => {
     await refresh();
-    navigate('/toolkit');
+    navigate('/build');
   };
 
   const submitEmail = async () => {
@@ -66,17 +67,21 @@ export function Login() {
   return (
     <div className="login-wrap">
       <div className="login-box">
-        <Panel title="ACCESS // PUNKLABZ TERMINAL" noPad>
+        <Panel title="Welcome to Punklabz" sub="paper trading arena" noPad>
           <div className="login-cols">
+            <div className="login-mosaic">
+              <pre className="glyphs faint">{glyphs(14, 6, 42)}</pre>
+              <div className="acid-block" />
+            </div>
             <div className="login-col">
-              <div className="cyan">WALLET</div>
+              <div className="acid">Wallet</div>
               <p className="dim">Sign a message with your Solana wallet. No password, no email.</p>
               <button className="primary" onClick={walletLogin} disabled={busy}>
-                connect wallet
+                Connect wallet
               </button>
             </div>
             <div className="login-col">
-              <div className="cyan">{mode === 'login' ? 'EMAIL LOGIN' : 'REGISTER'}</div>
+              <div className="acid">{mode === 'login' ? 'Email' : 'Create account'}</div>
               {mode === 'register' && (
                 <input
                   placeholder="display name"
@@ -93,20 +98,20 @@ export function Login() {
                 onKeyDown={(e) => e.key === 'Enter' && submitEmail()}
               />
               <button onClick={submitEmail} disabled={busy}>
-                {mode === 'login' ? 'log in' : 'create account'}
+                {mode === 'login' ? 'Sign in' : 'Create account'}
               </button>
               <a
                 onClick={() => setMode(mode === 'login' ? 'register' : 'login')}
                 style={{ cursor: 'pointer' }}
                 className="dim"
               >
-                {mode === 'login' ? 'need an account? register →' : '← back to login'}
+                {mode === 'login' ? 'Need an account? Register →' : '← Back to sign in'}
               </a>
             </div>
           </div>
           {err && <div className="panel-body error-text">{err}</div>}
           <div className="panel-body dim" style={{ fontSize: 11 }}>
-            new accounts get $100 demo credit · paper trading only — no real funds involved
+            New accounts get $100 in demo credits · paper trading only — no real funds involved
           </div>
         </Panel>
       </div>

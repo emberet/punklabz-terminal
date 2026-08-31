@@ -73,6 +73,16 @@ export class CandleStore extends EventEmitter {
     ).reverse();
   }
 
+  /** read-only range fetch for the backtester */
+  historyRange(symbol: string, interval: Interval, fromTs: number, toTs: number): Candle[] {
+    return this.db
+      .prepare(
+        `SELECT symbol, interval, ts, o, h, l, c, v FROM candles
+         WHERE symbol = ? AND interval = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC`,
+      )
+      .all(symbol, interval, fromTs, toTs) as Candle[];
+  }
+
   lastTs(symbol: string, interval: Interval): number | null {
     const row = this.db
       .prepare('SELECT MAX(ts) AS ts FROM candles WHERE symbol = ? AND interval = ?')

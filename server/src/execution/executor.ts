@@ -7,6 +7,8 @@ export interface OrderRequest {
   type: OrderType;
   qty: number;
   limitPrice?: number;
+  /** strategy's stated reason for the trade — persisted through to the trade row */
+  reason?: string;
 }
 
 export interface Fill {
@@ -18,6 +20,7 @@ export interface Fill {
   price: number;
   feeMicro: number;
   ts: number;
+  reason?: string;
 }
 
 /**

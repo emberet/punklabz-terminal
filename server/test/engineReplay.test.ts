@@ -71,6 +71,10 @@ describe('engine replay', () => {
     const tax = db.prepare(`SELECT COUNT(*) AS n FROM ledger_entries WHERE type = 'fee_trade_tax'`).get() as { n: number };
     expect(tax.n).toBe(trades.length);
 
+    // every trade carries the strategy's reason string
+    const reasons = db.prepare(`SELECT reason FROM trades`).all() as { reason: string | null }[];
+    expect(reasons.every((r) => typeof r.reason === 'string' && r.reason.length > 0)).toBe(true);
+
     // rerun determinism: same tape on a fresh world produces the same trades
     const db2 = openTestDb();
     const u2 = db2.prepare(`INSERT INTO users (email, display_name, created_at) VALUES ('r@x.com','r',1)`).run();

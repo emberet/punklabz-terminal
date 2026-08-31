@@ -28,3 +28,7 @@ export function shortAddr(a: string): string {
 export function pnlClass(n: number): string {
   return n >= 0 ? 'pnl-pos' : 'pnl-neg';
 }
+
+export const arrow = (n: number) => (n > 0 ? '▲' : n < 0 ? '▼' : '─');
+
+export const pillClass = (n: number) => (n > 0 ? 'pill-pos' : n < 0 ? 'pill-neg' : 'pill-neu');
