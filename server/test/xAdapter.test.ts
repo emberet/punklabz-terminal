@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiXAdapter, oauthHeader, type XApiConfig } from '../src/intern/apiXAdapter.js';
 import { NullXAdapter, buildXAdapter } from '../src/intern/xAdapter.js';
 import { screen } from '../src/intern/contentFilter.js';
@@ -68,6 +68,26 @@ describe('the adapter refuses before it reaches the network', () => {
 
   it('will not publish without complete credentials', async () => {
     await expect(new ApiXAdapter(blank).publish('hello')).rejects.toThrow(/refusing to publish/);
+  });
+});
+
+describe('read availability', () => {
+  const cfg: XApiConfig = {
+    appKey: 'key', appSecret: 'secret', accessToken: 'token', accessSecret: 'token-secret',
+  };
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each([402, 403, 429])('treats X status %s as unavailable input, not a fatal read', async (status) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ detail: 'upstream read unavailable' }),
+      { status, headers: { 'content-type': 'application/json' } },
+    )));
+
+    await expect(new ApiXAdapter(cfg).read(10)).resolves.toEqual({
+      posts: [],
+      quota: { readsRemaining: null, postsRemaining: null, resetAt: null },
+    });
   });
 });
 

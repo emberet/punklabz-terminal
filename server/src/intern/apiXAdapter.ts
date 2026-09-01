@@ -198,14 +198,13 @@ export class ApiXAdapter implements XAdapter {
       return { posts, quota: quotaFrom(headers) };
     } catch (e) {
       const status = (e as { status?: number }).status;
-      // 403 here means the access tier does not include v2 search, and 429
-      // means we have spent the window. NEITHER is a malfunction, and throwing
-      // would halt the intern permanently over an entitlement it will never
-      // have on this plan. It reads nothing and says so; the draft step then
-      // works from PunkLabz's own measured state, which is the only material
-      // it is allowed to state numbers from anyway.
-      if (status === 403 || status === 429) {
-        return { posts: [], quota: { readsRemaining: 0, postsRemaining: null, resetAt: null } };
+      // 402 means the project has no credits, 403 means the access tier does
+      // not include v2 search, and 429 means the current window is spent.
+      // None is an authentication failure. Do not report a synthetic zero
+      // quota: reconciliation would compare it with the monthly allowance and
+      // halt on false drift. An unavailable upstream quota is unknown.
+      if (status === 402 || status === 403 || status === 429) {
+        return { posts: [], quota: { readsRemaining: null, postsRemaining: null, resetAt: null } };
       }
       throw e;
     }
