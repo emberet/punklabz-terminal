@@ -32,6 +32,7 @@ EPOCH_CRON=0 0 * * *
 PAYOUTS_ENABLED=false
 LLM_BUDGET_USD=40
 INTERN_LLM_BUDGET_USD=50
+TRADING_COUNCIL_LLM_BUDGET_USD=50
 SIGNER_PROVIDER=privy
 PRIVY_APP_ID=<privy app id>
 PRIVY_WALLET_ID=<dedicated trader wallet id>
@@ -41,6 +42,9 @@ TRADING_WALLET_ADDRESS=<dedicated trader wallet public address>
 SIGNER_ALLOWED_TARGETS=0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168,0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73,0x0000000000001fF3684f28c67538d4D072C22734
 SIGNER_MAX_NATIVE_ETH=0
 ZEROX_API_KEY=<0x key>
+ZEROX_SUSTAINED_RPS=0
+ROBINHOOD_TOKEN_INDEXER_URL=https://robinhoodchain.blockscout.com/api/v2
+FULL_MARKET_SCANNER_ENABLED=false
 RPC_ROBINHOOD_PRIMARY=<chain 4663 private RPC>
 RPC_ROBINHOOD_SECONDARY=<independent chain 4663 RPC>
 OPERATOR_ALERT_WEBHOOK_URL=<private incident webhook>
@@ -148,6 +152,34 @@ then uses the wallet-authenticated Control Room to:
 7. Wait for 10 reconciled autonomous fills at each later stage before promotion.
 
 Do not switch to `live` until stage 4 is fully funded and has 10 clean, non-forced fills.
+
+## Full-market canary activation
+
+The full-market release deploys halted. Keep `FULL_MARKET_SCANNER_ENABLED=false`
+until a measured 0x entitlement can complete the exact directed-pair universe
+inside 14 minutes. Scanner enablement only schedules sweeps; it does not arm
+the signer or clear the kill switch.
+
+1. Capture and review a fresh universe snapshot while chain, registry, token
+   bytecode, decimals, multipliers, corporate actions and reference prices are healthy.
+2. Generate the snapshot policy bundle. Install its target file as a root-owned
+   credential, set `SIGNER_ALLOWED_TARGETS_FILE` and its emitted
+   `SIGNER_ALLOWED_TARGETS_HASH`, then manually create and attach the exact
+   Privy policies. Record the observed IDs through the authenticated admin API.
+3. Record the operator's signed stock-token jurisdiction attestation. This is
+   an operational gate, not legal advice or a substitute for counsel.
+4. Set the measured `ZEROX_SUSTAINED_RPS`, enable the scanner, and require one
+   complete non-overlapping sweep. Any 429, timeout, stale route or incomplete
+   cardinality makes the sweep unusable for execution.
+5. Reconcile after the sweep and verify zero unresolved transactions, a clean
+   WETH/USDG proof round trip, fresh prices, a matching policy hash and stage 1.
+6. Reauthenticate the operator wallet and enter `ENABLE AUTONOMOUS CANARY $5`.
+   This one-time action captures the reconciled USDG balance as the authorization
+   ceiling. A later deposit cannot increase it.
+
+Never place the generated policy JSON in git if it includes deployment-specific
+policy IDs. Keep `BILLING_PROVIDER=none` and `BILLING_ENFORCED=false`; billing is
+independent of the Trader signer.
 
 ## Smoke test after deploy
 

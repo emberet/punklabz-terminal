@@ -6,6 +6,7 @@ import { Panel } from './Panel';
 import { NumberTicker } from './motion/NumberTicker';
 import { fmtUsd, fmtTime, shortAddr } from '../lib/format';
 import { useAuth } from '../lib/auth';
+import { personalSign } from '../lib/wallet';
 
 interface LiveOrder {
   id: number;
@@ -19,7 +20,7 @@ interface LiveOrder {
   mode: string;
   state: string;
   confidence: number | null;
-  risk: { checks: { name: string; pass: boolean; detail: string }[] } | null;
+  risk: { checks?: { name: string; pass: boolean; detail: string }[] } | null;
   expectedPrice: number | null;
   executedPrice: number | null;
   slippageBps: number | null;
@@ -70,17 +71,39 @@ interface ConfirmationRequest {
   submit: (value: string) => Promise<unknown>;
 }
 
+interface FullMarketReadiness {
+  ready: boolean;
+  blockers: string[];
+  snapshotHash: string | null;
+  pairCount: number;
+  authorizedCapitalUsdg: number | null;
+}
+
+interface UniverseAdmin {
+  active: {
+    id: number; contentHash: string; assetCount: number; directedPairCount: number;
+    policyHash: string | null; policyIds: string[];
+  } | null;
+  snapshots: { id: number; state: string; content_hash: string; created_at: number }[];
+}
+
+interface SweepAdmin {
+  sweeps: { id: number; state: string; expected_pairs: number; completed_at: number | null; error: string | null }[];
+}
+
 const NETWORK_MAP = `                [ PUNKLABZ ]
+                     │
+              [ AGENT COUNCIL ]
                      │
                [ RISK CORE ]
                      │
-             [ ORDER ROUTER ]
+             [ 38,220 ROUTES ]
                 /           \\
             SHADOW     ROBINHOOD 4663
               │          │       │
-          THEORETICAL   0x     PRIVY
+          THEORETICAL   0x     PRIVY POLICY
                          │
-                    WETH / USDG`;
+                 VERIFIED REGISTRY`;
 
 export function LiveNetworkPanel() {
   const { user } = useAuth();
@@ -99,6 +122,9 @@ export function LiveNetworkPanel() {
   const [allocationUsd, setAllocationUsd] = useState('0.50');
   const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
   const [confirmationValue, setConfirmationValue] = useState('');
+  const [fullReadiness, setFullReadiness] = useState<FullMarketReadiness | null>(null);
+  const [universe, setUniverse] = useState<UniverseAdmin>({ active: null, snapshots: [] });
+  const [sweeps, setSweeps] = useState<SweepAdmin['sweeps']>([]);
 
   const load = () => {
     void api.get<LiveStatusView>(isAdmin ? '/api/admin/live/status' : '/api/live/status').then(setStatus).catch(() => {});
@@ -112,6 +138,9 @@ export function LiveNetworkPanel() {
     }).catch(() => {});
     void api.get<{ sessions: AdvisorySession[] }>('/api/admin/live/discussions?limit=8')
       .then((r) => setDiscussions(r.sessions)).catch(() => {});
+    void api.get<FullMarketReadiness>('/api/admin/live/full-market/readiness').then(setFullReadiness).catch(() => {});
+    void api.get<UniverseAdmin>('/api/admin/live/universe').then(setUniverse).catch(() => {});
+    void api.get<SweepAdmin>('/api/admin/live/sweeps').then((r) => setSweeps(r.sweeps)).catch(() => {});
   };
 
   useEffect(() => {
@@ -156,9 +185,32 @@ export function LiveNetworkPanel() {
     void act(() => submit(value));
   };
 
+  const attestJurisdiction = () => act(async () => {
+    if (!user?.walletAddress) throw new Error('operator account has no wallet');
+    const challenge = await api.get<{ timestamp: number; message: string }>('/api/admin/live/jurisdiction/message');
+    const signature = await personalSign(challenge.message, user.walletAddress);
+    await api.post('/api/admin/live/jurisdiction/attest', { timestamp: challenge.timestamp, signature });
+  });
+
+  const generatePolicy = async (value: string) => {
+    const response = await api.post<{ bundle: unknown }>('/api/admin/live/universe/policy/generate', { confirmation: value });
+    const blob = new Blob([JSON.stringify(response.bundle, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `punklabz-universe-policy-${Date.now()}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    return response;
+  };
+
   if (!status) return null;
   const phase = status.phase ?? status.mode ?? 'shadow';
-  const phaseLabel = phase === 'canary_probe'
+  const phaseLabel = status.halted || !status.autonomyEnabled
+    ? phase === 'canary_probe' ? 'CANARY MANUAL' : phase.toUpperCase()
+    : status.fullMarket?.enabled
+      ? 'AUTONOMY ON'
+      : phase === 'canary_probe'
     ? 'CANARY PROBE'
     : phase === 'autonomous_canary'
       ? 'AUTONOMOUS CANARY'
@@ -168,7 +220,7 @@ export function LiveNetworkPanel() {
     <>
       <Panel
         title="EXECUTION NETWORK"
-        sub="Robinhood Chain mainnet — USDG trading cash, ETH gas, WETH/USDG execution"
+        sub="Robinhood Chain mainnet — verified registry routing, USDG cash, ETH gas"
         noPad
         right={
           <span className={`chip ${status.halted ? 'chip-stopped' : status.mode === 'simulation' ? 'chip-paused' : 'chip-running'}`}>
@@ -209,6 +261,30 @@ export function LiveNetworkPanel() {
             {isAdmin && <div className="stat-tile">
               <div className="label">Clean fills</div>
               <div className="value">{status.promotion?.cleanFills ?? 0} / 10</div>
+            </div>}
+            {isAdmin && <div className="stat-tile">
+              <div className="label">Verified assets</div>
+              <div className="value">{status.fullMarket?.assetCount ?? 0}</div>
+            </div>}
+            {isAdmin && <div className="stat-tile">
+              <div className="label">Directed routes</div>
+              <div className="value">{(status.fullMarket?.directedPairCount ?? 0).toLocaleString()}</div>
+            </div>}
+            {isAdmin && <div className={`stat-tile ${status.fullMarket?.sweepState === 'complete' ? 'pos' : 'neg'}`}>
+              <div className="label">Pair sweep</div>
+              <div className="value">{(status.fullMarket?.sweepState ?? 'OFFLINE').toUpperCase()}</div>
+            </div>}
+            {isAdmin && <div className={`stat-tile ${status.fullMarket?.policyReady ? 'pos' : 'neg'}`}>
+              <div className="label">Signer policy</div>
+              <div className="value">{status.fullMarket?.policyReady ? 'MATCHED' : 'BLOCKED'}</div>
+            </div>}
+            {isAdmin && <div className="stat-tile">
+              <div className="label">Council spend</div>
+              <div className="value">${(status.fullMarket?.councilSpentUsd ?? 0).toFixed(2)} / ${(status.fullMarket?.councilCapUsd ?? 50).toFixed(0)}</div>
+            </div>}
+            {isAdmin && <div className="stat-tile">
+              <div className="label">Authorized USDG</div>
+              <div className="value">{status.fullMarket?.authorizedCapitalUsdg == null ? 'NOT SET' : `$${status.fullMarket.authorizedCapitalUsdg.toFixed(2)}`}</div>
             </div>}
             {isAdmin && <div className={`stat-tile ${status.promotion?.reconciliationClean ? 'pos' : 'neg'}`}>
               <div className="label">Reconciliation</div>
@@ -333,6 +409,71 @@ export function LiveNetworkPanel() {
           )}
         </div>
       </Panel>
+
+      {isAdmin && (
+        <Panel title="FULL-MARKET GATES" sub="snapshot-bound autonomy readiness" noPad>
+          <div className={`banner ${fullReadiness?.ready ? 'ok' : 'bad'}`}>
+            {fullReadiness?.ready ? 'FULL-MARKET CANARY READY' : `FULL-MARKET BLOCKED — ${fullReadiness?.blockers.length ?? 0} GATE(S)`}
+          </div>
+          <div className="panel-body">
+            <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', marginBottom: 10 }}>
+              <div className="stat-tile"><div className="label">Snapshot</div><div className="value">{universe.active ? `#${universe.active.id}` : 'NONE'}</div></div>
+              <div className="stat-tile"><div className="label">Assets</div><div className="value">{universe.active?.assetCount ?? 0}</div></div>
+              <div className="stat-tile"><div className="label">Routes</div><div className="value">{(universe.active?.directedPairCount ?? 0).toLocaleString()}</div></div>
+              <div className="stat-tile"><div className="label">Latest sweep</div><div className="value">{(sweeps[0]?.state ?? 'NONE').toUpperCase()}</div></div>
+            </div>
+            {fullReadiness && !fullReadiness.ready && (
+              <div className="syslog" style={{ marginBottom: 10 }}>
+                {fullReadiness.blockers.map((blocker, index) => <div className="red" key={index}>[BLOCK] {blocker}</div>)}
+              </div>
+            )}
+            <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+              <button disabled={busy} onClick={() => void act(() => api.post('/api/admin/live/universe/snapshot'))}>CAPTURE SNAPSHOT</button>
+              {universe.snapshots.some((snapshot) => snapshot.state === 'draft') && (
+                <button disabled={busy} onClick={() => {
+                  const draft = universe.snapshots.find((snapshot) => snapshot.state === 'draft')!;
+                  const phrase = 'ACTIVATE VERIFIED UNIVERSE';
+                  requestConfirmation({ title: `ACTIVATE SNAPSHOT #${draft.id}`, prompt: phrase, expected: phrase,
+                    submit: (value) => api.post('/api/admin/live/universe/activate', { snapshotId: draft.id, confirmation: value }) });
+                }}>ACTIVATE SNAPSHOT</button>
+              )}
+              <button disabled={busy || !user?.walletAddress} onClick={() => void attestJurisdiction()}>SIGN JURISDICTION ATTESTATION</button>
+              {universe.active && (
+                <button disabled={busy} onClick={() => {
+                  const phrase = 'GENERATE SNAPSHOT POLICY';
+                  requestConfirmation({ title: 'GENERATE PRIVY POLICY', prompt: phrase, expected: phrase, submit: generatePolicy });
+                }}>GENERATE POLICY JSON</button>
+              )}
+              {universe.active?.policyHash && (
+                <button disabled={busy} onClick={() => requestConfirmation({
+                  title: 'CONFIRM PRIVY POLICY IDS', prompt: 'Comma-separated policy IDs observed on the runtime signer',
+                  submit: (value) => api.post('/api/admin/live/universe/policy/confirm', {
+                    policyHash: universe.active!.policyHash, policyIds: value.split(',').map((id) => id.trim()).filter(Boolean),
+                  }),
+                })}>CONFIRM PRIVY IDS</button>
+              )}
+              <button disabled={busy || !universe.active} onClick={() => void act(() => api.post('/api/admin/live/sweep'))}>RUN EXACT SWEEP</button>
+              {sweeps.find((sweep) => sweep.state === 'complete') && (
+                <button disabled={busy} onClick={() => void act(() => api.post('/api/admin/live/council/run', {
+                  sweepId: sweeps.find((sweep) => sweep.state === 'complete')!.id,
+                }))}>RUN AGENT COUNCIL</button>
+              )}
+              <button className="primary" disabled={busy || !fullReadiness?.ready} onClick={() => {
+                const phrase = 'ENABLE AUTONOMOUS CANARY $5';
+                requestConfirmation({ title: 'ENABLE FULL-MARKET CANARY', prompt: phrase, expected: phrase,
+                  submit: (value) => api.post('/api/admin/live/full-market/enable', { confirmation: value }) });
+              }}>ENABLE FULL-MARKET CANARY</button>
+              {status.fullMarket?.enabled && (
+                <button disabled={busy} onClick={() => {
+                  const phrase = 'RUN AUTONOMOUS CYCLE';
+                  requestConfirmation({ title: 'RUN AUTONOMOUS CYCLE', prompt: phrase, expected: phrase,
+                    submit: (value) => api.post('/api/admin/live/full-market/cycle', { confirmation: value }) });
+                }}>RUN ONE CYCLE</button>
+              )}
+            </div>
+          </div>
+        </Panel>
+      )}
 
       {isAdmin && (
         <Panel title="CUSTODY ISOLATION" sub="Manager funds Trader; only Trader reaches execution" noPad>
@@ -481,15 +622,16 @@ export function LiveNetworkPanel() {
                   {o.operatorTest && <span className="amber">OPERATOR TEST</span>}
                   {o.slippageBps !== null && <span className="dim">slip {o.slippageBps.toFixed(1)}bp</span>}
                 </div>
-                {expanded === o.id && o.risk && (
+                {expanded === o.id && (
                   <div style={{ padding: '4px 14px 8px', fontSize: 10.5, background: 'var(--tint-hover)' }}>
                     {o.rejectReason && <div className="red">REJECTED: {o.rejectReason}</div>}
-                    {o.risk.checks.map((c, i) => (
+                    {(o.risk?.checks ?? []).map((c, i) => (
                       <div key={i}>
                         <span className={c.pass ? 'phos' : 'red'}>{c.pass ? '[ OK ]' : '[FAIL]'}</span>{' '}
                         <span className="dim">{c.name}</span> <span className="soft">{c.detail}</span>
                       </div>
                     ))}
+                    {!o.rejectReason && !(o.risk?.checks?.length) && <div className="dim">NO DETERMINISTIC CHECK LOG ATTACHED</div>}
                   </div>
                 )}
               </div>

@@ -14,6 +14,7 @@ import type { LiveNetwork } from '../live/liveNetwork.js';
 import type { AutonomousSupervisor } from '../live/supervisor.js';
 import type { CanaryExperimentCoordinator } from '../live/canaryExperiment.js';
 import type { XAdapter } from '../intern/xAdapter.js';
+import type { FullMarketAutonomy } from '../live/fullMarketAutonomy.js';
 
 export interface AppContext {
   db: DB;
@@ -34,5 +35,6 @@ export interface AppContext {
   liveNetwork?: LiveNetwork;
   supervisor?: AutonomousSupervisor;
   canaryExperiment?: CanaryExperimentCoordinator;
+  fullMarketAutonomy?: FullMarketAutonomy;
   xAdapter: XAdapter;
 }

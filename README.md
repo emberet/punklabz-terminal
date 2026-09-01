@@ -13,7 +13,7 @@ how people lose money. Precisely:
 | | Status |
 |---|---|
 | Market data | **REAL** — Binance, pump.fun, Robinhood Chain asset APIs |
-| Robinhood Chain asset registry | **REAL** — 194 assets, verified onchain |
+| Robinhood Chain asset registry | **REAL** — immutable snapshots include only contracts verified onchain at capture time |
 | 0x quotes on chain 4663 | **REAL** — priced, validated, not signed |
 | Privy signer + policy | **RUNTIME STATE** — inspect the admin Control Room; the release requires an isolated Trader owner, signer and policy |
 | Strategy P&L, balances, fees | **PARTITIONED** — paper books stay simulated; mainnet books come only from confirmed receipt deltas |
@@ -31,6 +31,14 @@ operator arms stage 1, a receipt-derived `$0.50` buy/close round trip settles,
 and a fresh reconciliation and preflight both pass for the exact wallet and
 signer policy. Runtime status, not this README, is the source for whether that
 ceremony has happened.
+
+Full-market autonomy is a second, stricter ceremony. Deployment alone does not
+enable it. The release must capture an immutable registry snapshot, generate
+and manually attach its matching Privy policies, record a signed jurisdiction
+attestation, finish an exact-cardinality 15-minute sweep, reconcile after that
+sweep, and retain the receipt-backed WETH/USDG proof. Only a freshly
+authenticated operator can then authorize the reconciled USDG balance by
+entering the exact launch phrase. Later deposits never widen that cap.
 
 ## Stack
 

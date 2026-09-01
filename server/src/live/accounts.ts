@@ -234,6 +234,10 @@ export interface FundingEntry {
   txRef?: string | null;
   note?: string | null;
   logIndex?: number | null;
+  contractAddress?: string | null;
+  decimals?: number | null;
+  rawQty?: string | null;
+  snapshotHash?: string | null;
 }
 
 /**
@@ -269,8 +273,9 @@ export function recordFunding(
   );
   const assetStmt = db.prepare(
     `INSERT INTO execution_asset_ledger
-       (execution_account_id, asset, qty_delta, event_type, tx_ref, log_index, ts)
-     VALUES (?, ?, ?, 'funding', ?, ?, ?)`,
+       (execution_account_id, asset, qty_delta, event_type, tx_ref, log_index, ts,
+        chain_id, contract_address, decimals, raw_delta, snapshot_hash)
+     VALUES (?, ?, ?, 'funding', ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   return db.transaction(() => {
     const hash = appendAudit(db, actor, 'account_funding', { accountId, entries });
@@ -279,7 +284,9 @@ export function recordFunding(
       if (!Number.isFinite(e.qty) || e.qty === 0) continue;
       const asset = e.asset.toUpperCase();
       stmt.run(accountId, asset, e.qty, e.txRef ?? null, actor, e.note ?? null, hash, ts, e.logIndex ?? null);
-      assetStmt.run(accountId, asset, String(e.qty), e.txRef ?? null, e.logIndex ?? null, ts);
+      assetStmt.run(accountId, asset, String(e.qty), e.txRef ?? null, e.logIndex ?? null, ts,
+        e.contractAddress ? 4663 : null, e.contractAddress?.toLowerCase() ?? null,
+        e.decimals ?? null, e.rawQty ?? null, e.snapshotHash ?? null);
       n++;
     }
     return n;

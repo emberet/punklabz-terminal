@@ -1,8 +1,9 @@
-import { generateKeyPairSync, createVerify } from 'node:crypto';
+import { generateKeyPairSync, createHash, createVerify } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PrivySigner, canonicalize, privyConfigFromEnv, type PrivyConfig } from '../src/live/signing/privySigner.js';
 import { NoSigner, buildSigner } from '../src/live/signing/signer.js';
 import { provisionPrivyWallet } from '../src/live/signing/provisionPrivy.js';
+import { ZEROX_ALLOWANCE_HOLDER } from '../src/live/instrumentResolver.js';
 
 const WALLET = '0xD5788b6694a05366FaaeEfEff35c7a5913D02Ff9';
 const ZEROX = '0x1111111111111111111111111111111111111111';
@@ -179,6 +180,22 @@ describe('refusals that do not need the network', () => {
   it('will not sign while it is not ready', async () => {
     const signer = new PrivySigner(cfg({ appSecret: '' }));
     await expect(signer.signTransaction(intent)).rejects.toThrow(/refusing to sign/);
+  });
+
+  it('treats an extra signer policy as a readiness failure', async () => {
+    const { pkcs8Base64 } = keypair();
+    const allowed = [ZEROX_ALLOWANCE_HOLDER.toLowerCase()];
+    const allowedHash = createHash('sha256').update(JSON.stringify(allowed)).digest('hex');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      id: 'wallet-id', address: WALLET, owner_id: 'owner-id',
+      additional_signers: [{ signer_id: 'runtime-id', override_policy_ids: ['expected-id', 'unexpected-id'] }],
+    }), { status: 200 })));
+    const signer = new PrivySigner(cfg({ authorizationKey: pkcs8Base64,
+      expectedSignerId: 'runtime-id', expectedPolicyIds: ['expected-id'], allowedTargets: allowed,
+      expectedAllowedTargetsHash: allowedHash, maxNativeValueWei: 0n }));
+    const readiness = await signer.isReady();
+    expect(readiness.ready).toBe(false);
+    expect(readiness.detail).toMatch(/EXTRA/);
   });
 });
 

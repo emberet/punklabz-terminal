@@ -5,6 +5,8 @@ import { custodyHoldings, getAccount, listAccounts } from './accounts.js';
 import { haltNetwork } from './riskEngine.js';
 import { appendAudit } from '../audit/auditLog.js';
 import { settleConfirmedOrder } from './settlement.js';
+import { rawHoldings } from './rawAssetLedger.js';
+import { activeUniverse, universeAssets } from '../robinhood/universe.js';
 
 // RECONCILIATION.
 //
@@ -94,19 +96,41 @@ export async function reconcileAccount(
   const believed = custodyHoldings(db, accountId);
   const drifts: ReconcilePass['drifts'] = [];
   const ts = Date.now();
+  const snapshot = activeUniverse(db);
+  const rawMode = !!snapshot && truth.balances.every((balance) => balance.rawQty !== undefined && balance.contractAddress);
+  const rawBelieved = rawMode ? rawHoldings(db, accountId) : new Map<string, bigint>();
+  const snapshotContracts = snapshot
+    ? new Set(universeAssets(db, snapshot.id).map((asset) => asset.contractAddress).concat('0x0000000000000000000000000000000000000000'))
+    : new Set<string>();
   const assets = new Set([...believed.keys(), ...truth.balances.map((b) => b.asset)]);
 
   for (const asset of assets) {
+    const venue = truth.balances.find((b) => b.asset === asset);
     const ledgerQty = believed.get(asset) ?? 0;
-    const venueQty = truth.balances.find((b) => b.asset === asset)?.qty ?? 0;
+    const venueQty = venue?.qty ?? 0;
     const drift = venueQty - ledgerQty;
-    const within = Math.abs(drift) <= DRIFT_TOLERANCE;
+    let within = Math.abs(drift) <= DRIFT_TOLERANCE;
+    if (rawMode && venue?.contractAddress && venue.rawQty !== undefined) {
+      const contract = venue.contractAddress.toLowerCase();
+      if (!snapshotContracts.has(contract)) within = false;
+      else within = (rawBelieved.get(contract) ?? 0n) === BigInt(venue.rawQty);
+    }
     if (!within) drifts.push({ asset, venueQty, ledgerQty, drift });
     db.prepare(
       `INSERT INTO balance_snapshots
-        (execution_account_id, ts, asset, venue_qty, ledger_qty, drift, within_tolerance, reconciliation_run_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(accountId, ts, asset, venueQty, ledgerQty, drift, within ? 1 : 0, runId);
+        (execution_account_id, ts, asset, venue_qty, ledger_qty, drift, within_tolerance, reconciliation_run_id,
+         contract_address, decimals, venue_raw, ledger_raw)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(accountId, ts, asset, venueQty, ledgerQty, drift, within ? 1 : 0, runId,
+      venue?.contractAddress?.toLowerCase() ?? null, venue?.decimals ?? null, venue?.rawQty ?? null,
+      venue?.contractAddress ? String(rawBelieved.get(venue.contractAddress.toLowerCase()) ?? 0n) : null);
+  }
+  if (rawMode) {
+    for (const [contract, raw] of rawBelieved) {
+      if (raw !== 0n && !snapshotContracts.has(contract)) {
+        drifts.push({ asset: `UNKNOWN:${contract}`, venueQty: 0, ledgerQty: Number(raw), drift: -Number(raw) });
+      }
+    }
   }
 
   const ok = drifts.length === 0;
@@ -123,8 +147,17 @@ export async function reconcileAccount(
         .run(ts, `${assets.size} asset(s) match venue`, runId);
       db.prepare(
         `UPDATE live_orders SET clean_fill=1, reconciliation_run_id=?
+         , reconciliation_status='clean'
          WHERE execution_account_id=? AND state='filled' AND clean_fill=0
-           AND forced_by IS NULL AND confirmed_at IS NOT NULL AND confirmed_at <= ?
+           AND forced_by IS NULL AND operator_test=0
+           AND confirmed_at IS NOT NULL AND confirmed_at <= ?
+           AND ABS(COALESCE(slippage_bps, 0)) <= 35
+           AND (registry_snapshot_hash IS NULL OR EXISTS (
+             SELECT 1 FROM trading_council_runs c
+             WHERE c.id=live_orders.council_run_id AND c.state='approved'
+               AND c.approvals>=3 AND c.risk_approved=1 AND c.manager_approved=1
+               AND c.model_score>=90
+           ))
            AND EXISTS (
              SELECT 1 FROM execution_transactions t
              WHERE t.order_id=live_orders.id AND t.purpose='swap' AND t.state='confirmed'

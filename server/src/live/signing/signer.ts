@@ -39,6 +39,8 @@ export interface TradingSigner {
   getAddress(): Promise<string | null>;
   isReady(): Promise<SignerReadiness>;
   signTransaction(req: SignRequest): Promise<string>;
+  /** Read current signer-side policy bodies so application and enclave rules can be hash-bound. */
+  getPolicyBodies?(policyIds: string[]): Promise<unknown[]>;
   guards?(): {
     ownerEnforced: boolean;
     ownerId: string | null;

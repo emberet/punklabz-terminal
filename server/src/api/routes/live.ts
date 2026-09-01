@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { recoverMessageAddress } from 'viem';
 import { CAPITAL_STAGES, ROBINHOOD_MAINNET_CHAIN_ID, type LiveStatusView } from '@punklabz/shared';
 import type { AppContext } from '../context.js';
 import { requireUser } from './auth.js';
@@ -17,6 +18,25 @@ import { reconcileAll } from '../../live/reconciler.js';
 import { mappedSymbols, resolveLiveInstrument } from '../../live/instrumentResolver.js';
 import { buildResearchExport } from '../../research/export.js';
 import { closeNow, currentWindow, openWindow } from '../../research/window.js';
+import { activeUniverse, activateUniverseSnapshot, createUniverseSnapshot, universeAssets } from '../../robinhood/universe.js';
+import { FullPairScanner } from '../../live/pairScanner.js';
+import { councilBudgetStatus, runTradingCouncil } from '../../live/tradingCouncil.js';
+import {
+  generateUniversePolicyBundle, recordAppliedUniversePolicy, verifyActiveUniversePolicy,
+} from '../../live/signing/universePolicy.js';
+import { enableFullMarketAutonomy, fullMarketReadiness } from '../../live/fullMarketController.js';
+import { config } from '../../config.js';
+
+const JURISDICTION_VERSION = 'rh-stock-token-v1';
+
+function jurisdictionMessage(wallet: string, timestamp: number): string {
+  return [
+    'PunkLabz Stock Token Jurisdiction Attestation v1',
+    `Wallet: ${wallet.toLowerCase()}`,
+    'I attest that I am not a U.S. person and that this execution account is not controlled from a restricted jurisdiction.',
+    `Timestamp: ${timestamp}`,
+  ].join('\n');
+}
 
 function requireAdmin(app: AppContext, request: any, reply: any) {
   const user = requireUser(app, request, reply);
@@ -55,6 +75,34 @@ function requireFreshAdmin(app: AppContext, request: any, reply: any) {
 }
 
 export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
+  const fullMarketView = () => {
+    const universe = activeUniverse(app.db);
+    const sweep = universe ? app.db.prepare(
+      `SELECT * FROM pair_sweep_runs WHERE snapshot_id=? ORDER BY id DESC LIMIT 1`,
+    ).get(universe.id) as any : null;
+    const budget = councilBudgetStatus(app.db);
+    const cfg = app.db.prepare(
+      `SELECT full_market_autonomy, autonomy_enabled, halted, authorized_capital_usdg,
+              expected_signer_policy_hash, observed_signer_policy_hash FROM live_config WHERE id=1`,
+    ).get() as any;
+    return {
+      enabled: config.fullMarketScannerEnabled
+        && cfg.full_market_autonomy === 1 && cfg.autonomy_enabled === 1 && cfg.halted === 0,
+      scannerEnabled: config.fullMarketScannerEnabled,
+      snapshotHash: universe?.contentHash ?? null,
+      assetCount: universe?.assetCount ?? 0,
+      directedPairCount: universe?.directedPairCount ?? 0,
+      eligiblePairs: sweep?.eligible_pairs ?? 0,
+      blockedPairs: sweep?.rejected_pairs ?? 0,
+      sweepState: sweep?.state ?? null,
+      sweepCompletedAt: sweep?.completed_at ?? null,
+      councilSpentUsd: budget.spentUsd,
+      councilCapUsd: budget.capUsd,
+      policyReady: !!cfg.expected_signer_policy_hash
+        && cfg.expected_signer_policy_hash === cfg.observed_signer_policy_hash,
+      authorizedCapitalUsdg: cfg.authorized_capital_usdg === null ? null : Number(cfg.authorized_capital_usdg),
+    };
+  };
   const detailedStatus = async (): Promise<LiveStatusView> => {
     const cfg = getLiveConfig(app.db);
     const stageCap = stageCapUsd(cfg.capitalStage);
@@ -80,11 +128,25 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
         wethMark = 0;
       }
     }
-    const walletNav = boundary.settlementBalance !== null && boundary.baseAssetBalance !== null
+    let walletNav = boundary.settlementBalance !== null && boundary.baseAssetBalance !== null
       ? boundary.settlementBalance + boundary.baseAssetBalance * wethMark
       : 0;
-    const authorizedCapital = Math.min(stageCap, walletNav);
-    const deployed = (boundary.baseAssetBalance ?? 0) * wethMark + book.deployedUsd;
+    let deployedHoldings = (boundary.baseAssetBalance ?? 0) * wethMark;
+    const navAdapter = app.adapters.get(ROBINHOOD_VENUE);
+    if (activeUniverse(app.db) && traderAccount.walletAddress && navAdapter?.getConservativeNav) {
+      const conservative = await navAdapter.getConservativeNav(traderAccount.walletAddress).catch(() => null);
+      if (conservative?.ok) {
+        walletNav = conservative.totalUsd;
+        deployedHoldings = conservative.holdings.reduce((sum, holding) => sum + holding.liquidationUsd, 0);
+      } else {
+        // Unpriced or unexitable holdings make authorized NAV zero, not optimistic.
+        walletNav = 0;
+        deployedHoldings = 0;
+      }
+    }
+    const captured = (app.db.prepare(`SELECT authorized_capital_usdg cap FROM live_config WHERE id=1`).get() as any)?.cap;
+    const authorizedCapital = Math.min(stageCap, captured === null ? stageCap : Number(captured), walletNav);
+    const deployed = deployedHoldings + book.deployedUsd;
     const reserve = (authorizedCapital * cfg.limits.minCashReservePct) / 100;
     const available = Math.max(0, Math.min(boundary.settlementBalance ?? 0, authorizedCapital - deployed - reserve));
 
@@ -144,6 +206,12 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
       authorizedCapitalUsd: authorizedCapital,
       promotion: promotionEvidence(app.db),
       experiment: app.canaryExperiment?.latest() ?? null,
+      fullMarket: {
+        ...fullMarketView(),
+        policyReady: activeUniverse(app.db)
+          ? (await verifyActiveUniversePolicy(app.db, app.signer)).ok
+          : false,
+      },
       ...boundary,
     };
   };
@@ -194,6 +262,7 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
         signals: 0, approved: 0, executed: delayed.fills, rejected: 0,
       },
       adapterStatus: venue?.status === 'online' ? 'online' : 'unavailable',
+      fullMarket: fullMarketView(),
       delayedAsOf: cutoff,
     };
   });
@@ -201,6 +270,149 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
   server.get('/api/admin/live/status', async (request, reply) => {
     if (!requireAdmin(app, request, reply)) return;
     return detailedStatus();
+  });
+
+  server.get('/api/live/universe', async () => {
+    const universe = activeUniverse(app.db);
+    return {
+      chainId: 4663,
+      symbols: universe ? universeAssets(app.db, universe.id).map((asset) => asset.symbol) : [],
+      assetCount: universe?.assetCount ?? 0,
+      directedPairCount: universe?.directedPairCount ?? 0,
+      health: fullMarketView().sweepState ?? 'not_configured',
+    };
+  });
+
+  server.get('/api/admin/live/universe', async (request, reply) => {
+    if (!requireAdmin(app, request, reply)) return;
+    const active = activeUniverse(app.db);
+    const snapshots = app.db.prepare(`SELECT * FROM rh_universe_snapshots ORDER BY id DESC LIMIT 20`).all();
+    return { active, assets: active ? universeAssets(app.db, active.id) : [], snapshots, status: fullMarketView() };
+  });
+
+  server.post('/api/admin/live/universe/snapshot', { config: { rateLimit: { max: 2, timeWindow: '5 minutes' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
+    if (!user) return;
+    try { return { ok: true, snapshot: createUniverseSnapshot(app.db, `admin:${user.id}`) }; }
+    catch (error) { return reply.code(409).send({ error: String(error instanceof Error ? error.message : error) }); }
+  });
+
+  server.post('/api/admin/live/universe/activate', { config: { rateLimit: { max: 2, timeWindow: '5 minutes' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
+    if (!user) return;
+    const body = z.object({ snapshotId: z.number().int().positive(), confirmation: z.literal('ACTIVATE VERIFIED UNIVERSE') }).parse(request.body);
+    try { return { ok: true, snapshot: activateUniverseSnapshot(app.db, body.snapshotId, `admin:${user.id}`) }; }
+    catch (error) { return reply.code(409).send({ error: String(error instanceof Error ? error.message : error) }); }
+  });
+
+  server.get('/api/admin/live/jurisdiction/message', async (request, reply) => {
+    const user = requireAdmin(app, request, reply);
+    if (!user) return;
+    if (!user.walletAddress) return reply.code(409).send({ error: 'operator account has no wallet' });
+    const timestamp = Date.now();
+    return { version: JURISDICTION_VERSION, timestamp, message: jurisdictionMessage(user.walletAddress, timestamp) };
+  });
+
+  server.post('/api/admin/live/jurisdiction/attest', { config: { rateLimit: { max: 2, timeWindow: '10 minutes' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
+    if (!user) return;
+    if (!user.walletAddress) return reply.code(409).send({ error: 'operator account has no wallet' });
+    const body = z.object({ timestamp: z.number().int(), signature: z.string().regex(/^0x[0-9a-fA-F]+$/) }).parse(request.body);
+    if (Math.abs(Date.now() - body.timestamp) > 5 * 60_000) return reply.code(400).send({ error: 'attestation timestamp is stale' });
+    const message = jurisdictionMessage(user.walletAddress, body.timestamp);
+    const recovered = await recoverMessageAddress({ message, signature: body.signature as `0x${string}` }).catch(() => null);
+    if (!recovered || recovered.toLowerCase() !== user.walletAddress.toLowerCase()) {
+      return reply.code(401).send({ error: 'attestation signature does not match the operator wallet' });
+    }
+    app.db.prepare(
+      `INSERT INTO operator_jurisdiction_attestations
+       (wallet_address, statement_version, not_us_person, not_restricted_jurisdiction,
+        signature, signed_message, actor, attested_at)
+       VALUES (?, ?, 1, 1, ?, ?, ?, ?)`,
+    ).run(user.walletAddress.toLowerCase(), JURISDICTION_VERSION, body.signature, message, `admin:${user.id}`, Date.now());
+    return { ok: true, version: JURISDICTION_VERSION, attestedAt: Date.now() };
+  });
+
+  server.post('/api/admin/live/universe/policy/generate', { config: { rateLimit: { max: 1, timeWindow: '10 minutes' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
+    if (!user) return;
+    const body = z.object({ confirmation: z.literal('GENERATE SNAPSHOT POLICY') }).parse(request.body);
+    try { return { ok: true, bundle: generateUniversePolicyBundle(app.db) }; }
+    catch (error) { return reply.code(409).send({ error: String(error instanceof Error ? error.message : error) }); }
+  });
+
+  server.post('/api/admin/live/universe/policy/confirm', { config: { rateLimit: { max: 2, timeWindow: '10 minutes' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
+    if (!user) return;
+    const body = z.object({ policyHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+      policyIds: z.array(z.string().min(4).max(200)).min(1).max(20) }).parse(request.body);
+    await app.signer.isReady();
+    const observed = app.signer.guards?.().policyIds ?? [];
+    try {
+      if (!app.signer.getPolicyBodies) throw new Error('configured signer cannot read back policy bodies');
+      const policyBodies = await app.signer.getPolicyBodies(body.policyIds);
+      recordAppliedUniversePolicy(app.db, body.policyHash, body.policyIds, observed, policyBodies, `admin:${user.id}`);
+      return { ok: true, observedPolicyIds: observed };
+    } catch (error) { return reply.code(409).send({ error: String(error instanceof Error ? error.message : error) }); }
+  });
+
+  server.post('/api/admin/live/sweep', { config: { rateLimit: { max: 1, timeWindow: '15 minutes' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
+    if (!user) return;
+    try { return { ok: true, sweep: await new FullPairScanner(app.db, {
+      ethUsd: app.executor.getMark('ETHUSDT') ?? 0,
+    }).run() }; }
+    catch (error) { return reply.code(409).send({ error: String(error instanceof Error ? error.message : error) }); }
+  });
+
+  server.get('/api/admin/live/sweeps', async (request, reply) => {
+    if (!requireAdmin(app, request, reply)) return;
+    return { sweeps: app.db.prepare(`SELECT * FROM pair_sweep_runs ORDER BY id DESC LIMIT 20`).all(),
+      councilBudget: councilBudgetStatus(app.db) };
+  });
+
+  server.get('/api/admin/live/candidates', async (request, reply) => {
+    if (!requireAdmin(app, request, reply)) return;
+    const sweepId = Number((request.query as any)?.sweepId);
+    if (!Number.isInteger(sweepId) || sweepId <= 0) return reply.code(400).send({ error: 'sweepId is required' });
+    return { candidates: app.db.prepare(
+      `SELECT id, sell_symbol, buy_symbol, source_value_micro, reference_edge_bps,
+              rejection_code, rejection_detail, rank_score, created_at
+       FROM pair_sweep_candidates WHERE sweep_id=? ORDER BY CAST(rank_score AS REAL) DESC LIMIT 500`,
+    ).all(sweepId) };
+  });
+
+  server.post('/api/admin/live/council/run', { config: { rateLimit: { max: 2, timeWindow: '1 hour' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
+    if (!user) return;
+    const body = z.object({ sweepId: z.number().int().positive() }).parse(request.body);
+    const sources = app.newsFeed.snapshot().map((item, index) => ({ id: `news:${item.source}:${item.ts}:${index}`,
+      title: item.title, url: item.link, source: item.source, ts: item.ts }));
+    return { ok: true, council: await runTradingCouncil(app.db, body.sweepId, sources) };
+  });
+
+  server.get('/api/admin/live/full-market/readiness', async (request, reply) => {
+    if (!requireAdmin(app, request, reply)) return;
+    return fullMarketReadiness(app.db, app.signer);
+  });
+
+  server.post('/api/admin/live/full-market/enable', { config: { rateLimit: { max: 1, timeWindow: '10 minutes' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
+    if (!user) return;
+    const body = z.object({ confirmation: z.literal('ENABLE AUTONOMOUS CANARY $5') }).parse(request.body);
+    const preflight = await runPreflight({ db: app.db, signer: app.signer, adapters: app.adapters,
+      feedStatus: app.feedStatus, ethUsd: app.executor.getMark('ETHUSDT') ?? null }, 'canary', `admin:${user.id}`);
+    if (!preflight.passed) return reply.code(409).send({ error: `preflight blocked: ${preflight.blockers.join('; ')}` });
+    try { return { ok: true, readiness: await enableFullMarketAutonomy(app.db, app.signer, body.confirmation, `admin:${user.id}`) }; }
+    catch (error) { return reply.code(409).send({ error: String(error instanceof Error ? error.message : error) }); }
+  });
+
+  server.post('/api/admin/live/full-market/cycle', { config: { rateLimit: { max: 1, timeWindow: '15 minutes' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
+    if (!user) return;
+    z.object({ confirmation: z.literal('RUN AUTONOMOUS CYCLE') }).parse(request.body);
+    if (!app.fullMarketAutonomy) return reply.code(503).send({ error: 'full-market scheduler is unavailable' });
+    return app.fullMarketAutonomy.cycle();
   });
 
   /**
@@ -409,6 +621,19 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
         forced: !!o.forced_by,
         operatorTest: o.operator_test === 1,
         experimentRunId: o.experiment_run_id,
+        pair: o.sell_symbol && o.buy_symbol ? `${o.sell_symbol}/${o.buy_symbol}` : null,
+        sellSymbol: o.sell_symbol,
+        buySymbol: o.buy_symbol,
+        sellContract: o.sell_contract,
+        buyContract: o.buy_contract,
+        sellDecimals: o.sell_decimals,
+        buyDecimals: o.buy_decimals,
+        sellAmountRaw: o.sell_amount_raw,
+        minimumReceiveRaw: o.min_buy_amount_raw,
+        quoteObservedAt: o.quote_observed_at,
+        registrySnapshotHash: o.registry_snapshot_hash,
+        councilRunId: o.council_run_id,
+        reconciliationStatus: o.reconciliation_status,
         ts: o.created_at,
       }));
     return { orders };
@@ -462,6 +687,7 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
       if (decoded.length === 0) return reply.code(400).send({ error: 'transaction contains no USDG or ETH transfer into the trader wallet' });
       const inserted = recordFunding(app.db, account.id, decoded.map((e) => ({
         asset: e.asset, qty: e.qty, txRef: e.txRef, logIndex: e.logIndex,
+        contractAddress: e.contractAddress, decimals: e.decimals, rawQty: e.rawQty,
         note: 'verified Robinhood Chain funding import',
       })), `admin:${user.id}`);
       return { ok: true, inserted, transfers: decoded.map((e) => ({ asset: e.asset, qty: e.qty, txRef: e.txRef })) };

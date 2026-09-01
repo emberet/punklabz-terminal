@@ -16,6 +16,7 @@ import { settleConfirmedOrder } from './settlement.js';
 import type { ExecutionMode } from '@punklabz/shared';
 import type { CanaryExperimentCoordinator } from './canaryExperiment.js';
 import { signerPolicyFingerprint } from './signing/signer.js';
+import { fullMarketReadiness } from './fullMarketController.js';
 
 // AUTONOMOUS SUPERVISOR.
 //
@@ -157,16 +158,27 @@ export class AutonomousSupervisor {
     }
 
     // 5. any failure means we come up halted, not trading
+    const fullMarketWasArmed = (this.db.prepare(`SELECT full_market_autonomy enabled FROM live_config WHERE id=1`)
+      .get() as { enabled: number } | undefined)?.enabled === 1;
+    let fullMarketBootReady = true;
+    if (fullMarketWasArmed) {
+      const readiness = await fullMarketReadiness(this.db, this.signer);
+      fullMarketBootReady = readiness.ready;
+      lines.push(pad('FULL MARKET', readiness.ready ? 'PASS' : `FAIL: ${readiness.blockers[0] ?? 'unknown'}`));
+    }
     const shouldHalt =
-      txUnresolved > 0 || recovery.unresolved > 0 || !reconciliationOk || (preflight !== null && !preflight.passed);
-    if (shouldHalt && !cfg.halted) {
+      txUnresolved > 0 || recovery.unresolved > 0 || !reconciliationOk
+      || (preflight !== null && !preflight.passed) || !fullMarketBootReady;
+    if (shouldHalt && (!cfg.halted || fullMarketWasArmed)) {
       const why = txUnresolved > 0
         ? `${txUnresolved} unresolved transaction(s) after restart`
         : recovery.unresolved > 0
         ? `${recovery.unresolved} unresolved order(s) after restart`
         : !reconciliationOk
           ? 'reconciliation mismatch on boot'
-          : `preflight failed: ${preflight?.blockers[0] ?? 'unknown'}`;
+          : !fullMarketBootReady
+            ? 'full-market boot readiness failed; fresh sweep and explicit arm required'
+            : `preflight failed: ${preflight?.blockers[0] ?? 'unknown'}`;
       haltNetwork(this.db, why, 'supervisor:boot');
     }
 

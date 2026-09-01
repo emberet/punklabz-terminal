@@ -59,6 +59,11 @@ import { awardXp } from './social/xp.js';
 import { checkStreakBadges, checkTradeBadges } from './social/badges.js';
 import { emitActivity } from './social/activity.js';
 import { processBillingReminders } from './billing/reminders.js';
+import { backfillLegacyRawLedger } from './live/rawAssetLedger.js';
+import { FullMarketAutonomy } from './live/fullMarketAutonomy.js';
+import { ROBINHOOD_VENUE } from './live/instruments.js';
+import { activeUniverse } from './robinhood/universe.js';
+import { pollUniverseReferences } from './robinhood/referencePoller.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -148,6 +153,12 @@ async function main() {
     db, engine, executor, candles, hub, holderSource, payoutQueue,
     feedStatus, prices, memeFeed, newsFeed, signer, adapters, xAdapter,
   };
+  const robinhoodAdapter = adapters.get(ROBINHOOD_VENUE);
+  if (robinhoodAdapter) {
+    app.fullMarketAutonomy = new FullMarketAutonomy(
+      db, robinhoodAdapter, signer, () => newsFeed.snapshot(), () => executor.getMark('ETHUSDT') ?? null,
+    );
+  }
   registerAuthRoutes(server, app);
   registerBillingRoutes(server, app);
   registerBotRoutes(server, app);
@@ -393,8 +404,10 @@ async function main() {
   // ── Robinhood Chain asset registry ──
   // Ingest the official asset list, then verify a slice of it against the
   // chain each pass. Verification round-robins by staleness so a full sweep of
-  // ~194 contracts spreads across passes instead of hammering the RPC.
+  // the current registry spreads across passes instead of hammering the RPC.
   seedCoreTokens(db);
+  const rawBackfilled = backfillLegacyRawLedger(db);
+  if (rawBackfilled) server.log.info(`raw asset ledger: backfilled ${rawBackfilled} attested legacy entr${rawBackfilled === 1 ? 'y' : 'ies'}`);
   const refreshRh = async () => {
     try {
       const r = await refreshRegistry(db, { verifyLimit: 20 });
@@ -410,6 +423,32 @@ async function main() {
   };
   void refreshRh();
   cron.schedule('*/20 * * * *', refreshRh);
+
+  // A cycle is inert unless both the deployment flag and the database arm
+  // ceremony are active. The scanner itself holds a persisted non-overlap
+  // lock and refuses insufficient 0x quota rather than sampling silently.
+  if (config.fullMarketScannerEnabled && app.fullMarketAutonomy) {
+    cron.schedule('* * * * *', async () => {
+      if (!activeUniverse(db)) return;
+      try {
+        const result = await pollUniverseReferences(db);
+        if (result.failed.length) server.log.warn(`reference poll: ${result.failed.length} asset(s) unavailable`);
+      } catch (error) {
+        server.log.error(`reference poll failed: ${String(error).slice(0, 160)}`);
+      }
+    });
+    cron.schedule('*/15 * * * *', async () => {
+      try {
+        const result = await app.fullMarketAutonomy!.cycle();
+        server.log.info(`full-market cycle: ${result.ran ? 'ran' : 'idle'} — ${result.reason}`);
+      } catch (error) {
+        server.log.error(`full-market cycle failed: ${String(error).slice(0, 200)}`);
+      }
+    });
+    server.log.info('full-market scanner scheduled every 15 minutes');
+  } else {
+    server.log.warn('full-market scanner disabled; autonomous any-to-any execution is inert');
+  }
 
   // ── close the research window on time ──
   // A time-boxed experiment that only ends when someone remembers is not

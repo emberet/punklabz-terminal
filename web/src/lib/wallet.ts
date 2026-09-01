@@ -282,6 +282,29 @@ export async function currentChainId(): Promise<number | null> {
   }
 }
 
+/** Sign a displayed operator statement with the already connected account. */
+export async function personalSign(message: string, expectedAddress?: string): Promise<string> {
+  const provider = getProvider();
+  if (!provider) throw new WalletError('operator wallet is not connected in this browser');
+  const address = await currentAccount();
+  if (!address) throw new WalletError('wallet returned no active account');
+  if (expectedAddress && address.toLowerCase() !== expectedAddress.toLowerCase()) {
+    throw new WalletError('active wallet does not match the operator account');
+  }
+  if (active?.kind === 'walletconnect' && !alignWalletConnectSession(provider as WalletConnectProvider)) {
+    throw new WalletError('WalletConnect session is missing personal_sign permission — reconnect the wallet');
+  }
+  try {
+    return (await provider.request({ method: 'personal_sign', params: [message, address] })) as string;
+  } catch (error) {
+    const detail = String((error as Error)?.message ?? error);
+    if ((error as { code?: number }).code === 4001 || /reject|denied/i.test(detail)) {
+      throw new WalletError('signature declined');
+    }
+    throw new WalletError(detail.slice(0, 160));
+  }
+}
+
 /**
  * Offer to add/switch to Robinhood Chain. Signing does not require being on
  * the right chain, so this never blocks the handshake — it is a convenience so

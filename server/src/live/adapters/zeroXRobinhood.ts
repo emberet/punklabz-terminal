@@ -2,7 +2,7 @@ import {
   createPublicClient, decodeFunctionData, encodeFunctionData, formatUnits, getAddress, http, parseUnits,
   type Address, type Hex,
 } from 'viem';
-import { ROBINHOOD_MAINNET_CHAIN_ID, type Instrument, type VenueHealth } from '@punklabz/shared';
+import { ROBINHOOD_MAINNET_CHAIN_ID, type Instrument, type SwapIntent, type VenueHealth } from '@punklabz/shared';
 import type {
   AdapterBalance, AdapterOrderResult, AdapterOrderStatus, AdapterPosition,
   AdapterQuote, ExecutionAdapter, FundingTransfer, ReconciliationResult,
@@ -14,6 +14,8 @@ import { probeEndpoints } from '../../chain/rhChain.js';
 import { ZEROX_ALLOWANCE_HOLDER, resolveLiveInstrument } from '../instrumentResolver.js';
 import { SETTLEMENT } from '../instruments.js';
 import { TransactionCoordinator } from '../transactionCoordinator.js';
+import { activeUniverse, runtimeAssetGate, universeAssets, type UniverseAsset } from '../../robinhood/universe.js';
+import { signerAmountPolicyGate } from '../signing/universePolicy.js';
 
 // THE VENUE ADAPTER. The last piece of code between an approved intent and a
 // transaction on a public chain.
@@ -341,6 +343,18 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
     }
   }
 
+  private async verifyUsdgPeg(ethUsd: number): Promise<string | null> {
+    const resolved = resolveLiveInstrument('ETHUSDT');
+    if (!resolved.instrument) return 'WETH/USDG instrument mapping is absent';
+    const quote = await this.getExecutableQuote(resolved.instrument);
+    if (!quote || Date.now() - quote.ts > 15_000) return 'fresh executable WETH/USDG peg quote is unavailable';
+    const deviation = Math.abs(quote.price / ethUsd - 1);
+    if (!Number.isFinite(deviation) || deviation > 0.01) {
+      return `executable USDG reference deviates ${(deviation * 100).toFixed(2)}% from the 1% peg band`;
+    }
+    return null;
+  }
+
   private async verifySettler(address: string): Promise<{ ok: boolean; detail: string }> {
     try {
       const alleged = getAddress(address) as Address;
@@ -527,6 +541,199 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
 
   private headers(): Record<string, string> {
     return { '0x-api-key': this.opts.apiKey, '0x-version': 'v2' };
+  }
+
+  /** Registry-bound any-to-any execution. The intent was built from DB state, then is checked again here. */
+  async placeSwapIntent(intent: SwapIntent, opts: {
+    orderId: number;
+    maxSlippageBps: number;
+    safetyBufferBps: number;
+    ethUsd: number;
+  }): Promise<AdapterOrderResult> {
+    if (!this.opts.apiKey || !this.opts.db || !this.coordinator) {
+      return { accepted: false, error: 'NOT_CONFIGURED: full-market adapter needs API key, database, and coordinator' };
+    }
+    if (intent.chainId !== ROBINHOOD_MAINNET_CHAIN_ID || this.chainId !== ROBINHOOD_MAINNET_CHAIN_ID) {
+      return { accepted: false, error: 'INTENT_REJECTED: chainId must be 4663' };
+    }
+    if (!/^sha256:[0-9a-f]{64}$/.test(intent.registrySnapshotHash)) {
+      return { accepted: false, error: 'INTENT_REJECTED: invalid registry snapshot hash' };
+    }
+    let sellAmount: bigint;
+    try { sellAmount = BigInt(intent.sell.amountRaw); }
+    catch { return { accepted: false, error: 'INTENT_REJECTED: sell amount is not an integer' }; }
+    if (sellAmount <= 0n || intent.sourceValueUsd <= 0 || intent.sourceValueUsd > 0.5) {
+      return { accepted: false, error: 'INTENT_REJECTED: amount is zero or exceeds $0.50' };
+    }
+    const snapshot = activeUniverse(this.opts.db);
+    if (!snapshot || snapshot.contentHash !== intent.registrySnapshotHash) {
+      return { accepted: false, error: 'INTENT_REJECTED: active universe changed after approval' };
+    }
+    const pinned = universeAssets(this.opts.db, snapshot.id);
+    const exact = (asset: { symbol: string; contractAddress: string; decimals: number }) => pinned.some((p) =>
+      p.symbol === asset.symbol && p.contractAddress === asset.contractAddress.toLowerCase() && p.decimals === asset.decimals);
+    if (!exact(intent.sell) || !exact(intent.buy) || intent.sell.contractAddress.toLowerCase() === intent.buy.contractAddress.toLowerCase()) {
+      return { accepted: false, error: 'INTENT_REJECTED: pair is not exact in the active universe snapshot' };
+    }
+    const signerAddress = await this.opts.signer.getAddress();
+    if (!signerAddress) return { accepted: false, error: 'signer has no address' };
+    const account = this.opts.db.prepare(`SELECT wallet_address FROM execution_accounts WHERE id=?`).get(intent.executionAccountId) as any;
+    if (!account?.wallet_address || account.wallet_address.toLowerCase() !== signerAddress.toLowerCase()) {
+      return { accepted: false, error: 'INTENT_REJECTED: execution account and signer are not the same wallet' };
+    }
+    const runtimeFailure = await this.runtimeSafety(signerAddress, opts.ethUsd);
+    if (runtimeFailure) return { accepted: false, error: `RUNTIME_PREFLIGHT_REJECTED: ${runtimeFailure}` };
+    const pegFailure = await this.verifyUsdgPeg(opts.ethUsd);
+    if (pegFailure) return { accepted: false, error: `RUNTIME_PREFLIGHT_REJECTED: ${pegFailure}` };
+    const sellAsset = pinned.find((asset) => asset.contractAddress === intent.sell.contractAddress.toLowerCase()) as UniverseAsset;
+    const buyAsset = pinned.find((asset) => asset.contractAddress === intent.buy.contractAddress.toLowerCase()) as UniverseAsset;
+    const assetGates = () => {
+      const now = Date.now();
+      return {
+        sell: runtimeAssetGate(this.opts.db!, snapshot.id, sellAsset, now),
+        buy: runtimeAssetGate(this.opts.db!, snapshot.id, buyAsset, now),
+      };
+    };
+    let finalGates = assetGates();
+    if (!finalGates.sell.eligible || !finalGates.buy.eligible) {
+      return { accepted: false, error: `ASSET_PREFLIGHT_REJECTED: ${[
+        ...finalGates.sell.reasons.map((reason) => `sell: ${reason}`),
+        ...finalGates.buy.reasons.map((reason) => `buy: ${reason}`),
+      ].join('; ')}` };
+    }
+    const signerAmountGate = signerAmountPolicyGate(this.opts.db, snapshot.id, sellAsset, sellAmount);
+    if (!signerAmountGate.eligible) {
+      return { accepted: false, error: `SIGNER_AMOUNT_POLICY_REJECTED: ${signerAmountGate.reason}` };
+    }
+    const sellAddress = getAddress(intent.sell.contractAddress) as Address;
+    const buyAddress = getAddress(intent.buy.contractAddress) as Address;
+    try {
+      const [sellCode, buyCode, sellDecimals, buyDecimals, balance] = await Promise.all([
+        this.client.getBytecode({ address: sellAddress }), this.client.getBytecode({ address: buyAddress }),
+        this.client.readContract({ address: sellAddress, abi: ERC20_ABI, functionName: 'decimals' }) as Promise<number>,
+        this.client.readContract({ address: buyAddress, abi: ERC20_ABI, functionName: 'decimals' }) as Promise<number>,
+        this.client.readContract({ address: sellAddress, abi: ERC20_ABI, functionName: 'balanceOf',
+          args: [getAddress(signerAddress) as Address] }) as Promise<bigint>,
+      ]);
+      if (!sellCode || sellCode === '0x' || !buyCode || buyCode === '0x') throw new Error('token bytecode is absent');
+      if (Number(sellDecimals) !== intent.sell.decimals || Number(buyDecimals) !== intent.buy.decimals) {
+        throw new Error('onchain decimals differ from the approved snapshot');
+      }
+      if (balance < sellAmount) throw new Error(`onchain source balance ${balance} is below ${sellAmount}`);
+    } catch (error) {
+      return { accepted: false, error: `TOKEN_PREFLIGHT_REJECTED: ${String(error).slice(0, 160)}` };
+    }
+
+    const spender = getAddress(ZEROX_ALLOWANCE_HOLDER) as Address;
+    let approvalGasWei = 0n;
+    try {
+      const allowance = await this.client.readContract({ address: sellAddress, abi: ERC20_ABI,
+        functionName: 'allowance', args: [getAddress(signerAddress) as Address, spender] }) as bigint;
+      // Exact allowance. A stale larger allowance is reduced; unlimited approval is never tolerated.
+      if (allowance !== sellAmount) {
+        const approve = async (amount: bigint, suffix: string): Promise<bigint> => {
+          const approveData = encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [spender, amount] });
+          const approval = await this.coordinator!.submit({
+            orderId: opts.orderId, accountId: intent.executionAccountId, purpose: 'allowance',
+            idempotencyKey: `${intent.idempotencyKey}:allowance:${suffix}`, chainId: 4663, walletAddress: signerAddress,
+            to: sellAddress, data: approveData, value: 0n, gas: 120_000n,
+          });
+          const receipt = await this.client.waitForTransactionReceipt({ hash: approval.hash as Hex, timeout: 90_000 });
+          if (receipt.status !== 'success') throw new Error(`${suffix} approval reverted in block ${receipt.blockNumber}`);
+          const gas = receipt.gasUsed * receipt.effectiveGasPrice;
+          this.opts.db!.prepare(
+            `UPDATE execution_transactions SET state='confirmed', block_number=?, block_hash=?, confirmations=1,
+             signed_payload=NULL, updated_at=? WHERE id=?`,
+          ).run(Number(receipt.blockNumber), receipt.blockHash, Date.now(), approval.transactionId);
+          this.opts.db!.prepare(
+            `INSERT OR IGNORE INTO execution_asset_ledger
+             (execution_account_id, order_id, transaction_id, asset, qty_delta, event_type, tx_ref,
+              log_index, ts, chain_id, contract_address, decimals, raw_delta, snapshot_hash)
+             VALUES (?, ?, ?, 'ETH', ?, 'gas', ?, -1, ?, 4663,
+              '0x0000000000000000000000000000000000000000', 18, ?, ?)`,
+          ).run(intent.executionAccountId, opts.orderId, approval.transactionId,
+            String(-Number(formatUnits(gas, 18))), approval.hash, Date.now(),
+            (-gas).toString(), intent.registrySnapshotHash);
+          return gas;
+        };
+        if (allowance > 0n) approvalGasWei += await approve(0n, 'reset');
+        approvalGasWei += await approve(sellAmount, 'exact');
+      }
+    } catch (error) {
+      return { accepted: false, error: `APPROVAL_FAILED: ${String(error).slice(0, 180)}` };
+    }
+    const afterApproval = await this.runtimeSafety(signerAddress, opts.ethUsd);
+    if (afterApproval) return { accepted: false, error: `POST_APPROVAL_PREFLIGHT_REJECTED: ${afterApproval}` };
+    const pegAfterApproval = await this.verifyUsdgPeg(opts.ethUsd);
+    if (pegAfterApproval) return { accepted: false, error: `POST_APPROVAL_PREFLIGHT_REJECTED: ${pegAfterApproval}` };
+    finalGates = assetGates();
+    if (!finalGates.sell.eligible || !finalGates.buy.eligible
+      || !finalGates.sell.referencePriceUsd || !finalGates.buy.referencePriceUsd) {
+      return { accepted: false, error: `POST_APPROVAL_PREFLIGHT_REJECTED: ${[
+        ...finalGates.sell.reasons.map((reason) => `sell: ${reason}`),
+        ...finalGates.buy.reasons.map((reason) => `buy: ${reason}`),
+      ].join('; ') || 'fresh reference prices are missing'}` };
+    }
+
+    const slippageBps = Math.min(35, Math.max(0, opts.maxSlippageBps));
+    let quote: ZeroXQuote;
+    try {
+      const url = new URL(`${ZEROX_API}/swap/allowance-holder/quote`);
+      url.searchParams.set('chainId', '4663');
+      url.searchParams.set('sellToken', intent.sell.contractAddress);
+      url.searchParams.set('buyToken', intent.buy.contractAddress);
+      url.searchParams.set('sellAmount', sellAmount.toString());
+      url.searchParams.set('taker', signerAddress);
+      url.searchParams.set('slippageBps', String(slippageBps));
+      const response = await this.fetch(url, { headers: this.headers(), signal: AbortSignal.timeout(15_000) });
+      const body = await response.json();
+      if (!response.ok || body?.liquidityAvailable === false) throw new Error(`0x firm quote refused (${response.status})`);
+      quote = { chainId: Number(body.chainId ?? 4663), sellToken: body.sellToken, buyToken: body.buyToken,
+        sellAmount: body.sellAmount, buyAmount: body.buyAmount, minBuyAmount: body.minBuyAmount,
+        to: body.transaction?.to, data: body.transaction?.data, value: body.transaction?.value ?? '0',
+        gas: body.transaction?.gas, allowanceTarget: body?.issues?.allowance?.spender,
+        gasPrice: body.transaction?.gasPrice, quotedAt: Date.now() };
+    } catch (error) {
+      return { accepted: false, error: `0x unreachable: ${String(error).slice(0, 160)}` };
+    }
+    const verified = verifyQuote({ quote, expect: { chainId: 4663, sellToken: intent.sell.contractAddress,
+      buyToken: intent.buy.contractAddress, sellAmount, maxSlippageBps: slippageBps, signerAddress } });
+    if (!verified.ok) return { accepted: false, error: `QUOTE_REJECTED: ${verified.failures.join('; ')}` };
+    const settler = verified.settlerAddress ? await this.verifySettler(verified.settlerAddress) : null;
+    if (!settler?.ok) return { accepted: false, error: `QUOTE_REJECTED: ${settler?.detail ?? 'Settler missing'}` };
+    if (!quote.gasPrice) return { accepted: false, error: 'FINAL_EDGE_REJECTED: firm quote has no gas price' };
+    const minBuy = BigInt(quote.minBuyAmount);
+    const sellQty = Number(formatUnits(sellAmount, intent.sell.decimals));
+    const currentSourceUsd = sellQty * finalGates.sell.referencePriceUsd;
+    if (!Number.isFinite(currentSourceUsd) || currentSourceUsd <= 0 || currentSourceUsd > 0.5 + 1e-9) {
+      return { accepted: false, error: `FINAL_EDGE_REJECTED: current source value $${currentSourceUsd.toFixed(6)} exceeds the $0.50 ceiling` };
+    }
+    const minBuyQty = Number(formatUnits(minBuy, intent.buy.decimals));
+    const guaranteedBuyUsd = minBuyQty * finalGates.buy.referencePriceUsd;
+    const gasWei = approvalGasWei + BigInt(quote.gas ?? '400000') * BigInt(quote.gasPrice);
+    const gasUsd = Number(formatUnits(gasWei, 18)) * opts.ethUsd;
+    const netBps = ((guaranteedBuyUsd - currentSourceUsd - gasUsd) / currentSourceUsd) * 10_000
+      - Math.max(10, opts.safetyBufferBps);
+    if (!Number.isFinite(netBps) || netBps <= 0) {
+      return { accepted: false, error: `FINAL_EDGE_REJECTED: ${netBps.toFixed(2)}bps after firm minimum, gas, slippage, and safety margin` };
+    }
+    this.opts.db.prepare(
+      `UPDATE live_orders SET min_buy_amount_raw=?, quote_observed_at=?, eth_reference_usd=?,
+       expected_price=?, updated_at=? WHERE id=?`,
+    ).run(minBuy.toString(), quote.quotedAt, String(opts.ethUsd), Number(formatUnits(sellAmount, intent.sell.decimals)) /
+      Number(formatUnits(BigInt(quote.buyAmount), intent.buy.decimals)), Date.now(), opts.orderId);
+    try {
+      const submitted = await this.coordinator.submit({
+        orderId: opts.orderId, accountId: intent.executionAccountId, purpose: 'swap',
+        idempotencyKey: `${intent.idempotencyKey}:swap`, chainId: 4663, walletAddress: signerAddress,
+        to: quote.to, data: quote.data, value: 0n, gas: BigInt(quote.gas ?? '400000'),
+        expiresAt: (quote.quotedAt ?? 0) + 15_000,
+      });
+      return { accepted: true, pending: true, txRef: submitted.hash,
+        venueOrderId: submitted.hash, transactionId: submitted.transactionId };
+    } catch (error) {
+      return { accepted: false, error: `SUBMIT_FAILED: ${String(error).slice(0, 200)}` };
+    }
   }
 
   /**
@@ -771,9 +978,14 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
         ).run(Number(receipt.blockNumber), receipt.blockHash, Date.now(), venueOrderId);
         return { state: 'failed', filledQty: 0, detail: `reverted in block ${receipt.blockNumber}` };
       }
-      const spec = resolveLiveInstrument('ETHUSDT').spec;
       const signerAddress = (await this.opts.signer.getAddress())?.toLowerCase();
-      if (!spec || !signerAddress) {
+      const directed = this.opts.db?.prepare(
+        `SELECT sell_symbol, buy_symbol, sell_contract, buy_contract, sell_decimals, buy_decimals,
+                sell_amount_raw, min_buy_amount_raw, eth_reference_usd, registry_snapshot_hash
+         FROM live_orders WHERE lower(tx_ref)=lower(?) OR lower(venue_order_id)=lower(?)`,
+      ).get(venueOrderId, venueOrderId) as any;
+      const spec = resolveLiveInstrument('ETHUSDT').spec;
+      if (!signerAddress || (!directed?.sell_contract && !spec)) {
         return { state: 'unknown', filledQty: 0, detail: 'cannot decode receipt without pinned assets and signer' };
       }
 
@@ -794,11 +1006,14 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
       // Transfer(address,address,uint256) — take what actually landed in our
       // wallet rather than trusting the quote's expected buyAmount.
       const TRANSFER = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
-      const assets = new Map([
-        [spec.quote.address.toLowerCase(), spec.quote],
-        [spec.base.address.toLowerCase(), spec.base],
-      ]);
-      const deltas: { asset: string; qtyDelta: number; logIndex: number }[] = [];
+      const tokens = directed?.sell_contract
+        ? [
+          { symbol: directed.sell_symbol, address: directed.sell_contract, decimals: directed.sell_decimals },
+          { symbol: directed.buy_symbol, address: directed.buy_contract, decimals: directed.buy_decimals },
+        ]
+        : [spec!.quote, spec!.base];
+      const assets = new Map(tokens.map((token) => [token.address.toLowerCase(), token]));
+      const deltas: NonNullable<AdapterOrderStatus['assetDeltas']> = [];
       for (const log of receipt.logs) {
         if (log.topics[0] !== TRANSFER || log.topics.length < 3) continue;
         const token = assets.get(log.address.toLowerCase());
@@ -809,33 +1024,60 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
         if (to === signerAddress) direction += 1;
         if (from === signerAddress) direction -= 1;
         if (direction === 0) continue;
+        const raw = BigInt(direction) * BigInt(log.data);
         deltas.push({
           asset: token.symbol,
-          qtyDelta: direction * Number(formatUnits(BigInt(log.data), token.decimals)),
+          qtyDelta: Number(formatUnits(raw, token.decimals)),
           logIndex: Number(log.logIndex ?? deltas.length),
+          contractAddress: token.address.toLowerCase(), decimals: token.decimals, rawDelta: raw.toString(),
         });
       }
 
       const gasCost = receipt.gasUsed * receipt.effectiveGasPrice;
-      deltas.push({ asset: 'ETH', qtyDelta: -Number(formatUnits(gasCost, 18)), logIndex: -1 });
-      const baseDelta = deltas.filter((d) => d.asset === spec.base.symbol).reduce((s, d) => s + d.qtyDelta, 0);
-      const quoteDelta = deltas.filter((d) => d.asset === spec.quote.symbol).reduce((s, d) => s + d.qtyDelta, 0);
-      if (Math.abs(baseDelta) <= 0 || Math.abs(quoteDelta) <= 0) {
+      deltas.push({ asset: 'ETH', qtyDelta: -Number(formatUnits(gasCost, 18)), logIndex: -1,
+        contractAddress: '0x0000000000000000000000000000000000000000', decimals: 18,
+        rawDelta: (-gasCost).toString() });
+      const sellToken = tokens[0]!;
+      const buyToken = tokens[1]!;
+      const sellDelta = deltas.filter((d) => d.contractAddress === sellToken.address.toLowerCase())
+        .reduce((sum, delta) => sum + BigInt(delta.rawDelta ?? '0'), 0n);
+      const buyDelta = deltas.filter((d) => d.contractAddress === buyToken.address.toLowerCase())
+        .reduce((sum, delta) => sum + BigInt(delta.rawDelta ?? '0'), 0n);
+      if (sellDelta >= 0n || buyDelta <= 0n) {
         this.opts.db?.prepare(
           `UPDATE execution_transactions SET state='unknown', error=?, confirmations=?, block_number=?,
            block_hash=?, updated_at=? WHERE signed_tx_hash=?`,
-        ).run('successful receipt has no complete USDG/WETH transfer pair', confirmations,
+        ).run('successful receipt has no complete pinned sell/buy transfer pair', confirmations,
           Number(receipt.blockNumber), receipt.blockHash, Date.now(), venueOrderId);
-        return { state: 'unknown', filledQty: 0, detail: 'successful receipt has no complete USDG/WETH transfer pair' };
+        return { state: 'unknown', filledQty: 0, detail: 'successful receipt has no complete pinned sell/buy transfer pair' };
       }
-      const executedPrice = Math.abs(quoteDelta / baseDelta);
+      if (directed?.sell_amount_raw && -sellDelta > BigInt(directed.sell_amount_raw)) {
+        this.opts.db?.prepare(
+          `UPDATE execution_transactions SET state='unknown', error=?, confirmations=?, block_number=?,
+           block_hash=?, updated_at=? WHERE signed_tx_hash=?`,
+        ).run('receipt spent more source tokens than the pinned intent', confirmations,
+          Number(receipt.blockNumber), receipt.blockHash, Date.now(), venueOrderId);
+        return { state: 'unknown', filledQty: 0, detail: 'receipt spent more source tokens than the pinned intent' };
+      }
+      if (directed?.min_buy_amount_raw && buyDelta < BigInt(directed.min_buy_amount_raw)) {
+        this.opts.db?.prepare(
+          `UPDATE execution_transactions SET state='unknown', error=?, confirmations=?, block_number=?,
+           block_hash=?, updated_at=? WHERE signed_tx_hash=?`,
+        ).run('receipt delivered less than the calldata-enforced minimum', confirmations,
+          Number(receipt.blockNumber), receipt.blockHash, Date.now(), venueOrderId);
+        return { state: 'unknown', filledQty: 0, detail: 'receipt delivered less than the calldata-enforced minimum' };
+      }
+      const sellQty = Number(formatUnits(-sellDelta, sellToken.decimals));
+      const buyQty = Number(formatUnits(buyDelta, buyToken.decimals));
+      const executedPrice = sellQty / buyQty;
+      const ethUsd = Number(directed?.eth_reference_usd ?? executedPrice);
       this.opts.db?.prepare(
         `UPDATE execution_transactions SET state='confirmed', confirmations=?, block_number=?, block_hash=?,
          signed_payload=NULL, updated_at=? WHERE signed_tx_hash=?`,
       ).run(confirmations, Number(receipt.blockNumber), receipt.blockHash, Date.now(), venueOrderId);
       return {
         state: 'filled',
-        filledQty: Math.abs(baseDelta),
+        filledQty: buyQty,
         executedPrice,
         feeUsd: 0,
         txRef: venueOrderId,
@@ -843,6 +1085,7 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
         blockNumber: Number(receipt.blockNumber),
         blockHash: receipt.blockHash,
         gasUsedWei: gasCost.toString(),
+        gasUsd: Number(formatUnits(gasCost, 18)) * ethUsd,
         assetDeltas: deltas,
         detail: `final in block ${receipt.blockNumber} with ${confirmations} confirmations, gas ${receipt.gasUsed}`,
       };
@@ -872,14 +1115,19 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
     if (receipt.status !== 'success') throw new Error('funding transaction reverted');
     const wallet = walletAddress.toLowerCase();
     const spec = resolveLiveInstrument('ETHUSDT').spec;
-    if (!spec) throw new Error('core token mapping unavailable');
-    const assets = new Map([
-      [spec.quote.address.toLowerCase(), spec.quote],
-      [spec.base.address.toLowerCase(), spec.base],
-    ]);
+    const snapshotTokens = this.opts.db?.prepare(
+      `SELECT a.symbol, a.contract_address address, a.decimals
+       FROM rh_universe_assets a JOIN rh_universe_snapshots s ON s.id=a.snapshot_id
+       WHERE s.state='active'`,
+    ).all() as { symbol: string; address: string; decimals: number }[] | undefined;
+    const knownTokens = snapshotTokens?.length ? snapshotTokens : spec ? [spec.quote, spec.base] : [];
+    if (!knownTokens.length) throw new Error('no pinned token registry available');
+    const assets = new Map(knownTokens.map((token) => [token.address.toLowerCase(), token]));
     const transfers: FundingTransfer[] = [];
     if (tx.to?.toLowerCase() === wallet && tx.value > 0n) {
-      transfers.push({ asset: 'ETH', qty: Number(formatUnits(tx.value, 18)), txRef: txHash, logIndex: -1 });
+      transfers.push({ asset: 'ETH', qty: Number(formatUnits(tx.value, 18)), txRef: txHash, logIndex: -1,
+        contractAddress: '0x0000000000000000000000000000000000000000', decimals: 18,
+        rawQty: tx.value.toString() });
     }
     const TRANSFER = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
     for (const log of receipt.logs) {
@@ -893,6 +1141,8 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
         qty: Number(formatUnits(BigInt(log.data), token.decimals)),
         txRef: txHash,
         logIndex: Number(log.logIndex ?? transfers.length),
+        contractAddress: token.address.toLowerCase(), decimals: token.decimals,
+        rawQty: BigInt(log.data).toString(),
       });
     }
 
@@ -934,20 +1184,105 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
   async getBalances(walletAddress?: string): Promise<AdapterBalance[]> {
     const address = walletAddress ?? await this.opts.signer.getAddress();
     if (!address) return [];
-    const spec = resolveLiveInstrument('ETHUSDT').spec;
     const out: AdapterBalance[] = [];
     const wei = await this.client.getBalance({ address: getAddress(address) as Address });
-    out.push({ asset: 'ETH', qty: Number(formatUnits(wei, 18)) });
-    if (spec) {
-      for (const tok of [spec.quote, spec.base]) {
-        const raw = (await this.client.readContract({
-          address: getAddress(tok.address) as Address, abi: ERC20_ABI,
-          functionName: 'balanceOf', args: [getAddress(address) as Address],
-        })) as bigint;
-        out.push({ asset: tok.symbol, qty: Number(formatUnits(raw, tok.decimals)) });
+    out.push({ asset: 'ETH', qty: Number(formatUnits(wei, 18)), rawQty: wei.toString(), decimals: 18,
+      contractAddress: '0x0000000000000000000000000000000000000000' });
+    const snapshotTokens = this.opts.db?.prepare(
+      `SELECT a.symbol, a.contract_address address, a.decimals
+       FROM rh_universe_assets a JOIN rh_universe_snapshots s ON s.id=a.snapshot_id
+       WHERE s.state='active' ORDER BY a.contract_address`,
+    ).all() as { symbol: string; address: string; decimals: number }[] | undefined;
+    const spec = resolveLiveInstrument('ETHUSDT').spec;
+    const tokens = snapshotTokens?.length ? snapshotTokens : spec ? [spec.quote, spec.base] : [];
+    if (tokens.length) {
+      const results = await this.client.multicall({
+        allowFailure: true,
+        contracts: tokens.map((token) => ({ address: getAddress(token.address) as Address,
+          abi: ERC20_ABI, functionName: 'balanceOf' as const,
+          args: [getAddress(address) as Address] })) as any,
+      });
+      for (let i = 0; i < tokens.length; i++) {
+        const token = tokens[i]!;
+        const result = results[i] as any;
+        if (!result || result.status !== 'success') throw new Error(`multicall could not read ${token.symbol} balance`);
+        const raw = BigInt(result.result);
+        out.push({ asset: token.symbol, qty: Number(formatUnits(raw, token.decimals)), rawQty: raw.toString(),
+          decimals: token.decimals, contractAddress: token.address.toLowerCase() });
+      }
+      if (snapshotTokens?.length) {
+        const indexerBase = (process.env.ROBINHOOD_TOKEN_INDEXER_URL
+          ?? 'https://robinhoodchain.blockscout.com/api/v2').replace(/\/$/, '');
+        const response = await this.fetch(
+          `${indexerBase}/addresses/${encodeURIComponent(address)}/token-balances`,
+          { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(12_000) },
+        );
+        if (!response.ok) throw new Error(`token-balance indexer unavailable (${response.status})`);
+        const indexed = await response.json();
+        if (!Array.isArray(indexed)) throw new Error('token-balance indexer returned an invalid response');
+        const allowed = new Set(tokens.map((token) => token.address.toLowerCase()));
+        const unknown = indexed.filter((item: any) => item?.token?.type === 'ERC-20'
+          && BigInt(String(item?.value ?? '0')) !== 0n
+          && !allowed.has(String(item?.token?.address_hash ?? '').toLowerCase()));
+        if (unknown.length) {
+          const contracts = unknown.slice(0, 5).map((item: any) => item?.token?.address_hash).join(', ');
+          throw new Error(`wallet contains ${unknown.length} unknown nonzero ERC-20 asset(s): ${contracts}`);
+        }
       }
     }
     return out;
+  }
+
+  /** NAV uses firm, taker-bound minimum output to USDG. ETH remains gas, never capital. */
+  async getConservativeNav(walletAddress: string): Promise<import('../adapters.js').ConservativeNavResult> {
+    const balances = await this.getBalances(walletAddress);
+    const usdg = balances.find((balance) => balance.asset === 'USDG');
+    if (!usdg) return { ok: false, totalUsd: 0, settlementUsd: 0, holdings: [], blockers: ['USDG balance unreadable'] };
+    const holdings: { asset: string; qty: number; liquidationUsd: number }[] = [];
+    const blockers: string[] = [];
+    let total = usdg.qty;
+    for (const balance of balances) {
+      if (balance.asset === 'ETH' || balance.asset === 'USDG' || balance.rawQty === '0') continue;
+      if (!balance.contractAddress || balance.decimals === undefined || !balance.rawQty) {
+        blockers.push(`${balance.asset} lacks raw contract metadata`);
+        continue;
+      }
+      try {
+        const url = new URL(`${ZEROX_API}/swap/allowance-holder/quote`);
+        url.searchParams.set('chainId', '4663');
+        url.searchParams.set('sellToken', balance.contractAddress);
+        url.searchParams.set('buyToken', '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168');
+        url.searchParams.set('sellAmount', balance.rawQty);
+        url.searchParams.set('taker', walletAddress);
+        url.searchParams.set('slippageBps', '35');
+        const response = await this.fetch(url, { headers: this.headers(), signal: AbortSignal.timeout(12_000) });
+        const body = await response.json();
+        if (!response.ok || body?.liquidityAvailable === false) throw new Error(`0x ${response.status}`);
+        const quote: ZeroXQuote = {
+          chainId: Number(body?.chainId ?? 4663), sellToken: body?.sellToken,
+          buyToken: body?.buyToken, sellAmount: body?.sellAmount, buyAmount: body?.buyAmount,
+          minBuyAmount: body?.minBuyAmount, to: body?.transaction?.to, data: body?.transaction?.data,
+          value: body?.transaction?.value ?? '0', gas: body?.transaction?.gas,
+          gasPrice: body?.transaction?.gasPrice, allowanceTarget: body?.issues?.allowance?.spender,
+          quotedAt: Date.now(),
+        };
+        const verified = verifyQuote({ quote, expect: { chainId: 4663,
+          sellToken: balance.contractAddress,
+          buyToken: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
+          sellAmount: BigInt(balance.rawQty), maxSlippageBps: 35, signerAddress: walletAddress } });
+        if (!verified.ok) throw new Error(`invalid liquidation quote: ${verified.failures.join('; ')}`);
+        const settler = verified.settlerAddress ? await this.verifySettler(verified.settlerAddress) : null;
+        if (!settler?.ok) throw new Error(settler?.detail ?? 'liquidation quote has no verified Settler');
+        const liquidationUsd = Number(formatUnits(BigInt(quote.minBuyAmount), 6));
+        if (!Number.isFinite(liquidationUsd) || liquidationUsd <= 0) throw new Error('non-positive minimum');
+        holdings.push({ asset: balance.asset, qty: balance.qty, liquidationUsd });
+        total += liquidationUsd;
+      } catch (error) {
+        blockers.push(`${balance.asset} has no executable USDG exit: ${String(error).slice(0, 100)}`);
+      }
+    }
+    return { ok: blockers.length === 0, totalUsd: blockers.length ? 0 : total,
+      settlementUsd: usdg.qty, holdings, blockers };
   }
 
   async getPositions(): Promise<AdapterPosition[]> {

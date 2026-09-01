@@ -1,4 +1,4 @@
-import type { Instrument, VenueHealth } from '@punklabz/shared';
+import type { Instrument, SwapIntent, VenueHealth } from '@punklabz/shared';
 import type { TradingSigner } from './signing/signer.js';
 import type { DB } from '../db/db.js';
 import { ROBINHOOD_VENUE } from './instruments.js';
@@ -33,6 +33,9 @@ export interface AdapterOrderResult {
 export interface AdapterBalance {
   asset: string;
   qty: number;
+  contractAddress?: string;
+  decimals?: number;
+  rawQty?: string;
 }
 
 export interface AdapterPosition {
@@ -52,7 +55,11 @@ export interface AdapterOrderStatus {
   blockNumber?: number;
   blockHash?: string;
   gasUsedWei?: string;
-  assetDeltas?: { asset: string; qtyDelta: number; logIndex: number }[];
+  gasUsd?: number;
+  assetDeltas?: {
+    asset: string; qtyDelta: number; logIndex: number;
+    contractAddress?: string; decimals?: number; rawDelta?: string;
+  }[];
 }
 
 export interface FundingTransfer {
@@ -60,6 +67,9 @@ export interface FundingTransfer {
   qty: number;
   txRef: string;
   logIndex: number;
+  contractAddress?: string;
+  decimals?: number;
+  rawQty?: string;
 }
 
 export interface ReconciliationResult {
@@ -67,6 +77,14 @@ export interface ReconciliationResult {
   balances: AdapterBalance[];
   positions: AdapterPosition[];
   detail: string;
+}
+
+export interface ConservativeNavResult {
+  ok: boolean;
+  totalUsd: number;
+  settlementUsd: number;
+  holdings: { asset: string; qty: number; liquidationUsd: number }[];
+  blockers: string[];
 }
 
 export interface ExecutionAdapter {
@@ -110,6 +128,13 @@ export interface ExecutionAdapter {
   getFundingTransfers?(txHash: string, walletAddress: string): Promise<FundingTransfer[]>;
   verifyCoreAssets?(): Promise<{ ok: boolean; failures: string[] }>;
   estimateGasReserveEth?(transactionCount: number): Promise<number>;
+  placeSwapIntent?(intent: SwapIntent, opts: {
+    orderId: number;
+    maxSlippageBps: number;
+    safetyBufferBps: number;
+    ethUsd: number;
+  }): Promise<AdapterOrderResult>;
+  getConservativeNav?(walletAddress: string): Promise<ConservativeNavResult>;
 }
 
 export class NotConfiguredAdapter implements ExecutionAdapter {

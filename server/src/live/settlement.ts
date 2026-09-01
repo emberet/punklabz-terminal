@@ -34,10 +34,10 @@ export function settleConfirmedOrder(db: DB, orderId: number, status: AdapterOrd
      FROM execution_asset_ledger WHERE order_id=? AND asset='ETH' AND event_type='gas'`,
   ).get(orderId) as { qty: number };
   const gasEth = swapGasEth + Math.max(0, -priorGas.qty);
-  const gasMicro = toMicro(gasEth * status.executedPrice);
+  const gasMicro = toMicro(status.gasUsd ?? gasEth * status.executedPrice);
 
   let realizedMicro = 0;
-  if (order.side === 'sell') {
+  if (order.side === 'sell' && !order.registry_snapshot_hash) {
     const history = db.prepare(
       `SELECT side, qty, executed_price FROM live_ledger
        WHERE execution_account_id = ? AND bot_id IS ? AND instrument_id = ? ORDER BY id`,
@@ -64,13 +64,16 @@ export function settleConfirmedOrder(db: DB, orderId: number, status: AdapterOrd
   db.transaction(() => {
     const insertAsset = db.prepare(
       `INSERT OR IGNORE INTO execution_asset_ledger
-        (execution_account_id, order_id, transaction_id, asset, qty_delta, event_type, tx_ref, log_index, ts)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (execution_account_id, order_id, transaction_id, asset, qty_delta, event_type, tx_ref, log_index, ts,
+         chain_id, contract_address, decimals, raw_delta, snapshot_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const delta of status.assetDeltas!) {
       insertAsset.run(order.execution_account_id, orderId, tx.id, delta.asset.toUpperCase(),
         String(delta.qtyDelta), delta.asset.toUpperCase() === 'ETH' ? 'gas' : 'fill',
-        status.txRef, delta.logIndex, now);
+        status.txRef, delta.logIndex, now,
+        delta.contractAddress ? 4663 : null, delta.contractAddress?.toLowerCase() ?? null,
+        delta.decimals ?? null, delta.rawDelta ?? null, order.registry_snapshot_hash ?? null);
     }
     db.prepare(
       `INSERT INTO live_ledger
@@ -83,7 +86,7 @@ export function settleConfirmedOrder(db: DB, orderId: number, status: AdapterOrd
       realizedMicro, order.mode, status.txRef, now);
     db.prepare(
       `UPDATE live_orders SET state='filled', filled_qty=?, executed_price=?, slippage_bps=?,
-       gas_micro=?, confirmed_at=?, clean_fill=0, updated_at=? WHERE id=?`,
+       gas_micro=?, confirmed_at=?, clean_fill=0, reconciliation_status='receipt_confirmed', updated_at=? WHERE id=?`,
     ).run(status.filledQty, status.executedPrice, slippageBps, gasMicro, now, now, orderId);
   })();
   return true;

@@ -77,6 +77,7 @@ export function setLiveMode(
          ELSE ?
        END,
        autonomy_enabled = CASE WHEN ? = 'live' THEN 1 ELSE 0 END,
+       full_market_autonomy = 0,
        shadow_armed_at = CASE WHEN ? = 'simulation' THEN NULL ELSE shadow_armed_at END,
        updated_at = ? WHERE id = 1`,
   ).run(mode, mode, mode, mode, mode, mode, Date.now());
@@ -87,7 +88,7 @@ export function haltNetwork(db: DB, reason: string, actor: string): void {
   getLiveConfig(db); // ensure the config row exists
   db.prepare(
     `UPDATE live_config SET halted = 1, halt_reason = ?,
-       autonomy_enabled = 0,
+       autonomy_enabled = 0, full_market_autonomy = 0,
        shadow_armed_at = CASE WHEN mode='shadow' THEN NULL ELSE shadow_armed_at END,
        updated_at = ? WHERE id = 1`,
   ).run(reason, Date.now());

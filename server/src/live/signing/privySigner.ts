@@ -1,4 +1,4 @@
-import { createSign, createPrivateKey } from 'node:crypto';
+import { createHash, createSign, createPrivateKey } from 'node:crypto';
 import fs from 'node:fs';
 import { getAddress, isAddress } from 'viem';
 import { ROBINHOOD_MAINNET_CHAIN_ID, USDG, WETH_ROBINHOOD } from '@punklabz/shared';
@@ -49,6 +49,8 @@ export interface PrivyConfig {
   expectedPolicyIds?: string[];
   /** additional signer/key-quorum used by the runtime; owner stays offline */
   expectedSignerId?: string;
+  /** sha256 of the complete sorted application target allowlist for a registry snapshot */
+  expectedAllowedTargetsHash?: string;
 }
 
 /**
@@ -126,8 +128,21 @@ export class PrivySigner implements TradingSigner {
   private policyIds: string[] = [];
   private signerId: string | null = null;
   private readonly allowed: Set<string>;
+  private policyBodyCache: { key: string; at: number; bodies: unknown[] } | null = null;
+
+  private policyIdsMatchExactly(): boolean {
+    const expected = [...new Set(this.cfg.expectedPolicyIds ?? [])].sort();
+    const observed = [...new Set(this.policyIds)].sort();
+    return expected.length > 0 && JSON.stringify(expected) === JSON.stringify(observed);
+  }
 
   private appGuarded(): boolean {
+    if (this.cfg.expectedAllowedTargetsHash) {
+      const observed = createHash('sha256').update(JSON.stringify([...this.allowed].sort())).digest('hex');
+      return this.cfg.maxNativeValueWei === 0n
+        && this.allowed.has(ZEROX_ALLOWANCE_HOLDER.toLowerCase())
+        && observed === this.cfg.expectedAllowedTargetsHash.replace(/^sha256:/, '');
+    }
     const required = new Set([
       USDG.address.toLowerCase(), WETH_ROBINHOOD.address.toLowerCase(), ZEROX_ALLOWANCE_HOLDER.toLowerCase(),
     ]);
@@ -138,8 +153,7 @@ export class PrivySigner implements TradingSigner {
 
   /** Read after isReady(); drives the blocking preflight check. */
   guards(): SignerGuards {
-    const expected = this.cfg.expectedPolicyIds ?? [];
-    const policyMatch = expected.length > 0 && expected.every((id) => this.policyIds.includes(id));
+    const policyMatch = this.policyIdsMatchExactly();
     return {
       ownerEnforced: !!this.ownerId,
       ownerId: this.ownerId,
@@ -231,6 +245,18 @@ export class PrivySigner implements TradingSigner {
     return ready.address;
   }
 
+  async getPolicyBodies(policyIds: string[]): Promise<unknown[]> {
+    const ids = policyIds.map((id) => id.trim());
+    if (!ids.length || ids.some((id) => !id)) throw new Error('policy IDs are required for read-back');
+    const key = JSON.stringify(ids);
+    if (this.policyBodyCache?.key === key && Date.now() - this.policyBodyCache.at < 30_000) {
+      return this.policyBodyCache.bodies;
+    }
+    const bodies = await Promise.all(ids.map((id) => this.call<unknown>('GET', `/policies/${encodeURIComponent(id)}`)));
+    this.policyBodyCache = { key, at: Date.now(), bodies };
+    return bodies;
+  }
+
   /**
    * Proves the wallet id actually maps to the address we were told, before
    * anything is ever signed. A wallet id copied from a dashboard URL is a
@@ -307,9 +333,7 @@ export class PrivySigner implements TradingSigner {
         ? `${this.policyIds.length} policy(ies) attached to runtime authorization`
         : 'NO POLICY — nothing caps a transaction at the enclave');
 
-      const expectedPolicies = this.cfg.expectedPolicyIds ?? [];
-      const policyMatch = expectedPolicies.length > 0 &&
-        expectedPolicies.every((id) => this.policyIds.includes(id));
+      const policyMatch = this.policyIdsMatchExactly();
       const appGuarded = this.appGuarded();
       const signerMatch = !expectedSigner || this.signerId === expectedSigner;
       const fullyGuarded = !!this.ownerId && !!this.cfg.authorizationKey && signerMatch && policyMatch && appGuarded;
@@ -318,7 +342,7 @@ export class PrivySigner implements TradingSigner {
         address: this.verifiedAddress,
         detail: `privy wallet ${this.cfg.walletId} verified as ${this.verifiedAddress}; ${guards.join('; ')}; ` +
           (!this.cfg.authorizationKey ? 'AUTHORIZATION KEY MISSING; ' : '') +
-          (policyMatch ? 'approved policy ids match; ' : 'APPROVED POLICY IDS MISSING OR MISMATCHED; ') +
+          (policyMatch ? 'approved policy ids match exactly; ' : 'APPROVED POLICY IDS MISSING, EXTRA, OR MISMATCHED; ') +
           (appGuarded ? 'app target/native-value guard exact' : 'APP TARGET ALLOWLIST OR NATIVE-VALUE GUARD IS NOT EXACT'),
       };
     } catch (e) {
@@ -422,16 +446,28 @@ export function privyConfigFromEnv(): PrivyConfig {
     ? fs.readFileSync(appSecretFile, 'utf8').trim()
     : (process.env.NODE_ENV !== 'production' ? process.env.PRIVY_APP_SECRET ?? '' : '');
   if (appSecretFile && !appSecret) throw new Error('PRIVY_APP_SECRET_FILE is empty');
+  const targetsFile = process.env.SIGNER_ALLOWED_TARGETS_FILE;
+  if (process.env.NODE_ENV === 'production' && process.env.SIGNER_ALLOWED_TARGETS && targetsFile) {
+    throw new Error('use SIGNER_ALLOWED_TARGETS_FILE alone in production');
+  }
+  let allowedTargets: string[];
+  if (targetsFile) {
+    const raw = fs.readFileSync(targetsFile, 'utf8').trim();
+    try { allowedTargets = JSON.parse(raw); }
+    catch { allowedTargets = raw.split(/[\r\n,]+/).map((s) => s.trim()).filter(Boolean); }
+  } else {
+    allowedTargets = (process.env.SIGNER_ALLOWED_TARGETS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  }
   return {
     appId: process.env.PRIVY_APP_ID ?? '',
     appSecret,
     walletId: process.env.PRIVY_WALLET_ID ?? '',
     expectedAddress: process.env.TRADING_WALLET_ADDRESS ?? '',
     authorizationKey,
-    allowedTargets: (process.env.SIGNER_ALLOWED_TARGETS ?? '')
-      .split(',').map((s) => s.trim()).filter(Boolean),
+    allowedTargets,
     maxNativeValueWei: BigInt(Math.round(Number(maxEth) * 1e18)),
     expectedPolicyIds: (process.env.PRIVY_POLICY_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
     expectedSignerId: process.env.PRIVY_SIGNER_ID || undefined,
+    expectedAllowedTargetsHash: process.env.SIGNER_ALLOWED_TARGETS_HASH || undefined,
   };
 }

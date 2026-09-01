@@ -95,6 +95,31 @@ export interface OrderIntent {
   forcedBy?: string;
 }
 
+/** A registry-bound arbitrary ERC-20 rebalance. LLM output cannot construct this type. */
+export interface SwapIntentAsset {
+  symbol: string;
+  contractAddress: string;
+  decimals: number;
+  amountRaw: string;
+  referencePriceUsd: number;
+}
+
+export interface SwapIntent {
+  intentId: string;
+  idempotencyKey: string;
+  botId: number;
+  executionAccountId: number;
+  chainId: number;
+  registrySnapshotHash: string;
+  councilRunId: number;
+  sell: SwapIntentAsset;
+  buy: Omit<SwapIntentAsset, 'amountRaw'>;
+  sourceValueUsd: number;
+  modelScore: number;
+  signalEvidence: Record<string, unknown>;
+  createdAt: number;
+}
+
 export interface RiskCheck {
   name: string;
   pass: boolean;
@@ -184,6 +209,21 @@ export interface LiveStatusView {
   } | null;
   lastReconciliation?: { at: number; clean: boolean } | null;
   preflightStatus?: { at: number; mode: string; passed: boolean } | null;
+  fullMarket?: {
+    enabled: boolean;
+    scannerEnabled: boolean;
+    snapshotHash: string | null;
+    assetCount: number;
+    directedPairCount: number;
+    eligiblePairs: number;
+    blockedPairs: number;
+    sweepState: string | null;
+    sweepCompletedAt: number | null;
+    councilSpentUsd: number;
+    councilCapUsd: number;
+    policyReady: boolean;
+    authorizedCapitalUsdg: number | null;
+  };
 }
 
 export interface CompositeConfidence {
