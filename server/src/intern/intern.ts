@@ -397,11 +397,9 @@ export async function runInternCycle(
     appendAudit(db, 'intern', 'intern_publish_attempt', { postId: rowId, sourceCount: posts.length });
   })();
 
-  let publishedId: string;
+  let publishResult: Awaited<ReturnType<XAdapter['publish']>>;
   try {
-    const result = await x.publish(verdict.normalized);
-    publishedId = result.publishedId;
-    reconcileQuota(db, { reads: result.quota.readsRemaining, posts: result.quota.postsRemaining });
+    publishResult = await x.publish(verdict.normalized);
   } catch (e) {
     db.prepare(
       `UPDATE intern_posts
@@ -412,6 +410,7 @@ export async function runInternCycle(
     return { ran: true, reason: 'publish failed — intern halted', read: ingested, drafted: true, verdict: 'blocked', blockedRules: ['publish_failed'], draft };
   }
 
+  const publishedId = publishResult.publishedId;
   try {
     db.transaction(() => {
       const now = Date.now();
@@ -425,6 +424,10 @@ export async function runInternCycle(
         `UPDATE intern_quota SET posts_used = posts_used + 1, updated_at = ?
          WHERE id = (SELECT MAX(id) FROM intern_quota)`,
       ).run(now);
+      reconcileQuota(db, {
+        reads: publishResult.quota.readsRemaining,
+        posts: publishResult.quota.postsRemaining,
+      });
       appendAudit(db, 'intern', 'intern_published', { postId: rowId, publishedId });
     })();
   } catch (e) {

@@ -244,6 +244,22 @@ describe('live publishing', () => {
     expect(db.prepare(`SELECT verdict, publish_state, published_id FROM intern_posts`).get())
       .toMatchObject({ verdict: 'blocked', publish_state: 'failed', published_id: null });
   });
+
+  it('preserves publishing state when X accepts but durable recording fails', async () => {
+    const { adapter, recording } = apiRecording();
+    db.exec(
+      `CREATE TRIGGER reject_intern_settlement
+       BEFORE UPDATE OF published_id ON intern_posts
+       BEGIN SELECT RAISE(ABORT, 'simulated database failure'); END`,
+    );
+    const result = await runInternCycle(db, hub, adapter, { generateDraft: generate() });
+
+    expect(recording.published).toHaveLength(1);
+    expect(result.reason).toMatch(/recording ambiguous/);
+    expect(quotaState(db).halted).toBe(true);
+    expect(db.prepare(`SELECT verdict, publish_state, published_id FROM intern_posts`).get())
+      .toMatchObject({ verdict: 'shadow', publish_state: 'publishing', published_id: null });
+  });
 });
 
 describe('the allowed-number set', () => {
