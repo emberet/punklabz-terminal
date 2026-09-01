@@ -63,6 +63,13 @@ interface AdvisorySession {
   startedAt: number;
 }
 
+interface ConfirmationRequest {
+  title: string;
+  prompt: string;
+  expected?: string;
+  submit: (value: string) => Promise<unknown>;
+}
+
 const NETWORK_MAP = `                [ PUNKLABZ ]
                      │
                [ RISK CORE ]
@@ -90,6 +97,8 @@ export function LiveNetworkPanel() {
   const [discussions, setDiscussions] = useState<AdvisorySession[]>([]);
   const [allocationBot, setAllocationBot] = useState('');
   const [allocationUsd, setAllocationUsd] = useState('0.50');
+  const [confirmation, setConfirmation] = useState<ConfirmationRequest | null>(null);
+  const [confirmationValue, setConfirmationValue] = useState('');
 
   const load = () => {
     void api.get<LiveStatusView>(isAdmin ? '/api/admin/live/status' : '/api/live/status').then(setStatus).catch(() => {});
@@ -126,6 +135,25 @@ export function LiveNetworkPanel() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const requestConfirmation = (request: ConfirmationRequest) => {
+    setConfirmationValue('');
+    setConfirmation(request);
+  };
+
+  const submitConfirmation = () => {
+    if (!confirmation) return;
+    const value = confirmationValue.trim();
+    if (!value) return;
+    if (confirmation.expected && value !== confirmation.expected) {
+      setNotice(`Confirmation must equal: ${confirmation.expected}`);
+      return;
+    }
+    const submit = confirmation.submit;
+    setConfirmation(null);
+    setConfirmationValue('');
+    void act(() => submit(value));
   };
 
   if (!status) return null;
@@ -242,32 +270,46 @@ export function LiveNetworkPanel() {
               ) : (
                 <button className="primary" disabled={busy} onClick={() => {
                   const phrase = `ARM ROBINHOOD 4663 $${Math.max(5, status.stageCapUsd)}`;
-                  const confirmation = window.prompt(`Type ${phrase}`);
-                  if (confirmation) void act(() => api.post('/api/admin/live/arm', {
-                    mode: status.mode === 'live' ? 'live' : 'canary',
-                    stage: Math.max(1, status.capitalStage),
-                    confirmation,
-                  }));
+                  requestConfirmation({
+                    title: 'ARM MAINNET',
+                    prompt: phrase,
+                    expected: phrase,
+                    submit: (value) => api.post('/api/admin/live/arm', {
+                      mode: status.mode === 'live' ? 'live' : 'canary',
+                      stage: Math.max(1, status.capitalStage),
+                      confirmation: value,
+                    }),
+                  });
                 }}>
                   ARM MAINNET
                 </button>
               )}
               {!status.halted && phase === 'canary_probe' && status.experiment?.state !== 'completed' && (
                 <button className="primary" disabled={busy || !sponsor} onClick={() => {
-                  const confirmation = window.prompt('Type RUN $0.50 ROUND TRIP');
-                  if (confirmation) void act(() => api.post('/api/admin/live/probe/roundtrip', {
-                    sponsorBotId: sponsor?.id,
-                    idempotencyKey: `probe:${Date.now()}:${crypto.randomUUID()}`,
-                    confirmation,
-                  }));
+                  const phrase = 'RUN $0.50 ROUND TRIP';
+                  requestConfirmation({
+                    title: 'EXECUTE OPERATOR PROBE',
+                    prompt: phrase,
+                    expected: phrase,
+                    submit: (value) => api.post('/api/admin/live/probe/roundtrip', {
+                      sponsorBotId: sponsor?.id,
+                      idempotencyKey: `probe:${Date.now()}:${crypto.randomUUID()}`,
+                      confirmation: value,
+                    }),
+                  });
                 }}>
                   RUN $0.50 ROUND TRIP
                 </button>
               )}
               {!status.halted && phase === 'canary_probe' && status.experiment?.state === 'completed' && (
                 <button className="primary" disabled={busy} onClick={() => {
-                  const confirmation = window.prompt('Type ENABLE AUTONOMOUS CANARY $5');
-                  if (confirmation) void act(() => api.post('/api/admin/live/canary/enable', { confirmation }));
+                  const phrase = 'ENABLE AUTONOMOUS CANARY $5';
+                  requestConfirmation({
+                    title: 'ENABLE AUTONOMOUS CANARY',
+                    prompt: phrase,
+                    expected: phrase,
+                    submit: (value) => api.post('/api/admin/live/canary/enable', { confirmation: value }),
+                  });
                 }}>
                   ENABLE $5 AUTONOMY
                 </button>
@@ -276,8 +318,11 @@ export function LiveNetworkPanel() {
                 RUN RECONCILIATION
               </button>
               <button disabled={busy} onClick={() => {
-                const txHash = window.prompt('Robinhood Chain funding transaction hash');
-                if (txHash) void act(() => api.post('/api/admin/live/funding/import', { txHash }));
+                requestConfirmation({
+                  title: 'IMPORT FUNDING',
+                  prompt: 'Robinhood Chain funding transaction hash',
+                  submit: (value) => api.post('/api/admin/live/funding/import', { txHash: value }),
+                });
               }}>
                 IMPORT FUNDING TX
               </button>
@@ -452,6 +497,41 @@ export function LiveNetworkPanel() {
           </div>
         </Panel>}
       </div>
+
+      {confirmation && (
+        <div className="live-confirm-backdrop" onMouseDown={() => setConfirmation(null)}>
+          <form
+            className="live-confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="live-confirm-title"
+            onMouseDown={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              submitConfirmation();
+            }}
+          >
+            <div className="live-confirm-heading">
+              <span id="live-confirm-title">{confirmation.title}</span>
+              <button type="button" aria-label="Close confirmation" onClick={() => setConfirmation(null)}>×</button>
+            </div>
+            <label htmlFor="live-confirm-input">{confirmation.expected ? 'TYPE EXACT PHRASE' : confirmation.prompt}</label>
+            {confirmation.expected && <code>{confirmation.prompt}</code>}
+            <input
+              id="live-confirm-input"
+              autoFocus
+              autoComplete="off"
+              spellCheck={false}
+              value={confirmationValue}
+              onChange={(event) => setConfirmationValue(event.target.value)}
+            />
+            <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
+              <button type="button" onClick={() => setConfirmation(null)}>CANCEL</button>
+              <button className="primary" type="submit" disabled={!confirmationValue.trim()}>CONFIRM</button>
+            </div>
+          </form>
+        </div>
+      )}
     </>
   );
 }

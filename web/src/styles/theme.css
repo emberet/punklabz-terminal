@@ -139,6 +139,63 @@ button.primary:hover:not(:disabled) { background: var(--acid-hover); color: var(
 button.danger { color: var(--red); border-color: #4d1717; }
 button.danger:hover:not(:disabled) { border-color: var(--red); color: var(--red); background: var(--tint-neg); }
 
+.live-confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgb(0 0 0 / 78%);
+}
+
+.live-confirm-dialog {
+  width: min(460px, 100%);
+  border: 1px solid var(--phosphor);
+  border-radius: 4px;
+  padding: 14px;
+  background: var(--bg);
+  box-shadow: 0 0 0 1px rgb(106 255 130 / 14%), 0 18px 60px rgb(0 0 0 / 70%);
+}
+
+.live-confirm-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  color: var(--phosphor);
+  font-weight: 700;
+}
+
+.live-confirm-heading button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.live-confirm-dialog label,
+.live-confirm-dialog code {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.live-confirm-dialog label {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.live-confirm-dialog code {
+  color: var(--amber);
+  overflow-wrap: anywhere;
+}
+
+.live-confirm-dialog input {
+  width: 100%;
+  margin-bottom: 14px;
+}
+
 input, textarea, select {
   font-family: var(--font);
   font-size: 12.5px;
