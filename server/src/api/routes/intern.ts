@@ -6,7 +6,7 @@ import { budgetView } from '../../research/budget.js';
 import { trackRecord } from '../../research/scoring.js';
 import {
   INTERN_AGENT, INTERN_LAUNCH_REVIEW_WINDOW_MS, getInternConfig, internLaunchEvidence,
-  quotaState, reconcileInternPublishing, runInternCycle, setInternMode,
+  publishInternThread, quotaState, reconcileInternPublishing, runInternCycle, setInternMode,
 } from '../../intern/intern.js';
 import { appendAudit } from '../../audit/auditLog.js';
 
@@ -155,6 +155,25 @@ export function registerInternRoutes(server: FastifyInstance, app: AppContext) {
       ran: result.ran, verdict: result.verdict, read: result.read, reason: result.reason,
     });
     return result;
+  });
+
+  server.post('/api/admin/intern/thread', { config: { rateLimit: { max: 2, timeWindow: '10 minutes' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
+    if (!user) return;
+    const body = z.object({
+      posts: z.array(z.string().trim().min(1).max(240)).min(2).max(3),
+    }).safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: body.error.issues[0].message });
+
+    try {
+      const result = await publishInternThread(app.db, app.hub, app.xAdapter, body.data.posts);
+      appendAudit(app.db, `user:${user.id}`, 'intern_manual_thread', {
+        postIds: result.posts.map((post) => post.publishedId),
+      });
+      return result;
+    } catch (error) {
+      return reply.code(409).send({ error: String(error instanceof Error ? error.message : error) });
+    }
   });
 
   server.post('/api/admin/intern/review', { config: { rateLimit: { max: 10, timeWindow: '5 minutes' } } }, async (request, reply) => {

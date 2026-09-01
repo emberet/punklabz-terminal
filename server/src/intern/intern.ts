@@ -196,6 +196,17 @@ export interface InternDraftResult {
   outputTokens: number;
 }
 
+export interface InternThreadPost {
+  rowId: number;
+  publishedId: string;
+  url: string;
+}
+
+export interface InternThreadResult {
+  read: number;
+  posts: InternThreadPost[];
+}
+
 export type InternDraftGenerator = (systemPrompt: string) => Promise<InternDraftResult>;
 
 async function anthropicDraft(systemPrompt: string): Promise<InternDraftResult> {
@@ -211,6 +222,233 @@ async function anthropicDraft(systemPrompt: string): Promise<InternDraftResult> 
     inputTokens: res.usage.input_tokens,
     outputTokens: res.usage.output_tokens,
   };
+}
+
+/**
+ * Publish a short operator-authored introduction as one durable X thread.
+ *
+ * This deliberately does not use the model or the cycle cooldown. It still
+ * requires live mode, a healthy X read, the deterministic output filter, the
+ * rolling public-post quota, and the same crash-safe publish state machine as
+ * autonomous posts. The HTTP route supplies fresh operator-wallet auth.
+ */
+export async function publishInternThread(
+  db: DB,
+  hub: WsHub,
+  x: XAdapter,
+  drafts: string[],
+): Promise<InternThreadResult> {
+  const cfg = getInternConfig(db);
+  if (cfg.mode !== 'live') throw new Error('Intern must be live before publishing a thread');
+
+  const state = quotaState(db);
+  if (state.halted) throw new Error(`Intern halted: ${state.haltReason}`);
+  if (!reconcileInternPublishing(db).clean) throw new Error('Intern publish state is not reconciled');
+  if (x.kind !== 'api') throw new Error(`Live publishing requires X_PROVIDER=api, got ${x.kind}`);
+
+  const readiness = await x.isReady();
+  if (!readiness.ready) throw new Error(readiness.detail);
+  if (drafts.length < 2 || drafts.length > cfg.maxPostsPerDay) {
+    throw new Error(`thread must contain between 2 and ${cfg.maxPostsPerDay} posts`);
+  }
+
+  let read: Awaited<ReturnType<XAdapter['read']>>;
+  try {
+    read = await x.read(READS_PER_CYCLE);
+  } catch (error) {
+    haltIntern(db, `thread read failed: ${String(error).slice(0, 120)}`);
+    throw new Error('thread read failed - Intern halted');
+  }
+  reconcileQuota(db, { reads: read.quota.readsRemaining, posts: read.quota.postsRemaining });
+  if (read.availability !== 'ok' || read.posts.length === 0) {
+    const reason = read.availability === 'ok' ? 'zero X sources' : `X read ${read.availability}`;
+    appendAudit(db, 'intern', 'intern_thread_read_blocked', { reason });
+    throw new Error(`${reason} - refusing to publish thread`);
+  }
+  const ingested = ingest(db, read.posts);
+
+  const numbers = allowedNumbers(db);
+  const knownSymbols = [...MAJOR_SYMBOLS, ...pumpSymbols(db)];
+  const recent = db
+    .prepare(`SELECT draft FROM intern_posts
+              WHERE verdict IN ('published','shadow') OR publish_state IN ('publishing','failed')
+              ORDER BY id DESC LIMIT 20`)
+    .all() as { draft: string }[];
+  const screened = drafts.map((draft, index) => screen({
+    draft,
+    allowedNumbers: numbers,
+    knownSymbols,
+    maxLength: 240,
+    recentPosts: [...recent.map((row) => row.draft), ...drafts.slice(0, index)],
+  }));
+
+  let threadBlocked = false;
+  for (const verdict of screened) {
+    if (!verdict.allowed) {
+      threadBlocked = true;
+      break;
+    }
+  }
+  if (threadBlocked) {
+    db.transaction(() => {
+      screened.forEach((verdict, index) => {
+        const auditHash = appendAudit(db, 'intern', 'intern_thread_blocked', {
+          draft: drafts[index], position: index, blockedRules: verdict.blockedRules,
+          allowedNumbers: numbers,
+        });
+        db.prepare(
+          `INSERT INTO intern_posts
+            (ts, kind, draft, allowed_numbers_json, verdict, blocked_rules_json, audit_hash,
+             provider_kind, source_count)
+           VALUES (?, ?, ?, ?, 'blocked', ?, ?, ?, ?)`,
+        ).run(
+          Date.now(), index === 0 ? 'post' : 'reply', drafts[index], JSON.stringify(numbers),
+          JSON.stringify(verdict.blockedRules.length ? verdict.blockedRules : ['thread_member_blocked']),
+          auditHash, x.kind, read.posts.length,
+        );
+      });
+    })();
+    const details = screened
+      .map((verdict, index) => verdict.allowed ? null : `post ${index + 1}: ${verdict.detail}`)
+      .filter(Boolean)
+      .join('; ');
+    throw new Error(`thread blocked by content filter - ${details}`);
+  }
+
+  // Reserve every public slot before the first network call. If any slot is
+  // unavailable the surrounding transaction rolls back all earlier reserves.
+  db.transaction(() => {
+    for (let index = 0; index < drafts.length; index += 1) {
+      const gate = takeRateLimit(db, 'intern:publish', {
+        cooldownMs: 0,
+        maxInWindow: cfg.maxPostsPerDay,
+        windowMs: 86_400_000,
+      });
+      if (!gate.allowed) throw new Error(`public post quota: ${gate.reason}`);
+    }
+  })();
+
+  const rowIds = db.transaction(() => screened.map((verdict, index) => {
+    const auditHash = appendAudit(db, 'intern', 'intern_thread_candidate', {
+      draft: drafts[index], position: index, allowedNumbers: numbers,
+      sourceCount: read.posts.length,
+    });
+    return Number(db.prepare(
+      `INSERT INTO intern_posts
+        (ts, kind, draft, allowed_numbers_json, verdict, blocked_rules_json, audit_hash,
+         provider_kind, source_count)
+       VALUES (?, ?, ?, ?, 'shadow', NULL, ?, ?, ?)`,
+    ).run(
+      Date.now(), index === 0 ? 'post' : 'reply', verdict.normalized,
+      JSON.stringify(numbers), auditHash, x.kind, read.posts.length,
+    ).lastInsertRowid);
+  }))();
+
+  const published: InternThreadPost[] = [];
+  let parentId: string | undefined;
+  for (let index = 0; index < rowIds.length; index += 1) {
+    const rowId = rowIds[index];
+    const { publishedId } = await publishScreenedCandidate(db, x, {
+      rowId,
+      text: screened[index].normalized,
+      inReplyTo: parentId,
+      sourceCount: read.posts.length,
+      threadPosition: index,
+    });
+
+    published.push({ rowId, publishedId, url: `https://x.com/PunkLabz/status/${publishedId}` });
+    hub.publish('intern', { event: 'published', id: publishedId });
+    parentId = publishedId;
+  }
+
+  appendAudit(db, 'intern', 'intern_thread_published', {
+    rootPublishedId: published[0].publishedId,
+    postIds: published.map((post) => post.publishedId),
+  });
+  return { read: ingested, posts: published };
+}
+
+class InternPublishError extends Error {
+  constructor(readonly kind: 'failed' | 'ambiguous', message: string) {
+    super(message);
+  }
+}
+
+interface PublishCandidateInput {
+  rowId: number;
+  text: string;
+  inReplyTo?: string;
+  sourceCount: number;
+  threadPosition?: number;
+}
+
+/** The only function allowed to cross the public X write boundary. */
+async function publishScreenedCandidate(
+  db: DB,
+  x: XAdapter,
+  input: PublishCandidateInput,
+): Promise<{ publishedId: string }> {
+  db.transaction(() => {
+    const changed = db.prepare(
+      `UPDATE intern_posts
+       SET publish_state='publishing', publish_attempted_at=?, in_reply_to=?
+       WHERE id=? AND publish_state='not_attempted' AND published_id IS NULL`,
+    ).run(Date.now(), input.inReplyTo ?? null, input.rowId).changes;
+    if (changed !== 1) throw new Error('candidate is not in a publishable state');
+    appendAudit(db, 'intern', 'intern_publish_attempt', {
+      postId: input.rowId,
+      sourceCount: input.sourceCount,
+      threadPosition: input.threadPosition ?? null,
+      inReplyTo: input.inReplyTo ?? null,
+    });
+  })();
+
+  let result: Awaited<ReturnType<XAdapter['publish']>>;
+  try {
+    result = await x.publish(input.text, input.inReplyTo);
+  } catch (error) {
+    db.prepare(
+      `UPDATE intern_posts
+       SET verdict='blocked', publish_state='failed', blocked_rules_json=? WHERE id=?`,
+    ).run(JSON.stringify(['publish_failed']), input.rowId);
+    const position = input.threadPosition === undefined ? '' : ` at thread post ${input.threadPosition + 1}`;
+    haltIntern(db, `publish failed${position}: ${String(error).slice(0, 100)}`);
+    throw new InternPublishError('failed', `publish failed${position} - Intern halted`);
+  }
+
+  const publishedId = result.publishedId;
+  try {
+    db.transaction(() => {
+      const now = Date.now();
+      const changed = db.prepare(
+        `UPDATE intern_posts
+         SET verdict='published', publish_state='published', published_id=?, ts_published=?
+         WHERE id=? AND publish_state='publishing'`,
+      ).run(publishedId, now, input.rowId).changes;
+      if (changed !== 1) throw new Error('publishing candidate changed before settlement');
+      db.prepare(
+        `UPDATE intern_quota SET posts_used = posts_used + 1, updated_at = ?
+         WHERE id = (SELECT MAX(id) FROM intern_quota)`,
+      ).run(now);
+      reconcileQuota(db, {
+        reads: result.quota.readsRemaining,
+        posts: result.quota.postsRemaining,
+      });
+      appendAudit(db, 'intern', 'intern_published', {
+        postId: input.rowId,
+        publishedId,
+        threadPosition: input.threadPosition ?? null,
+        inReplyTo: input.inReplyTo ?? null,
+      });
+    })();
+  } catch (error) {
+    // Leave publish_state='publishing': X accepted the request, but durable
+    // recording is uncertain. The next cycle will also fail reconciliation.
+    haltIntern(db, `publish accepted but recording failed for ${publishedId}: ${String(error).slice(0, 100)}`);
+    throw new InternPublishError('ambiguous', 'publish recording ambiguous - Intern halted');
+  }
+
+  return { publishedId };
 }
 
 /**
@@ -387,53 +625,17 @@ export async function runInternCycle(
     return { ran: true, reason: 'shadow mode — drafted, screened, logged, not published', read: ingested, drafted: true, verdict: 'shadow', blockedRules: [], draft };
   }
 
-  // ── the single publish call site in this package ──
-  db.transaction(() => {
-    const changed = db.prepare(
-      `UPDATE intern_posts SET publish_state='publishing', publish_attempted_at=?
-       WHERE id=? AND publish_state='not_attempted' AND published_id IS NULL`,
-    ).run(Date.now(), rowId).changes;
-    if (changed !== 1) throw new Error('candidate is not in a publishable state');
-    appendAudit(db, 'intern', 'intern_publish_attempt', { postId: rowId, sourceCount: posts.length });
-  })();
-
-  let publishResult: Awaited<ReturnType<XAdapter['publish']>>;
+  let publishedId: string;
   try {
-    publishResult = await x.publish(verdict.normalized);
-  } catch (e) {
-    db.prepare(
-      `UPDATE intern_posts
-       SET verdict='blocked', publish_state='failed', blocked_rules_json=? WHERE id=?`,
-    )
-      .run(JSON.stringify(['publish_failed']), rowId);
-    haltIntern(db, `publish failed: ${String(e).slice(0, 120)}`);
-    return { ran: true, reason: 'publish failed — intern halted', read: ingested, drafted: true, verdict: 'blocked', blockedRules: ['publish_failed'], draft };
-  }
-
-  const publishedId = publishResult.publishedId;
-  try {
-    db.transaction(() => {
-      const now = Date.now();
-      const changed = db.prepare(
-        `UPDATE intern_posts
-         SET verdict='published', publish_state='published', published_id=?, ts_published=?
-         WHERE id=? AND publish_state='publishing'`,
-      ).run(publishedId, now, rowId).changes;
-      if (changed !== 1) throw new Error('publishing candidate changed before settlement');
-      db.prepare(
-        `UPDATE intern_quota SET posts_used = posts_used + 1, updated_at = ?
-         WHERE id = (SELECT MAX(id) FROM intern_quota)`,
-      ).run(now);
-      reconcileQuota(db, {
-        reads: publishResult.quota.readsRemaining,
-        posts: publishResult.quota.postsRemaining,
-      });
-      appendAudit(db, 'intern', 'intern_published', { postId: rowId, publishedId });
-    })();
-  } catch (e) {
-    // Leave publish_state='publishing': X accepted the request, but durable
-    // recording is uncertain. The next cycle will also fail reconciliation.
-    haltIntern(db, `publish accepted but recording failed for ${publishedId}: ${String(e).slice(0, 100)}`);
+    ({ publishedId } = await publishScreenedCandidate(db, x, {
+      rowId,
+      text: verdict.normalized,
+      sourceCount: posts.length,
+    }));
+  } catch (error) {
+    if (error instanceof InternPublishError && error.kind === 'failed') {
+      return { ran: true, reason: 'publish failed — intern halted', read: ingested, drafted: true, verdict: 'blocked', blockedRules: ['publish_failed'], draft };
+    }
     return {
       ran: true,
       reason: 'publish recording ambiguous — intern halted',

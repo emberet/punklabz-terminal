@@ -4,7 +4,7 @@ import { WsHub } from '../src/realtime/wsHub.js';
 import { config } from '../src/config.js';
 import {
   allowedNumbers, getInternConfig, haltIntern, internLaunchEvidence, quotaState,
-  reconcileInternPublishing, reconcileQuota, runInternCycle, setInternMode,
+  publishInternThread, reconcileInternPublishing, reconcileQuota, runInternCycle, setInternMode,
 } from '../src/intern/intern.js';
 import {
   NullXAdapter, RecordingXAdapter, buildXAdapter, type XAdapter, type XPost,
@@ -259,6 +259,75 @@ describe('live publishing', () => {
     expect(quotaState(db).halted).toBe(true);
     expect(db.prepare(`SELECT verdict, publish_state, published_id FROM intern_posts`).get())
       .toMatchObject({ verdict: 'shadow', publish_state: 'publishing', published_id: null });
+  });
+});
+
+describe('operator introduction threads', () => {
+  let db: DB;
+  beforeEach(() => {
+    db = openTestDb();
+    setInternMode(db, 'live', 'test');
+    db.prepare(`UPDATE intern_config SET max_posts_per_day=3 WHERE id=1`).run();
+  });
+
+  const thread = [
+    "hello timeline. i'm INTERN, the newest process inside PunkLabz.",
+    'the manager allocates constrained capital. risk holds the veto.',
+    'intelligence is cheap. accountable execution is the experiment.',
+  ];
+
+  it('filters, publishes, and durably chains every reply', async () => {
+    const { adapter, recording } = apiRecording();
+    const result = await publishInternThread(db, hub, adapter, thread);
+
+    expect(result.posts.map((post) => post.publishedId)).toEqual(['rec_1', 'rec_2', 'rec_3']);
+    expect(recording.published).toEqual([
+      expect.objectContaining({ text: thread[0], inReplyTo: undefined }),
+      expect.objectContaining({ text: thread[1], inReplyTo: 'rec_1' }),
+      expect.objectContaining({ text: thread[2], inReplyTo: 'rec_2' }),
+    ]);
+    expect(db.prepare(
+      `SELECT kind, verdict, publish_state, published_id, in_reply_to
+       FROM intern_posts ORDER BY id`,
+    ).all()).toEqual([
+      { kind: 'post', verdict: 'published', publish_state: 'published', published_id: 'rec_1', in_reply_to: null },
+      { kind: 'reply', verdict: 'published', publish_state: 'published', published_id: 'rec_2', in_reply_to: 'rec_1' },
+      { kind: 'reply', verdict: 'published', publish_state: 'published', published_id: 'rec_3', in_reply_to: 'rec_2' },
+    ]);
+    expect(quotaState(db).postsUsed).toBe(3);
+  });
+
+  it('screens the entire thread before anything reaches X', async () => {
+    const { adapter, recording } = apiRecording();
+    await expect(publishInternThread(db, hub, adapter, [
+      thread[0],
+      'guaranteed 50x. buy BTC now.',
+    ])).rejects.toThrow(/content filter/);
+
+    expect(recording.published).toHaveLength(0);
+    expect(db.prepare(`SELECT COUNT(*) n FROM intern_posts WHERE verdict='blocked'`).get())
+      .toMatchObject({ n: 2 });
+  });
+
+  it('reserves the complete thread quota atomically', async () => {
+    const { adapter, recording } = apiRecording();
+    await publishInternThread(db, hub, adapter, thread.slice(0, 2));
+
+    await expect(publishInternThread(db, hub, adapter, [
+      'the feed is a crowd pretending to be a clock.',
+      'consensus arrives after attention has already moved.',
+    ])).rejects.toThrow(/public post quota/);
+
+    expect(recording.published).toHaveLength(2);
+    expect(db.prepare(`SELECT count_in_window FROM agent_rate_limits WHERE key='intern:publish'`).get())
+      .toMatchObject({ count_in_window: 2 });
+  });
+
+  it('publishes nothing without a healthy X-backed read', async () => {
+    const { adapter, recording } = apiRecording([]);
+    await expect(publishInternThread(db, hub, adapter, thread.slice(0, 2)))
+      .rejects.toThrow(/zero X sources/);
+    expect(recording.published).toHaveLength(0);
   });
 });
 
