@@ -363,14 +363,14 @@ export async function walletSignIn(kind: ConnectorKind = 'injected'): Promise<{ 
 /** Attach a wallet to the account already signed in. */
 export async function walletConnectToAccount(
   kind: ConnectorKind = 'injected',
-): Promise<{ address: string; isAdmin: boolean }> {
+): Promise<{ address: string; isAdmin: boolean; merged: boolean }> {
   const address = await requestAccount(kind);
   const signature = await signNonce(address);
-  const res = await api.post<{ walletAddress: string; isAdmin: boolean }>(
+  const res = await api.post<{ walletAddress: string; isAdmin: boolean; merged?: boolean }>(
     '/api/auth/wallet/link',
     { address, signature },
   );
-  return { address: res.walletAddress, isAdmin: res.isAdmin };
+  return { address: res.walletAddress, isAdmin: res.isAdmin, merged: !!res.merged };
 }
 
 export const shortAddress = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;

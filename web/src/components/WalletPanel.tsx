@@ -89,10 +89,12 @@ export function WalletPanel() {
   const connect = async (kind: ConnectorKind) => {
     setBusy(true); setPending(kind); setError(null); setNotice(null);
     try {
-      const { address, isAdmin } = await walletConnectToAccount(kind);
+      const { address, isAdmin, merged } = await walletConnectToAccount(kind);
       await refresh();
       setNotice(
-        isAdmin
+        merged
+          ? `${shortAddress(address)} verified — wallet and email profiles combined.`
+          : isAdmin
           ? `${shortAddress(address)} connected — operator clearance granted.`
           : `${shortAddress(address)} connected.`,
       );

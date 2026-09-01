@@ -98,8 +98,17 @@ export function registerAuthRoutes(server: FastifyInstance, app: AppContext) {
     if (!user) return;
     const body = z.object({ address: z.string(), signature: z.string() }).parse(request.body);
     try {
-      const address = await linkWallet(app.db, user.id, body.address, body.signature);
-      return { ok: true, walletAddress: address, isAdmin: isAdminWallet(address) };
+      const linked = await linkWallet(app.db, user.id, body.address, body.signature);
+      const previousToken = request.cookies?.[COOKIE];
+      if (previousToken) destroySession(app.db, previousToken);
+      const token = createSession(app.db, linked.userId, 'wallet');
+      reply.setCookie(COOKIE, token, cookieOpts);
+      return {
+        ok: true,
+        walletAddress: linked.address,
+        isAdmin: isAdminWallet(linked.address),
+        merged: linked.merged,
+      };
     } catch (e) {
       return reply.code(409).send({ error: String(e instanceof Error ? e.message : e) });
     }
@@ -124,8 +133,8 @@ export function registerAuthRoutes(server: FastifyInstance, app: AppContext) {
     if (!user) return;
     const body = z.object({ email: z.string(), password: z.string() }).parse(request.body);
     try {
-      const email = await linkEmail(app.db, user.id, body.email, body.password);
-      return { ok: true, email };
+      const linked = await linkEmail(app.db, user.id, body.email, body.password);
+      return { ok: true, email: linked.email, merged: linked.merged };
     } catch (e) {
       return reply.code(409).send({ error: String(e instanceof Error ? e.message : e) });
     }

@@ -6,6 +6,7 @@ import {
   createSession, isAdminWallet, issueNonce, linkEmail, linkWallet, loginMessage,
   registerEmail, unlinkWallet, userFromSession, verifyWallet,
 } from '../src/auth/auth.js';
+import { balanceMicro } from '../src/billing/ledger.js';
 
 // Two throwaway keys. The operator one is only "the admin" because config
 // says so — the point of every test here is that nothing else can make it so.
@@ -21,7 +22,7 @@ async function signIn(db: DB, account: typeof OPERATOR): Promise<number> {
 async function connect(db: DB, userId: number, account: typeof OPERATOR): Promise<string> {
   const nonce = issueNonce(db, account.address);
   const signature = await account.signMessage({ message: loginMessage(nonce) });
-  return linkWallet(db, userId, account.address, signature);
+  return (await linkWallet(db, userId, account.address, signature)).address;
 }
 
 const meFor = (db: DB, userId: number) => userFromSession(db, createSession(db, userId));
@@ -157,10 +158,35 @@ describe('linking accounts both ways', () => {
     expect(second).toBe(first);
   });
 
-  it('a wallet already on another account cannot be taken', async () => {
-    await signIn(db, STRANGER);
+  it('combines a wallet-only profile into an authenticated email profile', async () => {
+    const walletUser = await signIn(db, STRANGER);
+    const walletSession = createSession(db, walletUser, 'wallet');
+    db.prepare(
+      `INSERT INTO xp_events (user_id, type, amount, ref_id, ts)
+       VALUES (?, 'trade', 7, 42, ?)`,
+    ).run(walletUser, Date.now());
+    const emailUser = await registerEmail(db, 'other@punklabz.app', 'correct-horse', 'other');
+    const targetBalance = balanceMicro(db, `user:${emailUser}`);
+
+    const nonce = issueNonce(db, STRANGER.address);
+    const signature = await STRANGER.signMessage({ message: loginMessage(nonce) });
+    const linked = await linkWallet(db, emailUser, STRANGER.address, signature);
+
+    expect(linked).toMatchObject({ userId: emailUser, merged: true });
+    expect(db.prepare('SELECT id FROM users WHERE id=?').get(walletUser)).toBeUndefined();
+    expect(meFor(db, emailUser)!.walletAddress).toBe(STRANGER.address.toLowerCase());
+    expect(userFromSession(db, walletSession)!.id).toBe(emailUser);
+    expect(db.prepare('SELECT count(*) n FROM xp_events WHERE user_id=?').get(emailUser))
+      .toMatchObject({ n: 1 });
+    // Duplicate identity creation must not award a second signup credit.
+    expect(balanceMicro(db, `user:${emailUser}`)).toBe(targetBalance);
+  });
+
+  it('does not combine a wallet profile that already has another email', async () => {
+    const walletUser = await signIn(db, STRANGER);
+    await linkEmail(db, walletUser, 'wallet-owner@punklabz.app', 'correct-horse');
     const other = await registerEmail(db, 'other@punklabz.app', 'correct-horse', 'other');
-    await expect(connect(db, other, STRANGER)).rejects.toThrow(/already connected to another/);
+    await expect(connect(db, other, STRANGER)).rejects.toThrow(/own email/);
   });
 
   it('an account with a wallet must disconnect before connecting a different one', async () => {
@@ -185,11 +211,28 @@ describe('linking accounts both ways', () => {
     expect(meFor(db, userId)!.email).toBe('wallet-user@punklabz.app');
   });
 
-  it('an email already registered elsewhere cannot be claimed', async () => {
-    await registerEmail(db, 'taken@punklabz.app', 'correct-horse', 'taken');
+  it('combines a wallet profile into an existing email profile after password proof', async () => {
+    const emailUser = await registerEmail(db, 'taken@punklabz.app', 'correct-horse', 'taken');
     const walletUser = await signIn(db, STRANGER);
-    await expect(linkEmail(db, walletUser, 'taken@punklabz.app', 'correct-horse'))
-      .rejects.toThrow(/already registered/);
+    const walletSession = createSession(db, walletUser, 'wallet');
+
+    const linked = await linkEmail(db, walletUser, 'taken@punklabz.app', 'correct-horse');
+
+    expect(linked).toMatchObject({ userId: emailUser, merged: true });
+    expect(userFromSession(db, walletSession)!.id).toBe(emailUser);
+    expect(meFor(db, emailUser)).toMatchObject({
+      email: 'taken@punklabz.app',
+      walletAddress: STRANGER.address.toLowerCase(),
+    });
+  });
+
+  it('will not combine an existing email without its password', async () => {
+    const emailUser = await registerEmail(db, 'taken@punklabz.app', 'correct-horse', 'taken');
+    const walletUser = await signIn(db, STRANGER);
+    await expect(linkEmail(db, walletUser, 'taken@punklabz.app', 'wrong-password'))
+      .rejects.toThrow(/invalid credentials/);
+    expect(db.prepare('SELECT id FROM users WHERE id=?').get(emailUser)).toBeTruthy();
+    expect(db.prepare('SELECT id FROM users WHERE id=?').get(walletUser)).toBeTruthy();
   });
 
   it('rejects a weak password on the linked email', async () => {

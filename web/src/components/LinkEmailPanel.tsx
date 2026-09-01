@@ -26,9 +26,11 @@ export function LinkEmailPanel() {
   const submit = async () => {
     setBusy(true); setError(null); setNotice(null);
     try {
-      await api.post('/api/auth/email/link', { email, password });
+      const linked = await api.post<{ merged?: boolean }>('/api/auth/email/link', { email, password });
       await refresh();
-      setNotice('Email added. You can now sign in either way.');
+      setNotice(linked.merged
+        ? 'Email and wallet profiles combined. You can now sign in either way.'
+        : 'Email added. You can now sign in either way.');
       setEmail(''); setPassword('');
     } catch (e) {
       setError(String((e as Error)?.message ?? e));

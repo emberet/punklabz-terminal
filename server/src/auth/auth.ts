@@ -4,6 +4,7 @@ import { getAddress, isAddress, verifyMessage } from 'viem';
 import type { DB } from '../db/db.js';
 import { config } from '../config.js';
 import { seedUser } from '../billing/ledger.js';
+import { appendAudit } from '../audit/auditLog.js';
 
 const SESSION_TTL_MS = 30 * 24 * 3_600_000;
 const NONCE_TTL_MS = 5 * 60_000;
@@ -16,6 +17,18 @@ export interface AuthUser {
   isAdmin: boolean;
   sessionCreatedAt: number;
   sessionAuthMethod: string;
+}
+
+export interface LinkedWallet {
+  address: string;
+  userId: number;
+  merged: boolean;
+}
+
+export interface LinkedEmail {
+  email: string;
+  userId: number;
+  merged: boolean;
 }
 
 /**
@@ -173,6 +186,114 @@ async function proveWallet(db: DB, walletAddress: string, signature: string): Pr
   return address;
 }
 
+/**
+ * Collapse a duplicate identity into its canonical user after both identities
+ * have been proven by the caller. The target profile survives; owned records,
+ * sessions, and sign-in methods move with the source.
+ */
+function mergeUserInto(db: DB, sourceUserId: number, targetUserId: number, reason: string): void {
+  if (sourceUserId === targetUserId) return;
+  const source = db.prepare(
+    'SELECT id, email, wallet_address FROM users WHERE id = ?',
+  ).get(sourceUserId) as { id: number; email: string | null; wallet_address: string | null } | undefined;
+  const target = db.prepare(
+    'SELECT id, email, wallet_address FROM users WHERE id = ?',
+  ).get(targetUserId) as { id: number; email: string | null; wallet_address: string | null } | undefined;
+  if (!source || !target) throw new Error('account no longer exists');
+  if (source.email && target.email && source.email !== target.email) {
+    throw new Error('both accounts already have different emails; automatic merge refused');
+  }
+  if (source.wallet_address && target.wallet_address && source.wallet_address !== target.wallet_address) {
+    throw new Error('both accounts already have different wallets; automatic merge refused');
+  }
+
+  const liveGrantConflict = db.prepare(
+    `SELECT 1
+     FROM delegation_grants source
+     JOIN delegation_grants target
+       ON target.user_id = ? AND target.bot_id = source.bot_id
+      AND lower(target.wallet_address) = lower(source.wallet_address)
+      AND target.status IN ('pending','active','paused')
+     WHERE source.user_id = ? AND source.status IN ('pending','active','paused')
+     LIMIT 1`,
+  ).get(targetUserId, sourceUserId);
+  if (liveGrantConflict) {
+    throw new Error('accounts have conflicting live delegation grants; automatic merge refused');
+  }
+
+  const sourceAccount = `user:${sourceUserId}`;
+  const targetAccount = `user:${targetUserId}`;
+  const targetHasSeed = !!db.prepare(
+    `SELECT 1 FROM ledger_entries
+     WHERE type='seed' AND credit_account=? LIMIT 1`,
+  ).get(targetAccount);
+
+  const tx = db.transaction(() => {
+    // A person receives one demo signup credit. Move every legitimate debit
+    // and credit, but leave a duplicate source seed in its retired ledger.
+    db.prepare('UPDATE ledger_entries SET debit_account=? WHERE debit_account=?')
+      .run(targetAccount, sourceAccount);
+    db.prepare(
+      `UPDATE ledger_entries SET credit_account=?
+       WHERE credit_account=? AND NOT (?=1 AND type='seed')`,
+    ).run(targetAccount, sourceAccount, targetHasSeed ? 1 : 0);
+
+    db.prepare('UPDATE sessions SET user_id=? WHERE user_id=?').run(targetUserId, sourceUserId);
+    db.prepare('UPDATE bots SET owner_user_id=? WHERE owner_user_id=?').run(targetUserId, sourceUserId);
+    db.prepare('UPDATE builder_sessions SET user_id=? WHERE user_id=?').run(targetUserId, sourceUserId);
+    db.prepare('UPDATE delegation_grants SET user_id=? WHERE user_id=?').run(targetUserId, sourceUserId);
+    db.prepare('UPDATE activity_events SET actor_user_id=? WHERE actor_user_id=?').run(targetUserId, sourceUserId);
+
+    db.prepare(
+      `INSERT OR IGNORE INTO user_badges (user_id, badge, season_id, awarded_at)
+       SELECT ?, badge, season_id, awarded_at FROM user_badges WHERE user_id=?`,
+    ).run(targetUserId, sourceUserId);
+    db.prepare('DELETE FROM user_badges WHERE user_id=?').run(sourceUserId);
+
+    db.prepare(
+      `INSERT OR IGNORE INTO xp_events (user_id, type, amount, ref_id, ts)
+       SELECT ?, type, amount, ref_id, ts FROM xp_events WHERE user_id=?`,
+    ).run(targetUserId, sourceUserId);
+    db.prepare('DELETE FROM xp_events WHERE user_id=?').run(sourceUserId);
+
+    // Follows are polymorphic and only the follower has a foreign key, so
+    // merge outgoing and incoming edges explicitly and remove self-follows.
+    db.prepare(
+      `INSERT OR IGNORE INTO follows (follower_user_id, target_type, target_id, created_at)
+       SELECT ?, target_type,
+              CASE WHEN target_type='user' AND target_id=? THEN ? ELSE target_id END,
+              created_at
+       FROM follows
+       WHERE follower_user_id=?
+         AND NOT (target_type='user' AND target_id IN (?, ?))`,
+    ).run(targetUserId, sourceUserId, targetUserId, sourceUserId, sourceUserId, targetUserId);
+    db.prepare(
+      `INSERT OR IGNORE INTO follows (follower_user_id, target_type, target_id, created_at)
+       SELECT follower_user_id, 'user', ?, created_at
+       FROM follows
+       WHERE target_type='user' AND target_id=?
+         AND follower_user_id NOT IN (?, ?)`,
+    ).run(targetUserId, sourceUserId, sourceUserId, targetUserId);
+    db.prepare('DELETE FROM follows WHERE follower_user_id=?').run(sourceUserId);
+    db.prepare(`DELETE FROM follows WHERE target_type='user' AND target_id=?`).run(sourceUserId);
+    db.prepare(
+      `DELETE FROM follows WHERE follower_user_id=? AND target_type='user' AND target_id=?`,
+    ).run(targetUserId, targetUserId);
+
+    const walletAddress = target.wallet_address ?? source.wallet_address;
+    db.prepare('DELETE FROM users WHERE id=?').run(sourceUserId);
+    db.prepare('UPDATE users SET wallet_address=?, is_admin=? WHERE id=?')
+      .run(walletAddress, isAdminWallet(walletAddress) ? 1 : 0, targetUserId);
+    appendAudit(db, `user:${targetUserId}`, 'account_merge', {
+      sourceUserId,
+      targetUserId,
+      reason,
+      walletAddress,
+    });
+  });
+  tx();
+}
+
 /** Sign in with a wallet, creating the account on first sight. */
 export async function verifyWallet(db: DB, walletAddress: string, signature: string): Promise<number> {
   const address = await proveWallet(db, walletAddress, signature);
@@ -201,25 +322,42 @@ export async function verifyWallet(db: DB, walletAddress: string, signature: str
  * how an email operator reaches the Control Room: prove the wallet, and
  * clearance follows from the address itself.
  */
-export async function linkWallet(db: DB, userId: number, walletAddress: string, signature: string): Promise<string> {
+export async function linkWallet(
+  db: DB,
+  userId: number,
+  walletAddress: string,
+  signature: string,
+): Promise<LinkedWallet> {
   const address = await proveWallet(db, walletAddress, signature);
 
-  const owner = db.prepare('SELECT id FROM users WHERE wallet_address = ?').get(address) as
-    | { id: number }
+  const current = db.prepare(
+    'SELECT email, password_hash, wallet_address FROM users WHERE id = ?',
+  ).get(userId) as
+    | { email: string | null; password_hash: string | null; wallet_address: string | null }
     | undefined;
-  if (owner && owner.id !== userId) {
-    throw new Error('that wallet is already connected to another operator account');
-  }
-  const current = db.prepare('SELECT wallet_address FROM users WHERE id = ?').get(userId) as
-    | { wallet_address: string | null }
-    | undefined;
+  if (!current) throw new Error('account no longer exists');
   if (current?.wallet_address && current.wallet_address !== address) {
     throw new Error('this account already has a wallet connected — disconnect it first');
   }
 
+  const owner = db.prepare(
+    'SELECT id, email FROM users WHERE wallet_address = ?',
+  ).get(address) as { id: number; email: string | null } | undefined;
+  let merged = false;
+  if (owner && owner.id !== userId) {
+    if (!current.email || !current.password_hash) {
+      throw new Error('sign in to an email account before combining this wallet profile');
+    }
+    if (owner.email) {
+      throw new Error('that wallet belongs to an account with its own email; automatic merge refused');
+    }
+    mergeUserInto(db, owner.id, userId, 'wallet linked to authenticated email account');
+    merged = true;
+  }
+
   db.prepare('UPDATE users SET wallet_address = ? WHERE id = ?').run(address, userId);
   syncAdminMirror(db, userId, address);
-  return address;
+  return { address, userId, merged };
 }
 
 /** Unbind. Losing the operator wallet loses Control Room access, by design. */
@@ -234,24 +372,47 @@ export function unlinkWallet(db: DB, userId: number): void {
 }
 
 /** Add email/password to a wallet-first account, so it has a second way in. */
-export async function linkEmail(db: DB, userId: number, email: string, password: string): Promise<string> {
+export async function linkEmail(
+  db: DB,
+  userId: number,
+  email: string,
+  password: string,
+): Promise<LinkedEmail> {
   const normalized = email.trim().toLowerCase();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(normalized)) throw new Error('invalid email');
   if (password.length < 8) throw new Error('password must be at least 8 characters');
 
-  const taken = db.prepare('SELECT id FROM users WHERE email = ?').get(normalized) as { id: number } | undefined;
-  if (taken && taken.id !== userId) throw new Error('email already registered to another account');
-
-  const current = db.prepare('SELECT email FROM users WHERE id = ?').get(userId) as
-    | { email: string | null }
+  const current = db.prepare('SELECT email, wallet_address FROM users WHERE id = ?').get(userId) as
+    | { email: string | null; wallet_address: string | null }
     | undefined;
+  if (!current) throw new Error('account no longer exists');
   if (current?.email && current.email !== normalized) {
     throw new Error('this account already has an email');
   }
 
+  const taken = db.prepare(
+    'SELECT id, password_hash, wallet_address FROM users WHERE email = ?',
+  ).get(normalized) as
+    | { id: number; password_hash: string | null; wallet_address: string | null }
+    | undefined;
+  if (taken && taken.id !== userId) {
+    if (!current.wallet_address) {
+      throw new Error('connect a wallet before combining it with an existing email account');
+    }
+    if (taken.wallet_address && taken.wallet_address !== current.wallet_address) {
+      throw new Error('that email account already has a different wallet; automatic merge refused');
+    }
+    if (!taken.password_hash || !await argon2.verify(taken.password_hash, password).catch(() => false)) {
+      throw new Error('invalid credentials');
+    }
+    mergeUserInto(db, userId, taken.id, 'email linked to authenticated wallet account');
+    syncAdminMirror(db, taken.id, current.wallet_address);
+    return { email: normalized, userId: taken.id, merged: true };
+  }
+
   const hash = await argon2.hash(password, { type: argon2.argon2id });
   db.prepare('UPDATE users SET email = ?, password_hash = ? WHERE id = ?').run(normalized, hash, userId);
-  return normalized;
+  return { email: normalized, userId, merged: false };
 }
 
 /**
