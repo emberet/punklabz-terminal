@@ -10,6 +10,7 @@
 // wallet, authorization owner, and signer-side policy.
 
 import { PrivySigner, privyConfigFromEnv } from './privySigner.js';
+import { createHash } from 'node:crypto';
 
 export interface SignRequest {
   chainId: number;
@@ -43,8 +44,20 @@ export interface TradingSigner {
     ownerId: string | null;
     policyCount: number;
     policyIds?: string[];
+    signerId?: string | null;
     fullyGuarded: boolean;
   };
+}
+
+/** Stable evidence key for the exact signer authority attached to a wallet. */
+export function signerPolicyFingerprint(signer: TradingSigner): string | null {
+  const guards = signer.guards?.();
+  if (!guards?.fullyGuarded) return null;
+  return createHash('sha256').update(JSON.stringify({
+    ownerId: guards.ownerId,
+    signerId: guards.signerId ?? null,
+    policyIds: [...(guards.policyIds ?? [])].sort(),
+  })).digest('hex');
 }
 
 export interface SignerReadiness {

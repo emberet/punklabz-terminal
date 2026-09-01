@@ -47,6 +47,8 @@ export interface PrivyConfig {
   maxNativeValueWei: bigint;
   /** policy ids reviewed and approved for this release */
   expectedPolicyIds?: string[];
+  /** additional signer/key-quorum used by the runtime; owner stays offline */
+  expectedSignerId?: string;
 }
 
 /**
@@ -103,6 +105,7 @@ interface PrivyWallet {
   /** the authorization key or quorum whose signature Privy requires. null = none. */
   owner_id?: string | null;
   policy_ids?: string[];
+  additional_signers?: { signer_id: string; override_policy_ids?: string[] }[];
 }
 
 /** What the enclave is actually enforcing, as opposed to what we configured. */
@@ -113,6 +116,7 @@ export interface SignerGuards {
   /** true only when BOTH walls are real at Privy */
   fullyGuarded: boolean;
   policyIds: string[];
+  signerId: string | null;
 }
 
 export class PrivySigner implements TradingSigner {
@@ -120,6 +124,7 @@ export class PrivySigner implements TradingSigner {
   private verifiedAddress: string | null = null;
   private ownerId: string | null = null;
   private policyIds: string[] = [];
+  private signerId: string | null = null;
   private readonly allowed: Set<string>;
 
   private appGuarded(): boolean {
@@ -139,7 +144,10 @@ export class PrivySigner implements TradingSigner {
       ownerEnforced: !!this.ownerId,
       ownerId: this.ownerId,
       policyCount: this.policyIds.length,
-      fullyGuarded: !!this.ownerId && !!this.cfg.authorizationKey && policyMatch && this.appGuarded(),
+      signerId: this.signerId,
+      fullyGuarded: !!this.ownerId && !!this.cfg.authorizationKey
+        && (!this.cfg.expectedSignerId || this.signerId === this.cfg.expectedSignerId)
+        && policyMatch && this.appGuarded(),
       policyIds: [...this.policyIds],
     };
   }
@@ -276,22 +284,35 @@ export class PrivySigner implements TradingSigner {
       // is safe to fund a wallet. Asserting a control that is not in force is
       // worse than saying nothing at all.
       this.ownerId = wallet.owner_id ?? null;
-      this.policyIds = wallet.policy_ids ?? [];
+      const expectedSigner = this.cfg.expectedSignerId;
+      const attachedSigner = expectedSigner
+        ? (wallet.additional_signers ?? []).find((entry) => entry.signer_id === expectedSigner)
+        : null;
+      this.signerId = attachedSigner?.signer_id ?? null;
+      this.policyIds = expectedSigner
+        ? (attachedSigner?.override_policy_ids ?? [])
+        : (wallet.policy_ids ?? []);
       this.verifiedAddress = getAddress(wallet.address);
 
       const guards: string[] = [];
       guards.push(this.ownerId
         ? `owner ${this.ownerId} enforced`
         : 'NO OWNER — the app secret alone can move this wallet');
+      guards.push(expectedSigner
+        ? (this.signerId === expectedSigner
+          ? `runtime signer ${expectedSigner} attached`
+          : `RUNTIME SIGNER ${expectedSigner} NOT ATTACHED`)
+        : 'runtime authorization uses the wallet owner');
       guards.push(this.policyIds.length
-        ? `${this.policyIds.length} policy(ies) attached`
+        ? `${this.policyIds.length} policy(ies) attached to runtime authorization`
         : 'NO POLICY — nothing caps a transaction at the enclave');
 
       const expectedPolicies = this.cfg.expectedPolicyIds ?? [];
       const policyMatch = expectedPolicies.length > 0 &&
         expectedPolicies.every((id) => this.policyIds.includes(id));
       const appGuarded = this.appGuarded();
-      const fullyGuarded = !!this.ownerId && !!this.cfg.authorizationKey && policyMatch && appGuarded;
+      const signerMatch = !expectedSigner || this.signerId === expectedSigner;
+      const fullyGuarded = !!this.ownerId && !!this.cfg.authorizationKey && signerMatch && policyMatch && appGuarded;
       return {
         ready: fullyGuarded,
         address: this.verifiedAddress,
@@ -330,7 +351,7 @@ export class PrivySigner implements TradingSigner {
           'Add it to SIGNER_ALLOWED_TARGETS only after verifying it against the venue\'s own documentation.',
       );
     }
-    if (req.value !== 0n || req.value > this.cfg.maxNativeValueWei) {
+    if (req.value > this.cfg.maxNativeValueWei) {
       throw new Error(
         `refusing to sign: native value ${req.value} wei is forbidden; signer ceiling is ${this.cfg.maxNativeValueWei} wei`,
       );
@@ -393,9 +414,17 @@ export function privyConfigFromEnv(): PrivyConfig {
   } else if (process.env.NODE_ENV !== 'production') {
     authorizationKey = process.env.PRIVY_AUTHORIZATION_KEY || undefined;
   }
+  const appSecretFile = process.env.PRIVY_APP_SECRET_FILE;
+  if (process.env.NODE_ENV === 'production' && process.env.PRIVY_APP_SECRET && !appSecretFile) {
+    throw new Error('PRIVY_APP_SECRET is forbidden in production; use PRIVY_APP_SECRET_FILE');
+  }
+  const appSecret = appSecretFile
+    ? fs.readFileSync(appSecretFile, 'utf8').trim()
+    : (process.env.NODE_ENV !== 'production' ? process.env.PRIVY_APP_SECRET ?? '' : '');
+  if (appSecretFile && !appSecret) throw new Error('PRIVY_APP_SECRET_FILE is empty');
   return {
     appId: process.env.PRIVY_APP_ID ?? '',
-    appSecret: process.env.PRIVY_APP_SECRET ?? '',
+    appSecret,
     walletId: process.env.PRIVY_WALLET_ID ?? '',
     expectedAddress: process.env.TRADING_WALLET_ADDRESS ?? '',
     authorizationKey,
@@ -403,5 +432,6 @@ export function privyConfigFromEnv(): PrivyConfig {
       .split(',').map((s) => s.trim()).filter(Boolean),
     maxNativeValueWei: BigInt(Math.round(Number(maxEth) * 1e18)),
     expectedPolicyIds: (process.env.PRIVY_POLICY_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+    expectedSignerId: process.env.PRIVY_SIGNER_ID || undefined,
   };
 }

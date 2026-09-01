@@ -20,6 +20,8 @@ export interface RouteRequest {
   accountId?: number;
   grossEdgeBps?: number;
   safetyBufferBps?: number;
+  /** exact base quantity for a receipt-derived close; only valid for sells */
+  exactSellQuantity?: number;
   /** present when this order spends a delegated wallet rather than the house book */
   delegation?: { grantId: number; isExit: boolean };
 }
@@ -148,6 +150,7 @@ export class ExecutionRouter {
       expectedPrice,
       grossEdgeBps: req.grossEdgeBps,
       safetyBufferBps: req.safetyBufferBps,
+      exactSellQuantity: req.exactSellQuantity,
     });
     if (!result.accepted) {
       return { ...result, slippageBps: 0, minReceive };

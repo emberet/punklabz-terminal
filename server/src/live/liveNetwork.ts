@@ -18,6 +18,7 @@ import type { TradingSigner } from './signing/signer.js';
 import { currentWeights } from '../research/scoring.js';
 import { openEdgeClaim } from '../research/predictions.js';
 import { appendAudit } from '../audit/auditLog.js';
+import { runTradeHuddle } from '../research/discussion.js';
 
 // SHADOW pipeline: mirrors real strategy activity through the full live order
 // lifecycle — intent → risk engine → (theoretical) execution → ledger — with
@@ -27,6 +28,11 @@ import { appendAudit } from '../audit/auditLog.js';
 interface Lot {
   qty: number;
   avgPrice: number;
+}
+
+interface OperatorTradeContext {
+  experimentRunId?: number;
+  exactSellQuantity?: number;
 }
 
 export class LiveNetwork {
@@ -101,20 +107,28 @@ export class LiveNetwork {
    * silently doing nothing looks identical to a quiet market, and the whole
    * point of the resolver is that the refusal is visible and explains itself.
    */
-  private recordUnroutable(trade: TradeView, mode: string, reason: string, forcedBy?: string): void {
+  private recordUnroutable(
+    trade: TradeView,
+    mode: string,
+    reason: string,
+    forcedBy?: string,
+    context: OperatorTradeContext = {},
+  ): void {
     const account = accountForMode(this.db, mode as never);
     const now = Date.now();
     this.db
       .prepare(
         `INSERT OR IGNORE INTO live_orders
            (intent_id, execution_account_id, bot_id, instrument_id, venue, side,
-            requested_notional_micro, mode, state, reject_reason, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'unresolved', ?, 0, ?, 'risk_rejected', ?, ?, ?)`,
+            requested_notional_micro, mode, state, reject_reason, forced_by, operator_test,
+            experiment_run_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'unresolved', ?, 0, ?, 'risk_rejected', ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         `plz_unmapped_${trade.botId}_${trade.symbol}_${now}`,
-        account.id, forcedBy ? null : trade.botId, trade.symbol, trade.side, mode,
-        `no live instrument mapping: ${reason}`.slice(0, 300), now, now,
+        account.id, trade.botId, trade.symbol, trade.side, mode,
+        `no live instrument mapping: ${reason}`.slice(0, 300), forcedBy ?? null,
+        forcedBy ? 1 : 0, context.experimentRunId ?? null, now, now,
       );
     this.hub.publish('live', { event: 'order_rejected', symbol: trade.symbol, reason });
   }
@@ -133,11 +147,14 @@ export class LiveNetwork {
    * runs in production.
    */
   async forceTrade(params: {
+    botId: number;
     symbol: string;
     side: 'buy' | 'sell';
     notionalUsd: number;
     actor: string;
     idempotencyKey: string;
+    experimentRunId?: number;
+    exactSellQuantity?: number;
   }): Promise<{ orderId: number | null; state: string; detail: string }> {
     const cfg = getLiveConfig(this.db);
     if (cfg.halted) {
@@ -148,35 +165,39 @@ export class LiveNetwork {
       // No mark means no way to size the order or measure slippage against it.
       return { orderId: null, state: 'refused', detail: `no live mark for ${params.symbol}` };
     }
+    const bot = this.db.prepare(`SELECT id, name, status FROM bots WHERE id=?`).get(params.botId) as
+      { id: number; name: string; status: string } | undefined;
+    if (!bot || bot.status === 'stopped') {
+      return { orderId: null, state: 'refused', detail: `sponsor bot ${params.botId} is not active` };
+    }
+    if (params.side !== 'sell' && params.exactSellQuantity !== undefined) {
+      return { orderId: null, state: 'refused', detail: 'exact quantity is only valid for a sell' };
+    }
 
     appendAudit(this.db, params.actor, 'live_force_trade', {
-      symbol: params.symbol, side: params.side, notionalUsd: params.notionalUsd, mode: cfg.mode,
+      botId: params.botId, symbol: params.symbol, side: params.side,
+      notionalUsd: params.notionalUsd, mode: cfg.mode, experimentRunId: params.experimentRunId,
     });
 
     const account = accountForMode(this.db, cfg.mode, 'evm:robinhood');
     const sourceId = `operator:${params.idempotencyKey}`;
     const synthetic: TradeView = {
       id: 0,
-      botId: 0,
+      botId: params.botId,
       symbol: params.symbol,
       side: params.side,
-      qty: params.notionalUsd / price,
+      qty: params.exactSellQuantity ?? params.notionalUsd / price,
       price,
       feeUsd: 0,
       realizedPnlUsd: 0,
       ts: Date.now(),
-      reason: `operator force by ${params.actor}`,
+      reason: `operator test sponsored by ${bot.name}; forced by ${params.actor}`,
     };
     await this.mirrorTrade(
-      {
-        // A forced trade has no bot behind it. botId 0 keeps it out of every
-        // real machine's lot book and win-rate stats; the order row itself
-        // stores NULL, because attributing this to a strategy would be a lie
-        // that later reads as evidence.
-        ...synthetic,
-      },
+      synthetic,
       params.actor,
       sourceId,
+      { experimentRunId: params.experimentRunId, exactSellQuantity: params.exactSellQuantity },
     );
 
     const intentId = this.intentId(cfg.mode, account.id, synthetic, sourceId);
@@ -219,7 +240,12 @@ export class LiveNetwork {
     return qty > 1e-9 ? { qty, avgPrice: cost / qty } : null;
   }
 
-  private async mirrorTrade(trade: TradeView, forcedBy?: string, sourceId?: string): Promise<void> {
+  private async mirrorTrade(
+    trade: TradeView,
+    forcedBy?: string,
+    sourceId?: string,
+    context: OperatorTradeContext = {},
+  ): Promise<void> {
     const cfg = getLiveConfig(this.db);
     if (cfg.mode === 'simulation') return; // live pipeline off
 
@@ -234,14 +260,14 @@ export class LiveNetwork {
     // that can move funds must resolve.
     const realMoney = cfg.mode === 'canary' || cfg.mode === 'live';
     if (realMoney && Date.now() - trade.ts > 60_000) {
-      this.recordUnroutable(trade, cfg.mode, 'signal is older than 60 seconds', forcedBy);
+      this.recordUnroutable(trade, cfg.mode, 'signal is older than 60 seconds', forcedBy, context);
       return;
     }
     let inst;
     if (realMoney) {
       const resolution = resolveLiveInstrument(trade.symbol);
       if (!resolution.mapped || !resolution.instrument) {
-        this.recordUnroutable(trade, cfg.mode, resolution.reason, forcedBy);
+        this.recordUnroutable(trade, cfg.mode, resolution.reason, forcedBy, context);
         return;
       }
       inst = resolution.instrument;
@@ -257,6 +283,22 @@ export class LiveNetwork {
     const lotKey = `${account.id}:${trade.botId}:${instrumentId}`;
     const lot = this.ledgerLot(account.id, trade.botId, instrumentId) ?? this.lots.get(lotKey);
     const closingLot = trade.side === 'sell' && !!lot;
+    const exactFullExit = context.exactSellQuantity !== undefined;
+    if (exactFullExit) {
+      if (!context.experimentRunId || !closingLot || !lot) {
+        this.recordUnroutable(trade, cfg.mode, 'exact sell requires a probe run and an open ledger lot', forcedBy, context);
+        return;
+      }
+      const tolerance = Math.max(1e-12, lot.qty * 1e-9);
+      if (context.exactSellQuantity! > lot.qty + tolerance) {
+        this.recordUnroutable(
+          trade, cfg.mode,
+          `exact sell quantity ${context.exactSellQuantity} exceeds ledger lot ${lot.qty}`,
+          forcedBy, context,
+        );
+        return;
+      }
+    }
     // scale the paper notional down to live sizing (paper bots run $10k books)
     //
     // A forced trade is NOT scaled: the operator named a real dollar amount,
@@ -264,7 +306,9 @@ export class LiveNetwork {
     // test into $0.03. It is still clamped by the per-trade cap below, which is
     // the gate that actually protects funds.
     const perTradeCap = (stageCap * cfg.limits.maxPerTradePct) / 100;
-    const requested = closingLot
+    const requested = context.exactSellQuantity !== undefined
+      ? context.exactSellQuantity * (this.markOf(trade.symbol) ?? trade.price)
+      : closingLot
       ? lot.qty * (this.markOf(trade.symbol) ?? trade.price)
       : forcedBy
       ? Math.max(0.5, Math.min(perTradeCap, trade.qty * trade.price))
@@ -272,7 +316,7 @@ export class LiveNetwork {
 
     const intent: OrderIntent = {
       intentId: this.intentId(cfg.mode, account.id, trade, sourceId),
-      botId: forcedBy ? null : trade.botId,
+      botId: trade.botId,
       instrumentId,
       venue: inst.venue,
       side: trade.side,
@@ -295,15 +339,19 @@ export class LiveNetwork {
         `INSERT OR IGNORE INTO live_orders
            (intent_id, execution_account_id, bot_id, instrument_id, venue, side,
             requested_notional_micro, mode, state, confidence, capital_stage, forced_by,
-            signal_ts, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?, ?)`,
+            signal_ts, operator_test, experiment_run_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(intent.intentId, account.id, intent.botId, instrumentId, inst.venue, intent.side,
-        toMicro(requested), cfg.mode, conf.composite, cfg.capitalStage, forcedBy ?? null, trade.ts, now, now);
+        toMicro(requested), cfg.mode, conf.composite, cfg.capitalStage, forcedBy ?? null, trade.ts,
+        forcedBy ? 1 : 0, context.experimentRunId ?? null, now, now);
     if (info.changes === 0) return;
     const orderId = Number(info.lastInsertRowid);
 
-    const decision = evaluateIntent(this.db, intent, edge, account.id, undefined, { isExit: closingLot });
+    const decision = evaluateIntent(this.db, intent, edge, account.id, undefined, {
+      isExit: closingLot,
+      exactFullExit,
+    });
 
     this.db
       .prepare(`UPDATE live_orders SET state = ?, approved_notional_micro = ?, risk_json = ?, reject_reason = ?, updated_at = ? WHERE id = ?`)
@@ -315,6 +363,31 @@ export class LiveNetwork {
         Date.now(),
         orderId,
       );
+
+    if (trade.symbol === 'ETHUSDT') {
+      const measuredInputs = {
+        intentId: intent.intentId,
+        orderId,
+        symbol: trade.symbol,
+        side: trade.side,
+        requestedNotionalUsd: requested,
+        approved: decision.approved,
+        approvedNotionalUsd: decision.sizeUsd,
+        confidence: conf,
+        edge,
+        riskChecks: decision.checks,
+        advisory: true,
+      };
+      void runTradeHuddle(
+        this.db, this.hub, this.candles, this.markOf,
+        { orderId, signalId: intent.intentId, botId: trade.botId, symbol: trade.symbol, side: trade.side, measuredInputs },
+      ).then((session) => {
+        if (session.sessionId) {
+          this.db.prepare(`UPDATE live_orders SET discussion_session_id=? WHERE id=?`)
+            .run(session.sessionId, orderId);
+        }
+      }).catch((error) => console.error('trade huddle failed:', String(error).slice(0, 120)));
+    }
 
     if (!decision.approved) {
       this.hub.publish('live', { event: 'order_rejected', orderId, reason: decision.rejectionReason });
@@ -334,9 +407,9 @@ export class LiveNetwork {
     this.db.prepare(`UPDATE live_orders SET state = 'submitting', expected_price = ?, updated_at = ? WHERE id = ?`)
       .run(expected, Date.now(), orderId);
 
-    // Route exactly the amount the risk engine approved. A large exit may need
-    // several bounded transactions; using the whole lot here would silently
-    // undo the per-transaction cap applied above.
+    // Route exactly the amount the risk engine approved. The only exception is
+    // a caller-verified, receipt-derived full-lot probe close; its approved
+    // notional was computed from this same exact quantity above.
     const notional = decision.sizeUsd;
     const routeReq = {
       instrumentId,
@@ -349,6 +422,7 @@ export class LiveNetwork {
       accountId: account.id,
       grossEdgeBps: forcedBy ? undefined : edge.grossEdgeBps,
       safetyBufferBps: Math.max(10, edge.bufferBps),
+      exactSellQuantity: context.exactSellQuantity,
     };
     const routed = this.router.route(routeReq);
     const result = await this.router.execute(routed, routeReq, expected);

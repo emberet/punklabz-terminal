@@ -26,9 +26,14 @@ export function settleConfirmedOrder(db: DB, orderId: number, status: AdapterOrd
   const slippageBps = expected > 0
     ? ((status.executedPrice - expected) / expected) * 10_000 * (order.side === 'buy' ? 1 : -1)
     : 0;
-  const gasEth = -status.assetDeltas
+  const swapGasEth = -status.assetDeltas
     .filter((d) => d.asset === 'ETH' && d.qtyDelta < 0)
     .reduce((sum, d) => sum + d.qtyDelta, 0);
+  const priorGas = db.prepare(
+    `SELECT COALESCE(SUM(CAST(qty_delta AS REAL)),0) qty
+     FROM execution_asset_ledger WHERE order_id=? AND asset='ETH' AND event_type='gas'`,
+  ).get(orderId) as { qty: number };
+  const gasEth = swapGasEth + Math.max(0, -priorGas.qty);
   const gasMicro = toMicro(gasEth * status.executedPrice);
 
   let realizedMicro = 0;

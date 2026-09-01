@@ -10,7 +10,7 @@ import { buildAdapters, NotConfiguredAdapter } from '../src/live/adapters.js';
 import { ExecutionRouter } from '../src/live/executionRouter.js';
 import { runPreflight } from '../src/live/preflight.js';
 import { reconcileAccount } from '../src/live/reconciler.js';
-import { accountForMode, fundingFor, recordFunding } from '../src/live/accounts.js';
+import { accountForMode, bindTraderWallet, fundingFor, recordFunding } from '../src/live/accounts.js';
 import { NoSigner } from '../src/live/signing/signer.js';
 import { PrivySigner } from '../src/live/signing/privySigner.js';
 import { encodeFunctionData } from 'viem';
@@ -462,7 +462,7 @@ describe('external funding vs reconciliation', () => {
 
   beforeEach(() => {
     db = openTestDb();
-    accountId = accountForMode(db, 'canary', ROBINHOOD_VENUE).id;
+    accountId = bindTraderWallet(db, TAKER).id;
   });
 
   it('an unrecorded deposit HALTS — the reconciler is right, the ledger is incomplete', async () => {

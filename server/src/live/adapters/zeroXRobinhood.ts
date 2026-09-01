@@ -546,6 +546,7 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
       expectedPrice?: number;
       grossEdgeBps?: number;
       safetyBufferBps?: number;
+      exactSellQuantity?: number;
     },
   ): Promise<AdapterOrderResult> {
     if (!this.opts.apiKey) return { accepted: false, error: 'NOT_CONFIGURED: ZEROX_API_KEY missing' };
@@ -573,9 +574,16 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
     if (side === 'buy') {
       sellAmount = parseUnits(notionalUsd.toFixed(sellTok.decimals), sellTok.decimals);
     } else {
-      const mark = await this.getQuote(inst);
-      if (!mark?.price) return { accepted: false, error: 'no mark available to size a sell' };
-      sellAmount = parseUnits((notionalUsd / mark.price).toFixed(sellTok.decimals), sellTok.decimals);
+      if (opts.exactSellQuantity !== undefined) {
+        if (!Number.isFinite(opts.exactSellQuantity) || opts.exactSellQuantity <= 0) {
+          return { accepted: false, error: 'exact sell quantity must be positive' };
+        }
+        sellAmount = parseUnits(opts.exactSellQuantity.toFixed(sellTok.decimals), sellTok.decimals);
+      } else {
+        const mark = await this.getQuote(inst);
+        if (!mark?.price) return { accepted: false, error: 'no mark available to size a sell' };
+        sellAmount = parseUnits((notionalUsd / mark.price).toFixed(sellTok.decimals), sellTok.decimals);
+      }
     }
     if (sellAmount <= 0n) return { accepted: false, error: 'computed sell amount is zero' };
 
@@ -617,6 +625,13 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
           `UPDATE execution_transactions SET state='confirmed', block_number=?, block_hash=?, confirmations=1,
            signed_payload=NULL, updated_at=? WHERE id=?`,
         ).run(Number(receipt.blockNumber), receipt.blockHash, Date.now(), approval.transactionId);
+        const approvalGas = receipt.gasUsed * receipt.effectiveGasPrice;
+        this.opts.db?.prepare(
+          `INSERT OR IGNORE INTO execution_asset_ledger
+            (execution_account_id, order_id, transaction_id, asset, qty_delta, event_type, tx_ref, log_index, ts)
+           VALUES (?, ?, ?, 'ETH', ?, 'gas', ?, -1, ?)`,
+        ).run(opts.accountId, opts.orderId, approval.transactionId,
+          String(-Number(formatUnits(approvalGas, 18))), approval.hash, Date.now());
         approvalConsumedGas = true;
       }
     } catch (e) {
@@ -916,8 +931,8 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
     return transfers;
   }
 
-  async getBalances(): Promise<AdapterBalance[]> {
-    const address = await this.opts.signer.getAddress();
+  async getBalances(walletAddress?: string): Promise<AdapterBalance[]> {
+    const address = walletAddress ?? await this.opts.signer.getAddress();
     if (!address) return [];
     const spec = resolveLiveInstrument('ETHUSDT').spec;
     const out: AdapterBalance[] = [];
@@ -942,9 +957,9 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
   }
 
   /** The chain is authoritative. Drift is reported, never silently corrected. */
-  async reconcile(): Promise<ReconciliationResult> {
+  async reconcile(walletAddress?: string): Promise<ReconciliationResult> {
     try {
-      const balances = await this.getBalances();
+      const balances = await this.getBalances(walletAddress);
       return {
         ok: true,
         balances,

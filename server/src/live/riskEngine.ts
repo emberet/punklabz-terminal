@@ -1,6 +1,6 @@
 import {
   CAPITAL_STAGES, DEFAULT_LIMITS, MIN_TRADE_USD,
-  type ExecutionMode, type OrderIntent, type RiskCheck, type RiskDecision, type RiskLimits,
+  type ExecutionMode, type LiveExecutionPhase, type OrderIntent, type RiskCheck, type RiskDecision, type RiskLimits,
 } from '@punklabz/shared';
 import type { DB } from '../db/db.js';
 import { fromMicro, toMicro } from '../money.js';
@@ -24,6 +24,8 @@ export function getLiveConfig(db: DB): {
   haltReason: string | null;
   capitalStage: number;
   limits: RiskLimits;
+  phase: LiveExecutionPhase;
+  autonomyEnabled: boolean;
 } {
   let row = db.prepare(`SELECT * FROM live_config WHERE id = 1`).get() as any;
   if (!row) {
@@ -38,6 +40,8 @@ export function getLiveConfig(db: DB): {
     haltReason: row.halt_reason,
     capitalStage: row.capital_stage,
     limits: { ...DEFAULT_LIMITS, ...JSON.parse(row.limits_json) },
+    phase: (row.execution_phase ?? row.mode) as LiveExecutionPhase,
+    autonomyEnabled: row.autonomy_enabled === 1,
   };
 }
 
@@ -67,9 +71,15 @@ export function setLiveMode(
   }
   db.prepare(
     `UPDATE live_config SET mode = ?,
+       execution_phase = CASE
+         WHEN ? = 'canary' THEN 'canary_probe'
+         WHEN ? = 'live' THEN 'live'
+         ELSE ?
+       END,
+       autonomy_enabled = CASE WHEN ? = 'live' THEN 1 ELSE 0 END,
        shadow_armed_at = CASE WHEN ? = 'simulation' THEN NULL ELSE shadow_armed_at END,
        updated_at = ? WHERE id = 1`,
-  ).run(mode, mode, Date.now());
+  ).run(mode, mode, mode, mode, mode, mode, Date.now());
   appendAudit(db, actor, 'live_mode_change', { mode, preflightPassed: preflight?.passed ?? null });
 }
 
@@ -77,11 +87,56 @@ export function haltNetwork(db: DB, reason: string, actor: string): void {
   getLiveConfig(db); // ensure the config row exists
   db.prepare(
     `UPDATE live_config SET halted = 1, halt_reason = ?,
+       autonomy_enabled = 0,
        shadow_armed_at = CASE WHEN mode='shadow' THEN NULL ELSE shadow_armed_at END,
        updated_at = ? WHERE id = 1`,
   ).run(reason, Date.now());
   appendAudit(db, actor, 'live_halt', { reason });
   alertOperator('live_halt', reason);
+}
+
+/** A completed probe is tied to the exact Trader wallet and signer policy. */
+export function completedCanaryExperiment(
+  db: DB,
+  walletAddress: string,
+  policyFingerprint: string,
+): { id: number; reconciliationRunId: number } | null {
+  const row = db.prepare(
+    `SELECT id, reconciliation_run_id reconciliationRunId
+     FROM canary_experiment_runs
+     WHERE state='completed' AND lower(wallet_address)=lower(?) AND policy_fingerprint=?
+       AND buy_order_id IS NOT NULL AND sell_order_id IS NOT NULL
+       AND reconciliation_run_id IS NOT NULL
+     ORDER BY completed_at DESC LIMIT 1`,
+  ).get(walletAddress, policyFingerprint) as { id: number; reconciliationRunId: number } | undefined;
+  return row ?? null;
+}
+
+export function enableCanaryAutonomy(
+  db: DB,
+  actor: string,
+  evidence: { experimentRunId: number; reconciliationRunId: number },
+): void {
+  const cfg = getLiveConfig(db);
+  if (cfg.mode !== 'canary' || cfg.halted || cfg.capitalStage !== 1 || cfg.phase !== 'canary_probe') {
+    throw new Error('BLOCKED: autonomy can only open from an active stage-1 canary probe');
+  }
+  const run = db.prepare(
+    `SELECT state, reconciliation_run_id FROM canary_experiment_runs WHERE id=?`,
+  ).get(evidence.experimentRunId) as { state: string; reconciliation_run_id: number | null } | undefined;
+  if (!run || run.state !== 'completed' || run.reconciliation_run_id !== evidence.reconciliationRunId) {
+    throw new Error('BLOCKED: exact completed round-trip evidence is required');
+  }
+  const reconciliation = db.prepare(
+    `SELECT status FROM reconciliation_runs WHERE id=?`,
+  ).get(evidence.reconciliationRunId) as { status: string } | undefined;
+  if (reconciliation?.status !== 'clean') throw new Error('BLOCKED: experiment reconciliation is not clean');
+  db.prepare(
+    `UPDATE live_config SET execution_phase='autonomous_canary', autonomy_enabled=1,
+     updated_at=? WHERE id=1`,
+  ).run(Date.now());
+  appendAudit(db, actor, 'live_canary_autonomy_enabled', evidence);
+  alertOperator('live_canary_autonomy_enabled', `autonomous $5 canary enabled by ${actor}`);
 }
 
 export function resumeAfterSafetyChecks(
@@ -214,6 +269,11 @@ export interface EdgeInput {
 export interface RiskEvaluationContext {
   /** Existing exposure being reduced. Entry-only constraints do not trap it. */
   isExit?: boolean;
+  /**
+   * A receipt-derived close of the caller-verified full ledger lot. This may
+   * exceed the entry-sized transaction cap only to remove that exact exposure.
+   */
+  exactFullExit?: boolean;
 }
 
 /**
@@ -266,6 +326,12 @@ export function evaluateIntent(
   const forced = typeof intent.forcedBy === 'string' && intent.forcedBy.length > 0;
   const isExit = context.isExit === true;
 
+  if (cfg.mode === 'canary' && !cfg.autonomyEnabled && !forced) {
+    fail('autonomy', 'canary probe permits audited operator tests only');
+  } else {
+    pass('autonomy', cfg.autonomyEnabled ? 'autonomous execution enabled' : 'audited operator test');
+  }
+
   if (intent.confidence < cfg.limits.confidenceThreshold) {
     if (forced || isExit)
       pass('confidence', `composite ${intent.confidence} < threshold ${cfg.limits.confidenceThreshold} — ${isExit ? 'existing exposure exit' : `OVERRIDDEN by ${intent.forcedBy}`}`);
@@ -303,10 +369,20 @@ export function evaluateIntent(
   const isDelegatedExit = !!delegation && intent.side === 'sell' && delegation.hasOpenLot;
   const delegatedHeadroom =
     delegation && !isDelegatedExit ? grantHeadroomUsd(db, delegation.grantId) : Infinity;
-  const size = Math.min(intent.notionalUsd, maxPerTrade, delegatedHeadroom);
+  const exactFullExit = isExit && context.exactFullExit === true;
+  const transactionCeiling = exactFullExit ? intent.notionalUsd : maxPerTrade;
+  const size = Math.min(intent.notionalUsd, transactionCeiling, delegatedHeadroom);
 
   if (stageCap <= 0) fail('capital_stage', 'stage 0: $0 deployable — shadow accounting only');
   else pass('capital_stage', `stage ${cfg.capitalStage}: cap $${stageCap}`);
+
+  if (exactFullExit) {
+    pass('max_trade', `exact receipt-derived full-lot exit $${size.toFixed(2)}; no new exposure`);
+  } else if (intent.notionalUsd > maxPerTrade + 1e-9) {
+    pass('max_trade', `clamped from $${intent.notionalUsd.toFixed(2)} to $${size.toFixed(2)}`);
+  } else {
+    pass('max_trade', `$${size.toFixed(2)} within $${maxPerTrade.toFixed(2)} ceiling`);
+  }
 
   if (size < MIN_TRADE_USD)
     fail('min_size', `size $${size.toFixed(2)} below the $${MIN_TRADE_USD.toFixed(2)} floor — not worth fees`);

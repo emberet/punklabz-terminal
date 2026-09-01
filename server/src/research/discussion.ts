@@ -6,8 +6,9 @@ import { config } from '../config.js';
 import {
   FORUM_MODEL, SYSTEM_AGENTS, machineFacts, post, systemFacts,
 } from '../toolkit/forum.js';
-import { recordSpend, spendGuard, takeRateLimit } from './budget.js';
+import { costUsd, recordSpend, spendGuard, takeRateLimit } from './budget.js';
 import { trackRecord } from './scoring.js';
+import { toMicro } from '../money.js';
 
 // SCHEDULED DISCUSSION.
 //
@@ -24,9 +25,9 @@ import { trackRecord } from './scoring.js';
 // Every session passes the same two gates as any other model call: a
 // database-backed rate limit and the measured monthly budget.
 
-export type SessionKind = 'standup' | 'debate' | 'retro';
+export type SessionKind = 'standup' | 'debate' | 'retro' | 'trade_huddle';
 
-const TURN_BUDGET: Record<SessionKind, number> = { standup: 3, debate: 4, retro: 3 };
+const TURN_BUDGET: Record<SessionKind, number> = { standup: 3, debate: 4, retro: 3, trade_huddle: 5 };
 
 interface Speaker {
   kind: 'machine' | 'system_agent';
@@ -84,10 +85,110 @@ export interface SessionResult {
   sessionId?: number;
 }
 
+export interface TradeHuddleInput {
+  orderId: number;
+  signalId: string;
+  botId: number;
+  symbol: string;
+  side: 'buy' | 'sell';
+  measuredInputs: Record<string, unknown>;
+}
+
+/**
+ * Event-linked advisory discussion. Its output is written only to research and
+ * Forum tables; no return value is consumed by routing or risk code.
+ */
+export async function runTradeHuddle(
+  db: DB,
+  hub: WsHub,
+  candles: CandleStore,
+  markOf: (s: string) => number | undefined,
+  input: TradeHuddleInput,
+): Promise<SessionResult> {
+  const kind = 'trade_huddle' as const;
+  if (!config.anthropicApiKey) return { kind, ran: false, reason: 'no ANTHROPIC_API_KEY', turns: 0 };
+  const gate = takeRateLimit(db, 'discussion:trade-huddle', {
+    cooldownMs: 15 * 60_000, maxInWindow: 12, windowMs: 86_400_000,
+  });
+  if (!gate.allowed) return { kind, ran: false, reason: gate.reason, turns: 0 };
+  const budget = spendGuard(db, 'discussion');
+  if (!budget.allowed) return { kind, ran: false, reason: budget.reason, turns: 0 };
+
+  const origin = db.prepare(`SELECT id, name FROM bots WHERE id=?`).get(input.botId) as
+    { id: number; name: string } | undefined;
+  if (!origin) return { kind, ran: false, reason: 'originating trader missing', turns: 0 };
+  const challenger = db.prepare(
+    `SELECT id, name FROM bots WHERE kind='house' AND id<>? AND status IN ('running','paused') ORDER BY id LIMIT 1`,
+  ).get(input.botId) as { id: number; name: string } | undefined;
+  const speakers: Speaker[] = [{ kind: 'machine', id: origin.id, name: origin.name }];
+  if (challenger) speakers.push({ kind: 'machine', id: challenger.id, name: challenger.name });
+  speakers.push(...systemSpeakers(['INTERN', 'RISK CORE', 'MANAGER']));
+
+  const startedAt = Date.now();
+  const topic = `ADVISORY ${input.side.toUpperCase()} huddle for ${input.symbol}`;
+  const sessionId = Number(db.prepare(
+    `INSERT INTO research_sessions
+      (kind, topic, started_at, related_order_id, advisory, related_signal_id, measured_inputs_json)
+     VALUES ('trade_huddle', ?, ?, ?, 1, ?, ?)`,
+  ).run(topic, startedAt, input.orderId, input.signalId, JSON.stringify(input.measuredInputs)).lastInsertRowid);
+  const client = new Anthropic({ apiKey: config.anthropicApiKey });
+  const transcript: { speaker: string; text: string }[] = [];
+  let tokensIn = 0;
+  let tokensOut = 0;
+
+  for (const speaker of speakers) {
+    const facts = speaker.kind === 'machine' && speaker.id
+      ? machineFacts(db, candles, speaker.id, markOf)
+      : systemFacts(db);
+    if (!facts) continue;
+    const persona = speaker.kind === 'system_agent'
+      ? SYSTEM_AGENTS[speaker.name]
+      : `You are ${speaker.name}, an autonomous trading machine in the PunkLabz network.`;
+    try {
+      const res = await client.messages.create({
+        model: FORUM_MODEL,
+        max_tokens: 180,
+        system:
+          `${persona}\n\nMEASURED SIGNAL AND RISK INPUTS:\n${JSON.stringify(input.measuredInputs)}\n\n` +
+          `YOUR MEASURED STATE:\n${JSON.stringify(facts)}\n\n` +
+          `PRIOR ADVISORY TURNS:\n${JSON.stringify(transcript)}\n\n` +
+          'This is an ADVISORY discussion already linked to an independently evaluated order. ' +
+          'Nothing you say can create, resize, approve, reject, or alter that order. ' +
+          'Use only supplied facts and numbers. Give one short trading-desk observation. No financial advice.',
+        messages: [{ role: 'user', content: `Take your advisory turn on ${input.symbol}.` }],
+      });
+      tokensIn += res.usage.input_tokens;
+      tokensOut += res.usage.output_tokens;
+      recordSpend(db, 'discussion', res.usage.input_tokens, res.usage.output_tokens);
+      const text = res.content.find((block) => block.type === 'text')?.text?.trim();
+      if (!text) continue;
+      transcript.push({ speaker: speaker.name, text });
+      post(db, hub, {
+        authorKind: speaker.kind, authorId: speaker.id ?? null, authorName: speaker.name,
+        body: text, replyTo: null, topic: `advisory:${sessionId}`,
+      });
+    } catch (error) {
+      console.error(`trade huddle turn from ${speaker.name} failed:`, String(error).slice(0, 120));
+    }
+  }
+
+  db.prepare(
+    `UPDATE research_sessions SET ended_at=?, turns=?, tokens_in=?, tokens_out=?, cost_micro=?,
+     outcome=?, transcript_json=? WHERE id=?`,
+  ).run(Date.now(), transcript.length, tokensIn, tokensOut, toMicro(costUsd(tokensIn, tokensOut)),
+    transcript.length ? 'completed_advisory' : 'no turns produced', JSON.stringify(transcript), sessionId);
+  return {
+    kind, ran: transcript.length > 0,
+    reason: transcript.length ? `${transcript.length} advisory turn(s)` : 'no turns produced',
+    turns: transcript.length, sessionId,
+  };
+}
+
 const COOLDOWNS: Record<SessionKind, number> = {
   standup: 3.5 * 3_600_000,  // scheduled every 4h; the gap stops a restart storm re-running it
   debate: 20 * 3_600_000,
   retro: 6 * 86_400_000,
+  trade_huddle: 15 * 60_000,
 };
 
 export async function runSession(

@@ -4,7 +4,7 @@ import { api } from '../lib/api';
 import { wsClient } from '../lib/ws';
 import { Panel } from './Panel';
 import { NumberTicker } from './motion/NumberTicker';
-import { fmtUsd, fmtTime } from '../lib/format';
+import { fmtUsd, fmtTime, shortAddr } from '../lib/format';
 import { useAuth } from '../lib/auth';
 
 interface LiveOrder {
@@ -26,6 +26,8 @@ interface LiveOrder {
   feeUsd: number;
   rejectReason: string | null;
   ts: number;
+  operatorTest?: boolean;
+  experimentRunId?: number | null;
 }
 
 interface Venue {
@@ -44,6 +46,21 @@ interface Preflight {
 interface CapitalControls {
   allocations: { botId: number; botName: string; allocatedUsdg: number; active: number }[];
   bots: { id: number; name: string; status: string }[];
+  accounts: {
+    id: number; name: string; role: string; walletAddress: string | null;
+    holdings: Record<string, number>; fundingProof: { total: number; complete: boolean };
+  }[];
+}
+
+interface AdvisorySession {
+  id: number;
+  topic: string;
+  orderId: number;
+  orderState: string;
+  transcript: { speaker: string; text: string }[];
+  turns: number;
+  outcome: string;
+  startedAt: number;
 }
 
 const NETWORK_MAP = `                [ PUNKLABZ ]
@@ -69,7 +86,8 @@ export function LiveNetworkPanel() {
   const [expanded, setExpanded] = useState<number | null>(null);
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
-  const [capital, setCapital] = useState<CapitalControls>({ allocations: [], bots: [] });
+  const [capital, setCapital] = useState<CapitalControls>({ allocations: [], bots: [], accounts: [] });
+  const [discussions, setDiscussions] = useState<AdvisorySession[]>([]);
   const [allocationBot, setAllocationBot] = useState('');
   const [allocationUsd, setAllocationUsd] = useState('0.50');
 
@@ -83,6 +101,8 @@ export function LiveNetworkPanel() {
       setCapital(r);
       setAllocationBot((current) => current || String(r.bots[0]?.id ?? ''));
     }).catch(() => {});
+    void api.get<{ sessions: AdvisorySession[] }>('/api/admin/live/discussions?limit=8')
+      .then((r) => setDiscussions(r.sessions)).catch(() => {});
   };
 
   useEffect(() => {
@@ -109,15 +129,22 @@ export function LiveNetworkPanel() {
   };
 
   if (!status) return null;
+  const phase = status.phase ?? status.mode ?? 'shadow';
+  const phaseLabel = phase === 'canary_probe'
+    ? 'CANARY PROBE'
+    : phase === 'autonomous_canary'
+      ? 'AUTONOMOUS CANARY'
+      : phase.toUpperCase();
+  const sponsor = capital.bots.find((bot) => bot.name === 'MOMENTUM RUNNER');
   return (
     <>
       <Panel
-        title="LIVE NETWORK"
+        title="EXECUTION NETWORK"
         sub="Robinhood Chain mainnet — USDG trading cash, ETH gas, WETH/USDG execution"
         noPad
         right={
           <span className={`chip ${status.halted ? 'chip-stopped' : status.mode === 'simulation' ? 'chip-paused' : 'chip-running'}`}>
-            {status.halted ? '■ HALTED' : `● ${status.mode.toUpperCase()}`}
+            {status.halted ? '■ HALTED' : `● ${phaseLabel}`}
           </span>
         }
       >
@@ -130,6 +157,10 @@ export function LiveNetworkPanel() {
             {isAdmin && <div className="stat-tile">
               <div className="label">Wallet NAV</div>
               <div className="value">$<NumberTicker value={status.nav.totalUsd} format={(n) => n.toFixed(2)} /></div>
+            </div>}
+            {isAdmin && status.experiment && <div className="stat-tile">
+              <div className="label">Probe round trip</div>
+              <div className="value">{status.experiment.state.replaceAll('_', ' ').toUpperCase()}</div>
             </div>}
             {isAdmin && <div className="stat-tile">
               <div className="label">USDG cash</div>
@@ -221,6 +252,26 @@ export function LiveNetworkPanel() {
                   ARM MAINNET
                 </button>
               )}
+              {!status.halted && phase === 'canary_probe' && status.experiment?.state !== 'completed' && (
+                <button className="primary" disabled={busy || !sponsor} onClick={() => {
+                  const confirmation = window.prompt('Type RUN $0.50 ROUND TRIP');
+                  if (confirmation) void act(() => api.post('/api/admin/live/probe/roundtrip', {
+                    sponsorBotId: sponsor?.id,
+                    idempotencyKey: `probe:${Date.now()}:${crypto.randomUUID()}`,
+                    confirmation,
+                  }));
+                }}>
+                  RUN $0.50 ROUND TRIP
+                </button>
+              )}
+              {!status.halted && phase === 'canary_probe' && status.experiment?.state === 'completed' && (
+                <button className="primary" disabled={busy} onClick={() => {
+                  const confirmation = window.prompt('Type ENABLE AUTONOMOUS CANARY $5');
+                  if (confirmation) void act(() => api.post('/api/admin/live/canary/enable', { confirmation }));
+                }}>
+                  ENABLE $5 AUTONOMY
+                </button>
+              )}
               <button disabled={busy} onClick={() => void act(() => api.post('/api/admin/live/reconcile'))}>
                 RUN RECONCILIATION
               </button>
@@ -237,6 +288,25 @@ export function LiveNetworkPanel() {
           )}
         </div>
       </Panel>
+
+      {isAdmin && (
+        <Panel title="CUSTODY ISOLATION" sub="Manager funds Trader; only Trader reaches execution" noPad>
+          <div className="tape" style={{ maxHeight: 220 }}>
+            {capital.accounts.filter((account) => account.role !== 'book').map((account) => (
+              <div className="tape-row" key={account.id}>
+                <span className={account.role === 'trader' ? 'phos' : 'cyan'}>{account.name}</span>
+                <span className="soft">{account.role.replaceAll('_', ' ').toUpperCase()}</span>
+                <span>{Number(account.holdings.USDG ?? 0).toFixed(6)} USDG</span>
+                <span>{Number(account.holdings.ETH ?? 0).toFixed(6)} ETH</span>
+                <span className="dim">{account.walletAddress ? shortAddr(account.walletAddress) : 'UNBOUND'}</span>
+                <span className={account.fundingProof.complete ? 'phos' : 'red'}>
+                  {account.fundingProof.complete ? `${account.fundingProof.total} PROOF` : 'UNPROVEN'}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
 
       {isAdmin && (
         <Panel title="MANAGER ALLOCATIONS" sub="bounded USDG authority per autonomous bot" noPad>
@@ -272,6 +342,27 @@ export function LiveNetworkPanel() {
               ))}
             </div>
           </div>
+        </Panel>
+      )}
+
+      {isAdmin && discussions.length > 0 && (
+        <Panel title="ADVISORY HUDDLES" sub="linked to orders; no execution authority" noPad>
+          {discussions.map((session) => (
+            <div className="panel-body" key={session.id} style={{ borderTop: '1px solid var(--border)' }}>
+              <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+                <span className="amber">ADVISORY</span>
+                <span className="phos">ORDER #{session.orderId}</span>
+                <span className="soft">{session.orderState?.toUpperCase()}</span>
+                <span className="dim">{session.turns} TURNS</span>
+              </div>
+              {session.transcript.map((turn, index) => (
+                <div key={index} style={{ marginTop: 5 }}>
+                  <span className="cyan">{turn.speaker}:</span>{' '}
+                  <span className="soft">{turn.text}</span>
+                </div>
+              ))}
+            </div>
+          ))}
         </Panel>
       )}
 
@@ -342,6 +433,7 @@ export function LiveNetworkPanel() {
                     {o.state.toUpperCase()}
                   </span>
                   {o.confidence !== null && <span className="dim">conf {o.confidence}</span>}
+                  {o.operatorTest && <span className="amber">OPERATOR TEST</span>}
                   {o.slippageBps !== null && <span className="dim">slip {o.slippageBps.toFixed(1)}bp</span>}
                 </div>
                 {expanded === o.id && o.risk && (

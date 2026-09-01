@@ -51,7 +51,12 @@ export function getInternConfig(db: DB): InternConfig {
 }
 
 export function setInternMode(db: DB, mode: InternConfig['mode'], actor: string): void {
-  db.prepare(`UPDATE intern_config SET mode = ?, updated_at = ? WHERE id = 1`).run(mode, Date.now());
+  const now = Date.now();
+  db.prepare(
+    `UPDATE intern_config SET mode = ?,
+     shadow_started_at = CASE WHEN ?='shadow' THEN ? ELSE shadow_started_at END,
+     updated_at = ? WHERE id = 1`,
+  ).run(mode, mode, now, now);
   appendAudit(db, actor, 'intern_mode_change', { mode });
 }
 
@@ -256,12 +261,14 @@ export async function runInternCycle(
   });
   const rowId = Number(
     db.prepare(
-      `INSERT INTO intern_posts (ts, kind, draft, allowed_numbers_json, verdict, blocked_rules_json, audit_hash)
-       VALUES (?, 'post', ?, ?, ?, ?, ?)`,
+      `INSERT INTO intern_posts
+        (ts, kind, draft, allowed_numbers_json, verdict, blocked_rules_json, audit_hash,
+         provider_kind, source_count)
+       VALUES (?, 'post', ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       Date.now(), draft, JSON.stringify(numbers), outcome,
       verdict.blockedRules.length ? JSON.stringify(verdict.blockedRules) : null,
-      auditHash,
+      auditHash, x.kind, posts.length,
     ).lastInsertRowid,
   );
 

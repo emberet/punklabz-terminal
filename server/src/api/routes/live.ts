@@ -103,6 +103,8 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     const signerReady = await app.signer.isReady();
     return {
       mode: cfg.mode,
+      phase: cfg.phase,
+      autonomyEnabled: cfg.autonomyEnabled,
       halted: cfg.halted,
       haltReason: cfg.haltReason,
       capitalStage: cfg.capitalStage,
@@ -141,6 +143,7 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
       walletAddress: signerReady.address,
       authorizedCapitalUsd: authorizedCapital,
       promotion: promotionEvidence(app.db),
+      experiment: app.canaryExperiment?.latest() ?? null,
       ...boundary,
     };
   };
@@ -167,6 +170,8 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     ).get(ROBINHOOD_VENUE) as { status: string } | undefined;
     return {
       mode: cfg.mode,
+      phase: cfg.phase,
+      autonomyEnabled: cfg.autonomyEnabled,
       halted: cfg.halted,
       haltReason: cfg.halted ? 'operator attention required' : null,
       capitalStage: cfg.capitalStage,
@@ -402,6 +407,8 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
         ).get(o.id) as { confirmations: number } | undefined)?.confirmations ?? 0) : 0,
         cleanFill: o.clean_fill === 1,
         forced: !!o.forced_by,
+        operatorTest: o.operator_test === 1,
+        experimentRunId: o.experiment_run_id,
         ts: o.created_at,
       }));
     return { orders };
@@ -468,10 +475,19 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     const cfg = getLiveConfig(app.db);
     const stageCap = stageCapUsd(cfg.capitalStage);
     return {
-      accounts: listAccounts(app.db).map((a) => ({
-        ...a,
-        book: accountBook(app.db, a.id, a.mode === cfg.mode ? stageCap : a.fundedUsd),
-      })),
+      accounts: listAccounts(app.db).map((a) => {
+        const holdings = Object.fromEntries(custodyHoldings(app.db, a.id));
+        const proof = app.db.prepare(
+          `SELECT COUNT(*) total, SUM(CASE WHEN tx_ref IS NULL OR log_index IS NULL THEN 1 ELSE 0 END) unproven
+           FROM execution_account_funding WHERE execution_account_id=?`,
+        ).get(a.id) as { total: number; unproven: number | null };
+        return {
+          ...a,
+          holdings,
+          fundingProof: { total: proof.total, complete: proof.total > 0 && (proof.unproven ?? 0) === 0 },
+          book: accountBook(app.db, a.id, a.mode === cfg.mode ? stageCap : a.fundedUsd),
+        };
+      }),
       promotion: promotionEvidence(app.db),
       allocations: app.db.prepare(
         `SELECT m.bot_id botId, b.name botName, m.allocated_usdg allocatedUsdg,
@@ -482,6 +498,37 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
       bots: app.db.prepare(
         `SELECT id, name, status FROM bots WHERE status IN ('running','paused') ORDER BY name`,
       ).all(),
+    };
+  });
+
+  server.get('/api/admin/live/discussions', async (request, reply) => {
+    if (!requireAdmin(app, request, reply)) return;
+    const q = z.object({ limit: z.coerce.number().int().min(1).max(50).default(20) }).parse(request.query);
+    const sessions = app.db.prepare(
+      `SELECT s.*, o.intent_id, o.state order_state, o.instrument_id
+       FROM research_sessions s LEFT JOIN live_orders o ON o.id=s.related_order_id
+       WHERE s.advisory=1 ORDER BY s.id DESC LIMIT ?`,
+    ).all(q.limit) as any[];
+    return {
+      sessions: sessions.map((session) => ({
+        id: session.id,
+        kind: session.kind,
+        topic: session.topic,
+        orderId: session.related_order_id,
+        signalId: session.related_signal_id,
+        orderState: session.order_state,
+        instrumentId: session.instrument_id,
+        advisory: true,
+        measuredInputs: session.measured_inputs_json ? JSON.parse(session.measured_inputs_json) : null,
+        transcript: session.transcript_json ? JSON.parse(session.transcript_json) : [],
+        turns: session.turns,
+        tokensIn: session.tokens_in,
+        tokensOut: session.tokens_out,
+        costUsd: fromMicro(session.cost_micro),
+        outcome: session.outcome,
+        startedAt: session.started_at,
+        endedAt: session.ended_at,
+      })),
     };
   });
 
@@ -603,6 +650,40 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     }
   });
 
+  server.post('/api/admin/live/probe/roundtrip', { config: { rateLimit: { max: 1, timeWindow: '5 minutes' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
+    if (!user) return;
+    if (!app.canaryExperiment) return reply.code(503).send({ error: 'canary experiment coordinator unavailable' });
+    const body = z.object({
+      sponsorBotId: z.number().int().positive(),
+      idempotencyKey: z.string().min(12).max(100).regex(/^[a-zA-Z0-9:_-]+$/),
+      confirmation: z.literal('RUN $0.50 ROUND TRIP'),
+    }).parse(request.body);
+    try {
+      const experiment = await app.canaryExperiment.start(
+        body.sponsorBotId, body.idempotencyKey, `admin:${user.id}`,
+      );
+      return { ok: true, experiment };
+    } catch (error) {
+      return reply.code(409).send({ error: String(error instanceof Error ? error.message : error) });
+    }
+  });
+
+  server.post('/api/admin/live/canary/enable', { config: { rateLimit: { max: 1, timeWindow: '5 minutes' } } }, async (request, reply) => {
+    const user = requireFreshAdmin(app, request, reply);
+    if (!user) return;
+    if (!app.supervisor) return reply.code(503).send({ error: 'autonomous supervisor unavailable' });
+    const body = z.object({
+      confirmation: z.literal('ENABLE AUTONOMOUS CANARY $5'),
+    }).parse(request.body);
+    try {
+      const preflight = await app.supervisor.enableCanaryAutonomy(`admin:${user.id}`);
+      return { ok: true, phase: 'autonomous_canary', preflight };
+    } catch (error) {
+      return reply.code(409).send({ error: String(error instanceof Error ? error.message : error) });
+    }
+  });
+
   // OPERATOR FORCE — the one way to put a trade through without a strategy.
   //
   // It exists because an execution path that has never carried a real
@@ -625,6 +706,7 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
     }
     const body = z
       .object({
+        botId: z.number().int().positive(),
         symbol: z.string().min(3).max(20),
         side: z.enum(['buy', 'sell']),
         // The upper bound is the stage's own per-trade cap, applied again in

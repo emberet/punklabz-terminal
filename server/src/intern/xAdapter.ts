@@ -10,6 +10,8 @@
 // always delimited and labelled when shown to a model.
 
 import { ApiXAdapter } from './apiXAdapter.js';
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 
 export interface XPost {
   externalId: string;
@@ -114,10 +116,10 @@ export function buildXAdapter(): XAdapter {
     // readiness failure the operator can read, never as a crash on boot that
     // takes the whole server down with it.
     return new ApiXAdapter({
-      appKey: process.env.X_APP_KEY ?? '',
-      appSecret: process.env.X_APP_SECRET ?? '',
-      accessToken: process.env.X_ACCESS_TOKEN ?? '',
-      accessSecret: process.env.X_ACCESS_SECRET ?? '',
+      appKey: credential('X_APP_KEY'),
+      appSecret: credential('X_APP_SECRET'),
+      accessToken: credential('X_ACCESS_TOKEN'),
+      accessSecret: credential('X_ACCESS_SECRET'),
       expectedHandle: process.env.X_HANDLE ?? 'punklabz',
       query: process.env.X_SEARCH_QUERY,
     });
@@ -125,4 +127,15 @@ export function buildXAdapter(): XAdapter {
   throw new Error(
     `X_PROVIDER=${provider} is not implemented in this build. Supported: none, recording, api.`,
   );
+}
+
+/** Read X secrets from root-owned systemd credentials, with env only for local development. */
+function credential(name: string): string {
+  const explicit = process.env[`${name}_FILE`];
+  const systemd = process.env.CREDENTIALS_DIRECTORY
+    ? path.join(process.env.CREDENTIALS_DIRECTORY, name.toLowerCase())
+    : null;
+  const file = explicit ?? systemd;
+  if (file && existsSync(file)) return readFileSync(file, 'utf8').trim();
+  return process.env[name] ?? '';
 }

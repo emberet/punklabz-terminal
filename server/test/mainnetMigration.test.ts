@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 const migrationsDir = path.resolve(process.cwd(), 'src/db/migrations');
 const safetySql = fs.readFileSync(path.join(migrationsDir, '016_mainnet_safety.sql'), 'utf8');
+const experimentSql = fs.readFileSync(path.join(migrationsDir, '017_mainnet_experiment.sql'), 'utf8');
 
 function beforeSafetyMigration() {
   const db = new Database(':memory:');
@@ -76,6 +77,30 @@ describe('Robinhood custody migration', () => {
     expect(columns.some((column) => column.name === 'chain_id')).toBe(false);
     expect(db.prepare(`SELECT COUNT(*) n FROM execution_accounts WHERE name='ROBINHOOD_TRADER_01'`).get())
       .toMatchObject({ n: 0 });
+    db.close();
+  });
+});
+
+describe('immediate experiment migration', () => {
+  it('demotes any old real-money state to halted shadow stage zero', () => {
+    const db = beforeSafetyMigration();
+    const real = insertAccount(db, 'CANARY_EVM_ROBINHOOD_OLD', 'canary', 'evm:robinhood');
+    db.transaction(() => db.exec(safetySql))();
+    db.prepare(
+      `INSERT INTO live_config
+        (id, mode, halted, halt_reason, capital_stage, limits_json, updated_at)
+       VALUES (1, 'live', 0, NULL, 3, '{}', 1)`,
+    ).run();
+
+    db.transaction(() => db.exec(experimentSql))();
+
+    expect(db.prepare(
+      `SELECT mode, halted, capital_stage, execution_phase, autonomy_enabled FROM live_config WHERE id=1`,
+    ).get()).toMatchObject({
+      mode: 'shadow', halted: 1, capital_stage: 0, execution_phase: 'shadow', autonomy_enabled: 0,
+    });
+    expect(db.prepare(`SELECT role FROM execution_accounts WHERE id=?`).get(real))
+      .toMatchObject({ role: 'trader' });
     db.close();
   });
 });

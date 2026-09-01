@@ -19,6 +19,7 @@ import { settleConfirmedOrder } from './settlement.js';
 const DRIFT_TOLERANCE = 1e-6;
 
 export interface ReconcilePass {
+  runId: number | null;
   accountId: number;
   accountName: string;
   ok: boolean;
@@ -49,11 +50,11 @@ export async function reconcileAccount(
 ): Promise<ReconcilePass> {
   const account = getAccount(db, accountId);
   if (!account) {
-    return { accountId, accountName: 'unknown', ok: false, detail: 'account not found', drifts: [] };
+    return { runId: null, accountId, accountName: 'unknown', ok: false, detail: 'account not found', drifts: [] };
   }
   // shadow custodies nothing — its ledger is definitionally authoritative
   if (account.mode === 'shadow' || account.mode === 'simulation') {
-    return { accountId, accountName: account.name, ok: true, detail: 'no custody to reconcile', drifts: [] };
+    return { runId: null, accountId, accountName: account.name, ok: true, detail: 'no custody to reconcile', drifts: [] };
   }
   const startedAt = Date.now();
   const runInfo = db.prepare(
@@ -65,28 +66,29 @@ export async function reconcileAccount(
     db.prepare(`UPDATE reconciliation_runs SET status='failed', completed_at=?, detail=? WHERE id=?`)
       .run(Date.now(), `${adapter.venue} cannot report venue state`, runId);
     return {
-      accountId, accountName: account.name, ok: false, drifts: [],
+      runId, accountId, accountName: account.name, ok: false, drifts: [],
       detail: `${adapter.venue} cannot report venue state — cannot verify what we believe`,
     };
   }
 
   let truth;
   try {
-    truth = await adapter.reconcile();
+    if (!account.walletAddress) throw new Error('custody account is not bound to a wallet');
+    truth = await adapter.reconcile(account.walletAddress);
   } catch (error) {
     const detail = `venue state unreadable: ${String(error).slice(0, 160)}`;
     db.prepare(`UPDATE reconciliation_runs SET status='failed', completed_at=?, detail=? WHERE id=?`)
       .run(Date.now(), detail, runId);
     haltNetwork(db, `reconciliation failure on ${account.name}: ${detail}`, 'reconciler');
     appendAudit(db, 'reconciler', 'reconciliation_failure', { accountId, detail });
-    return { accountId, accountName: account.name, ok: false, detail, drifts: [] };
+    return { runId, accountId, accountName: account.name, ok: false, detail, drifts: [] };
   }
   if (!truth.ok) {
     db.prepare(`UPDATE reconciliation_runs SET status='failed', completed_at=?, detail=? WHERE id=?`)
       .run(Date.now(), truth.detail, runId);
     haltNetwork(db, `reconciliation failure on ${account.name}: ${truth.detail}`, 'reconciler');
     appendAudit(db, 'reconciler', 'reconciliation_failure', { accountId, detail: truth.detail });
-    return { accountId, accountName: account.name, ok: false, detail: truth.detail, drifts: [] };
+    return { runId, accountId, accountName: account.name, ok: false, detail: truth.detail, drifts: [] };
   }
 
   const believed = custodyHoldings(db, accountId);
@@ -132,6 +134,7 @@ export async function reconcileAccount(
     })();
   }
   return {
+    runId,
     accountId,
     accountName: account.name,
     ok,
@@ -229,6 +232,7 @@ export async function reconcileAll(
     if (!adapter) {
       const now = Date.now();
       const pass = {
+        runId: null,
         accountId: account.id, accountName: account.name, ok: false,
         detail: `missing adapter for active account venue ${account.venue}`, drifts: [],
       };

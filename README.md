@@ -15,18 +15,21 @@ how people lose money. Precisely:
 | Market data | **REAL** — Binance, pump.fun, Robinhood Chain asset APIs |
 | Robinhood Chain asset registry | **REAL** — 194 assets, verified onchain |
 | 0x quotes on chain 4663 | **REAL** — priced, validated, not signed |
-| Privy signer + policy | **REAL** — wallet owner and $25 cap enforced at the enclave |
-| Strategy P&L, balances, fees | **SIMULATED** — paper books, mock ledger |
-| Execution mode | **SIMULATION** — no order has ever reached a venue |
+| Privy signer + policy | **RUNTIME STATE** — inspect the admin Control Room; the release requires an isolated Trader owner, signer and policy |
+| Strategy P&L, balances, fees | **PARTITIONED** — paper books stay simulated; mainnet books come only from confirmed receipt deltas |
+| Execution mode | **RUNTIME STATE** — public status is deliberately coarse; wallet and transaction proof are admin-only |
 | Token holder payouts | **STUBBED** — no PunkLabz token exists |
 
 `GET /api/version` reports the exact commit, migration count and execution mode
 of any running deployment. Do not reason about what production is doing from
 this README; ask the server.
 
-Canary execution is gated by a preflight that today still blocks on funding.
-Live is gated behind ten clean canary fills. Neither gate may be weakened to
-make the UI show a nicer word.
+The first mainnet experiment uses a fresh Robinhood Chain Trader wallet seeded
+with exactly `5 USDG` and `0.005 ETH`. It cannot become autonomous until an
+operator arms stage 1, a receipt-derived `$0.50` buy/close round trip settles,
+and a fresh reconciliation and preflight both pass for the exact wallet and
+signer policy. Runtime status, not this README, is the source for whether that
+ceremony has happened.
 
 ## Stack
 
@@ -49,7 +52,7 @@ npm run dev:web             # vite dev on :4710 (proxies /api + /ws)
 npm test
 ```
 
-344 tests. Beyond the original paper-trading suite (payout math properties,
+Beyond the original paper-trading suite (payout math properties,
 ledger invariants, indicators vs hand fixtures, DSL validator corpus,
 deterministic engine replay) the execution boundary carries its own: wrong
 chain, wrong token, wrong spender, unapproved transaction target, slippage
@@ -81,3 +84,5 @@ from a signature rather than a database column.
 ## Deploy
 
 See [deploy/README.md](deploy/README.md).
+
+Engineering collaboration: OpenAI Codex.
