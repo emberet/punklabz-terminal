@@ -39,7 +39,8 @@ approval, rejection, signing, or broadcasting.
 
 The Intern may move from shadow to live only after three fresh, operator-
 approved, X-backed drafts. Internal-only drafts are labelled and cannot satisfy
-that gate. Live publishing is capped at three posts per day.
+that gate. Live publishing has a hard ceiling of 69 posts per rolling day, while
+the autonomous cycle still runs no more than once every two hours.
 
 ## Operator Records
 

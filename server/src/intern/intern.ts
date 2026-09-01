@@ -29,6 +29,7 @@ import type { XAdapter, XPost } from './xAdapter.js';
 //     the block log. There is no default that publishes.
 
 export const INTERN_AGENT = 'INTERN';
+export const INTERN_LIVE_DAILY_POST_CAP = 69;
 const READS_PER_CYCLE = 22;
 const MAX_DRAFT_TOKENS = 200;
 export const INTERN_LAUNCH_REVIEW_WINDOW_MS = 24 * 60 * 60_000;

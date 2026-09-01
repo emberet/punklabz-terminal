@@ -215,7 +215,7 @@ describe('live publishing', () => {
     expect(quotaState(db).postsUsed).toBe(1);
   });
 
-  it('persists the three-post daily cap independently of the cycle cooldown', async () => {
+  it('persists the configured daily cap independently of the cycle cooldown', async () => {
     const { adapter, recording } = apiRecording();
     const drafts = [
       'Attention is loud. Conviction is not.',
@@ -347,7 +347,7 @@ describe('the shadow period is the default posture', () => {
     const cfg = getInternConfig(db);
     expect(cfg.mode).toBe('shadow');
     expect(cfg.shadowStartedAt).toBeGreaterThan(0);
-    expect(cfg.maxPostsPerDay).toBe(6);
+    expect(cfg.maxPostsPerDay).toBe(69);
   });
 
   it('switching to live is an audited operator decision', () => {

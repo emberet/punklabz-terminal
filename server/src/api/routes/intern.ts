@@ -5,8 +5,9 @@ import { requireUser } from './auth.js';
 import { budgetView } from '../../research/budget.js';
 import { trackRecord } from '../../research/scoring.js';
 import {
-  INTERN_AGENT, INTERN_LAUNCH_REVIEW_WINDOW_MS, getInternConfig, internLaunchEvidence,
-  publishInternThread, quotaState, reconcileInternPublishing, runInternCycle, setInternMode,
+  INTERN_AGENT, INTERN_LAUNCH_REVIEW_WINDOW_MS, INTERN_LIVE_DAILY_POST_CAP,
+  getInternConfig, internLaunchEvidence, publishInternThread, quotaState,
+  reconcileInternPublishing, runInternCycle, setInternMode,
 } from '../../intern/intern.js';
 import { appendAudit } from '../../audit/auditLog.js';
 
@@ -137,10 +138,15 @@ export function registerInternRoutes(server: FastifyInstance, app: AppContext) {
         });
       }
       app.db.transaction(() => {
-        app.db.prepare(`UPDATE intern_config SET max_posts_per_day=3 WHERE id=1`).run();
+        app.db.prepare(`UPDATE intern_config SET max_posts_per_day=? WHERE id=1`)
+          .run(INTERN_LIVE_DAILY_POST_CAP);
         setInternMode(app.db, 'live', `user:${user.id}`);
       })();
-      return { mode: 'live', candidatesReviewed: evidence.count, maxPostsPerDay: 3 };
+      return {
+        mode: 'live',
+        candidatesReviewed: evidence.count,
+        maxPostsPerDay: INTERN_LIVE_DAILY_POST_CAP,
+      };
     }
 
     setInternMode(app.db, parsed.data.mode, `user:${user.id}`);
