@@ -5,7 +5,8 @@ import {
 import path from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import {
-  createPublicClient, decodeEventLog, encodeFunctionData, getAddress, http, keccak256,
+  createPublicClient, decodeEventLog, encodeFunctionData, formatEther, getAddress, http, keccak256,
+  parseEther,
   type Hex,
 } from 'viem';
 import { openDb } from '../db/db.js';
@@ -14,7 +15,7 @@ import {
 } from '../live/accounts.js';
 import { haltNetwork } from '../live/riskEngine.js';
 import {
-  prepareManagerFundingPolicy, provisionIsolatedTrader, restoreManagerPolicies,
+  prepareManagerFundingPolicy, prepareManagerGasTopUpPolicy, provisionIsolatedTrader, restoreManagerPolicies,
   signPrivyOperatorTransaction, USDG_ADDRESS, type Ctx,
 } from '../live/signing/provisionPrivy.js';
 import { rhChainDef } from '../chain/rhChain.js';
@@ -47,6 +48,20 @@ interface ProvisionState {
     signedPayload?: string;
     receipt?: { blockNumber: number; blockHash: string; gasEth: number; logIndex: number };
   }>;
+}
+
+interface GasTopUpState {
+  runId: string;
+  managerWalletId: string;
+  traderAddress: string;
+  amountEth: string;
+  previousPolicyIds?: string[];
+  transaction?: {
+    nonce: number;
+    hash: string;
+    signedPayload?: string;
+    receipt?: { blockNumber: number; blockHash: string; gasEth: number };
+  };
 }
 
 function writeJson(file: string, value: unknown): void {
@@ -215,6 +230,151 @@ async function fund(stateFile: string, managerKeyFile: string): Promise<void> {
   }
 }
 
+function readAuthorizationKey(file: string): string {
+  const key = readFileSync(file === '-' ? 0 : file, 'utf8').trim();
+  if (!key) throw new Error('Manager authorization key is empty');
+  return key;
+}
+
+async function topUpGas(
+  stateFile: string,
+  managerKeyFile: string,
+  managerWalletId: string,
+  traderAddress: string,
+  amountEth: string,
+): Promise<void> {
+  const amountWei = parseEther(amountEth);
+  if (amountWei <= 0n || amountWei > parseEther('0.01')) {
+    throw new Error('gas top-up must be greater than 0 and no more than 0.01 ETH');
+  }
+  const normalizedTrader = getAddress(traderAddress);
+  const runId = `gas-top-up-${normalizedTrader.toLowerCase()}-${amountWei}`;
+  let state: GasTopUpState;
+  try {
+    state = loadJson<GasTopUpState>(stateFile);
+    if (state.runId !== runId || state.managerWalletId !== managerWalletId
+      || state.traderAddress.toLowerCase() !== normalizedTrader.toLowerCase()
+      || state.amountEth !== amountEth) {
+      throw new Error('existing gas top-up state does not match this exact ceremony');
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    state = { runId, managerWalletId, traderAddress: normalizedTrader, amountEth };
+    writeJson(stateFile, state);
+  }
+
+  const rpc = requireEnv('RPC_ROBINHOOD_PRIMARY');
+  const client = createPublicClient({ chain: rhChainDef(4663), transport: http(rpc) });
+  if (await client.getChainId() !== 4663) throw new Error('primary RPC is not Robinhood Chain 4663');
+  const ctx: Ctx = {
+    appId: requireEnv('PRIVY_APP_ID'),
+    appSecret: requireSecret('PRIVY_APP_SECRET'),
+    walletId: managerWalletId,
+    authorizationKey: readAuthorizationKey(managerKeyFile),
+  };
+  const db = openDb(requireEnv('DB_PATH'));
+  haltNetwork(db, `exact ${amountEth} ETH Trader gas top-up in progress`, 'operator-ceremony');
+  const accounts = separateManagerAndTrader(db, normalizedTrader, 'operator-ceremony');
+  let previousPolicyIds = state.previousPolicyIds ?? null;
+
+  try {
+    if (!state.transaction?.hash) {
+      // A crash after policy attachment but before signing must not make the
+      // temporary policy become its own restore target on retry.
+      if (state.previousPolicyIds) await restoreManagerPolicies(ctx, state.previousPolicyIds);
+      const temporary = await prepareManagerGasTopUpPolicy(
+        ctx,
+        normalizedTrader,
+        amountEth,
+        runId,
+        (policyIds) => {
+          state.previousPolicyIds = policyIds;
+          previousPolicyIds = policyIds;
+          writeJson(stateFile, state);
+        },
+      );
+      if (temporary.walletAddress.toLowerCase() !== accounts.manager.walletAddress?.toLowerCase()) {
+        throw new Error('Privy Manager wallet and Manager account do not match');
+      }
+      previousPolicyIds = temporary.previousPolicyIds;
+
+      const [nonce, fees] = await Promise.all([
+        client.getTransactionCount({ address: getAddress(accounts.manager.walletAddress!), blockTag: 'pending' }),
+        client.estimateFeesPerGas(),
+      ]);
+      const priority = fees.maxPriorityFeePerGas ?? 1_000_000n;
+      const maxFee = fees.maxFeePerGas ?? priority * 2n;
+      const raw = await signPrivyOperatorTransaction(ctx, {
+        to: normalizedTrader,
+        value: amountWei,
+        data: '0x',
+        nonce,
+        gas: 21_000n,
+        maxFeePerGas: maxFee,
+        maxPriorityFeePerGas: priority,
+        idempotencyKey: `${runId}-transaction`,
+      });
+      const hash = keccak256(raw as Hex);
+      state.transaction = { nonce, hash, signedPayload: raw };
+      writeJson(stateFile, state);
+    }
+
+    const hash = state.transaction.hash as Hex;
+    if (state.transaction.signedPayload) {
+      try {
+        const returned = await client.sendRawTransaction({
+          serializedTransaction: state.transaction.signedPayload as Hex,
+        });
+        if (returned.toLowerCase() !== hash.toLowerCase()) {
+          throw new Error('RPC hash differs from signed hash');
+        }
+      } catch (error) {
+        const message = String(error).toLowerCase();
+        if (!message.includes('already known') && !message.includes('known transaction')) throw error;
+      }
+    }
+
+    const receipt = await client.waitForTransactionReceipt({ hash, confirmations: 12, timeout: 15 * 60_000 });
+    if (receipt.status !== 'success') throw new Error('gas top-up transaction reverted');
+    const block = await client.getBlockNumber();
+    const confirmations = Number(block - receipt.blockNumber + 1n);
+    if (confirmations < 12) throw new Error(`gas top-up has only ${confirmations} confirmations`);
+    const tx = await client.getTransaction({ hash });
+    if (tx.from.toLowerCase() !== accounts.manager.walletAddress?.toLowerCase()
+      || tx.to?.toLowerCase() !== normalizedTrader.toLowerCase() || tx.value !== amountWei) {
+      throw new Error('confirmed gas top-up does not match the exact Manager, Trader, and amount');
+    }
+    const gasEth = Number(formatEther(receipt.gasUsed * receipt.effectiveGasPrice));
+    recordCustodyTransfer(db, {
+      fromAccountId: accounts.manager.id,
+      toAccountId: accounts.trader.id,
+      asset: 'ETH',
+      qty: Number(amountEth),
+      txRef: hash,
+      logIndex: -1,
+      gasEth,
+      confirmations,
+    }, 'operator-ceremony');
+    state.transaction = {
+      ...state.transaction,
+      signedPayload: undefined,
+      receipt: { blockNumber: Number(receipt.blockNumber), blockHash: receipt.blockHash, gasEth },
+    };
+    writeJson(stateFile, state);
+    console.log(JSON.stringify({
+      manager: accounts.manager.walletAddress,
+      trader: normalizedTrader,
+      amountEth,
+      hash,
+      confirmations,
+      gasEth,
+    }, null, 2));
+  } finally {
+    if (previousPolicyIds) await restoreManagerPolicies(ctx, previousPolicyIds);
+    db.close();
+  }
+}
+
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
   if (command === 'generate-keys' && args[0]) return generateKeys(path.resolve(args[0]));
@@ -224,8 +384,17 @@ async function main(): Promise<void> {
   if (command === 'fund' && args.length >= 2) {
     return fund(path.resolve(args[0]), path.resolve(args[1]));
   }
+  if (command === 'top-up-gas' && args.length >= 5) {
+    return topUpGas(
+      path.resolve(args[0]),
+      args[1] === '-' ? '-' : path.resolve(args[1]),
+      args[2],
+      args[3],
+      args[4],
+    );
+  }
   throw new Error(
-    'usage: mainnetExperiment generate-keys <dir> | provision <public-keys.json> <state.json> <run-id> | fund <state.json> <manager-key-file>',
+    'usage: mainnetExperiment generate-keys <dir> | provision <public-keys.json> <state.json> <run-id> | fund <state.json> <manager-key-file> | top-up-gas <state.json> <manager-key-file|-> <manager-wallet-id> <trader-address> <eth-amount>',
   );
 }
 
