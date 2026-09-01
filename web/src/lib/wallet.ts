@@ -1,4 +1,8 @@
 import { api } from './api';
+import {
+  selectWalletConnectAccount,
+  type WalletConnectSession,
+} from './walletConnectSession';
 
 // EVM WALLET HANDSHAKE.
 //
@@ -35,6 +39,13 @@ interface Eip1193Provider {
   disconnect?(): Promise<void>;
 }
 
+interface WalletConnectProvider extends Eip1193Provider {
+  accounts: string[];
+  chainId: number;
+  session?: WalletConnectSession;
+  connect(): Promise<void>;
+}
+
 let active: { kind: ConnectorKind; provider: Eip1193Provider } | null = null;
 /** in-flight init, so two clicks cannot open two WalletConnect sessions */
 let connecting: Promise<Eip1193Provider> | null = null;
@@ -47,7 +58,7 @@ let connecting: Promise<Eip1193Provider> | null = null;
  * and subscriptions that nothing ever closes. Users retry — they close the
  * modal to switch wallets, or scan late. Reuse the instance.
  */
-let wcProvider: Eip1193Provider | null = null;
+let wcProvider: WalletConnectProvider | null = null;
 
 function injectedProvider(): Eip1193Provider | null {
   return (window as unknown as { ethereum?: Eip1193Provider }).ethereum ?? null;
@@ -69,7 +80,7 @@ export function activeConnector(): ConnectorKind | null {
 
 export class WalletError extends Error {}
 
-async function walletConnectProvider(): Promise<Eip1193Provider> {
+async function walletConnectProvider(): Promise<WalletConnectProvider> {
   if (wcProvider) return wcProvider;
   const { EthereumProvider } = await import('@walletconnect/ethereum-provider');
   // THERE ARE NO REQUIRED CHAINS. THIS IS DELIBERATE AND IT IS LOAD-BEARING.
@@ -94,6 +105,8 @@ async function walletConnectProvider(): Promise<Eip1193Provider> {
     projectId: WALLETCONNECT_PROJECT_ID,
     chains: [],
     optionalChains: [1, ROBINHOOD_CHAIN_ID, 8453, 42161],
+    optionalMethods: ['personal_sign', 'eth_accounts', 'eth_requestAccounts'],
+    optionalEvents: ['accountsChanged', 'chainChanged', 'disconnect'],
     rpcMap: { 1: 'https://eth.llamarpc.com', [ROBINHOOD_CHAIN_ID]: ROBINHOOD_RPC },
     showQrModal: true,
     metadata: {
@@ -103,8 +116,38 @@ async function walletConnectProvider(): Promise<Eip1193Provider> {
       icons: [`${window.location.origin}/favicon.svg`],
     },
   });
-  wcProvider = provider as unknown as Eip1193Provider;
+  wcProvider = provider as unknown as WalletConnectProvider;
   return wcProvider;
+}
+
+function alignWalletConnectSession(provider: WalletConnectProvider): string | null {
+  const selected = selectWalletConnectAccount(
+    provider.session,
+    provider.chainId,
+    [ROBINHOOD_CHAIN_ID, 1],
+  );
+  if (!selected) return null;
+
+  // EthereumProvider.request() routes through this public chainId field. Its
+  // persisted value can refer to an older session, so align it before making
+  // even a chain-agnostic personal_sign request.
+  provider.chainId = selected.chainId;
+  provider.accounts = [selected.address];
+  return selected.address;
+}
+
+async function clearInvalidWalletConnectSession(provider: WalletConnectProvider): Promise<void> {
+  try {
+    await provider.disconnect?.();
+  } catch {
+    /* an incomplete or expired session may already be disconnected */
+  }
+  active = null;
+  try {
+    localStorage.removeItem(CONNECTOR_KEY);
+  } catch {
+    /* storage unavailable */
+  }
 }
 
 /** Bring up a connector and make it the active one. */
@@ -158,8 +201,12 @@ export async function restoreConnector(): Promise<void> {
     const provider = await walletConnectProvider();
     // init() rehydrates a live session if one exists; no session means no
     // accounts, and we leave `active` unset rather than pretend otherwise
-    const accounts = (provider as unknown as { accounts?: string[] }).accounts;
-    if (accounts?.length) active = { kind: 'walletconnect', provider };
+    const address = alignWalletConnectSession(provider);
+    if (address) {
+      active = { kind: 'walletconnect', provider };
+    } else if (provider.session) {
+      await clearInvalidWalletConnectSession(provider);
+    }
   } catch {
     /* a stale session is not an error worth showing anyone */
   }
@@ -179,8 +226,16 @@ export async function requestAccount(kind: ConnectorKind = 'injected'): Promise<
   let accounts: string[];
   try {
     if (kind === 'walletconnect') {
-      // enable() shows the QR/deep-link modal and resolves with the accounts
-      accounts = (await (provider as unknown as { enable(): Promise<string[]> }).enable()) as string[];
+      const walletConnect = provider as WalletConnectProvider;
+      if (walletConnect.session && !alignWalletConnectSession(walletConnect)) {
+        await clearInvalidWalletConnectSession(walletConnect);
+      }
+      // Connect first, then select from the approved namespace. enable()
+      // performs eth_requestAccounts immediately and can route that request
+      // through a stale persisted chain before the session is realigned.
+      if (!walletConnect.session) await walletConnect.connect();
+      const address = alignWalletConnectSession(walletConnect);
+      accounts = address ? [address] : [];
     } else {
       accounts = (await provider.request({ method: 'eth_requestAccounts' })) as string[];
     }
@@ -280,6 +335,9 @@ export async function disconnectProvider(): Promise<void> {
 
 async function signNonce(address: string): Promise<string> {
   const provider = getProvider()!;
+  if (active?.kind === 'walletconnect' && !alignWalletConnectSession(provider as WalletConnectProvider)) {
+    throw new WalletError('WalletConnect session is missing personal_sign permission — reconnect the wallet');
+  }
   const { message } = await api.get<{ nonce: string; message: string }>(
     `/api/auth/wallet/nonce?address=${encodeURIComponent(address)}`,
   );
