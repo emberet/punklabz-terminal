@@ -75,12 +75,12 @@ export class FullMarketAutonomy {
         haltNetwork(this.db, 'reconciled USDG reserve is below the configured floor', 'full-market');
         return { ran: false, reason: 'USDG reserve gate engaged; network halted' };
       }
-      const references = await pollUniverseReferences(this.db);
+      const references = await pollUniverseReferences(this.db, { ethUsd: this.ethUsd() ?? 0 });
       if (references.failed.length) return { ran: false, reason: `${references.failed.length} reference prices failed; no sweep trade` };
       let refreshInFlight: Promise<unknown> | null = null;
       const refreshTimer = setInterval(() => {
         if (!refreshInFlight) {
-          refreshInFlight = pollUniverseReferences(this.db)
+          refreshInFlight = pollUniverseReferences(this.db, { ethUsd: this.ethUsd() ?? 0 })
             .finally(() => { refreshInFlight = null; });
         }
       }, 45_000);

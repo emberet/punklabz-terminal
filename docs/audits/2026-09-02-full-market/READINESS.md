@@ -10,6 +10,8 @@ IDs. Production runtime and chain state remain the source of truth.
 
 - Immutable Robinhood Chain registry snapshots with exact contracts, decimals,
   multipliers, trading capabilities and a deterministic content hash.
+- Explicit reference-price provenance: Robinhood for stock tokens and the
+  independent ETH/USD market mark for WETH.
 - Dynamic asset blocking for stale verification, corporate actions, trading
   halts, closed sessions, stale prices and unusable routes.
 - Exact directed-pair sweeps with non-overlap, deadline, 0x pacing and fail-closed
@@ -74,7 +76,7 @@ Stripe remains disabled and independent from every trading control.
 
 ## Verification executed
 
-- `npm test`: 34 files, 467 tests passed.
+- `npm test`: 34 files, 468 tests passed.
 - `npm run build`: shared, server and web production builds passed.
 - `npm audit --omit=dev`: zero vulnerabilities reported.
 - Migration restore-copy test: migration 021 applied, SQLite integrity `ok`,

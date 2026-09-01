@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { DB } from '../src/db/db.js';
 import { openTestDb } from '../src/db/db.js';
 import { marketSessionState } from '../src/robinhood/marketSession.js';
+import { pollUniverseReferences } from '../src/robinhood/referencePoller.js';
 import {
   activateUniverseSnapshot, createUniverseSnapshot, universeAssets, universeHash,
 } from '../src/robinhood/universe.js';
@@ -107,6 +108,22 @@ describe('immutable verified universe', () => {
     expect(universeHash(assets)).toBe(universeHash([...assets].reverse()));
     expect((db.prepare(`SELECT active_universe_hash FROM live_config WHERE id=1`).get() as any).active_universe_hash)
       .toBe(snapshot.contentHash);
+  });
+
+  it('records WETH from the independent ETH mark with explicit provenance', async () => {
+    const db = openTestDb();
+    seedUniverse(db, 2);
+    db.prepare(`UPDATE rh_universe_assets SET symbol='WETH' WHERE symbol='T001'`).run();
+    db.prepare(`DELETE FROM rh_reference_prices WHERE symbol='T001'`).run();
+    const result = await pollUniverseReferences(db, {
+      ethUsd: 2_500, delayMs: 0,
+      fetchImpl: async () => { throw new Error('WETH must not call the Robinhood stock-token endpoint'); },
+    });
+    expect(result).toMatchObject({ attempted: 1, fresh: 1, failed: [] });
+    const row = db.prepare(`SELECT symbol,mid,source FROM (
+      SELECT symbol,(bid+ask)/2 mid,source FROM rh_reference_prices WHERE symbol='WETH'
+    )`).get() as any;
+    expect(row).toMatchObject({ symbol: 'WETH', mid: 2_500, source: 'binance_mark' });
   });
 });
 

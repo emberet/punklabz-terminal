@@ -138,6 +138,8 @@ export interface RhAssetView {
 
 export interface ReferenceQuote {
   symbol: string;
+  /** Provenance matters: stock tokens use Robinhood; WETH uses an independent ETH mark. */
+  source?: 'robinhood' | 'binance_mark';
   /** RAW UNDERLYING price — per the API docs, NOT multiplier-adjusted */
   bid: number;
   ask: number;

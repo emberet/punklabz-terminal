@@ -431,7 +431,7 @@ async function main() {
     cron.schedule('* * * * *', async () => {
       if (!activeUniverse(db)) return;
       try {
-        const result = await pollUniverseReferences(db);
+        const result = await pollUniverseReferences(db, { ethUsd: executor.getMark('ETHUSDT') ?? 0 });
         if (result.failed.length) server.log.warn(`reference poll: ${result.failed.length} asset(s) unavailable`);
       } catch (error) {
         server.log.error(`reference poll failed: ${String(error).slice(0, 160)}`);

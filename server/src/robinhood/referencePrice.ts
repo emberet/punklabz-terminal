@@ -69,8 +69,9 @@ export async function fetchReferenceQuote(
 
   db.prepare(
     `INSERT INTO rh_reference_prices
-       (symbol, bid, ask, currency, is_trading_halt, daily_volume, daily_high, daily_low, generated_at, fetched_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (symbol, bid, ask, currency, is_trading_halt, daily_volume, daily_high, daily_low,
+        generated_at, fetched_at, source)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'robinhood')`,
   ).run(
     quote.tokenSymbol, bid, ask, quote.currency, quote.isTradingHalt ? 1 : 0,
     quote.dailyTradingVolume ? Number(quote.dailyTradingVolume) : null,
@@ -79,7 +80,8 @@ export async function fetchReferenceQuote(
     generatedAt, Date.now(),
   );
 
-  return toQuote(quote.tokenSymbol, bid, ask, quote.currency, quote.isTradingHalt, generatedAt, staleMs, opts.now ?? Date.now());
+  return toQuote(quote.tokenSymbol, bid, ask, quote.currency, quote.isTradingHalt,
+    generatedAt, staleMs, opts.now ?? Date.now(), 'robinhood');
 }
 
 /** Last cached quote, aged honestly. Used when the API is unreachable. */
@@ -94,17 +96,18 @@ export function lastReferenceQuote(
   if (!row) return null;
   return toQuote(
     row.symbol, row.bid, row.ask, row.currency, row.is_trading_halt === 1,
-    row.generated_at, opts.staleMs ?? DEFAULT_STALE_MS, opts.now ?? Date.now(),
+    row.generated_at, opts.staleMs ?? DEFAULT_STALE_MS, opts.now ?? Date.now(), row.source ?? 'robinhood',
   );
 }
 
 function toQuote(
   symbol: string, bid: number, ask: number, currency: string,
   isTradingHalt: boolean, generatedAt: number, staleMs: number, now: number,
+  source: 'robinhood' | 'binance_mark',
 ): ReferenceQuote {
   const ageMs = now - generatedAt;
   return {
-    symbol, bid, ask,
+    symbol, source, bid, ask,
     mid: (bid + ask) / 2,
     currency,
     isTradingHalt,
