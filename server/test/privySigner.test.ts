@@ -266,6 +266,30 @@ describe('buildSigner', () => {
       if (priorFile === undefined) delete process.env.PRIVY_AUTHORIZATION_KEY_FILE; else process.env.PRIVY_AUTHORIZATION_KEY_FILE = priorFile;
     }
   });
+
+  it('forbids putting the Privy app secret directly in production env', () => {
+    const prior = {
+      nodeEnv: process.env.NODE_ENV,
+      appSecret: process.env.PRIVY_APP_SECRET,
+      appSecretFile: process.env.PRIVY_APP_SECRET_FILE,
+      authKey: process.env.PRIVY_AUTHORIZATION_KEY,
+    };
+    try {
+      process.env.NODE_ENV = 'production';
+      process.env.PRIVY_APP_SECRET = 'inline-app-secret';
+      delete process.env.PRIVY_APP_SECRET_FILE;
+      delete process.env.PRIVY_AUTHORIZATION_KEY;
+      expect(() => privyConfigFromEnv()).toThrow(/PRIVY_APP_SECRET is forbidden/);
+    } finally {
+      const restore = (name: string, value: string | undefined) => {
+        if (value === undefined) delete process.env[name]; else process.env[name] = value;
+      };
+      restore('NODE_ENV', prior.nodeEnv);
+      restore('PRIVY_APP_SECRET', prior.appSecret);
+      restore('PRIVY_APP_SECRET_FILE', prior.appSecretFile);
+      restore('PRIVY_AUTHORIZATION_KEY', prior.authKey);
+    }
+  });
 });
 
 describe('the transaction Privy is asked to sign is COMPLETE', () => {

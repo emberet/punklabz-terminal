@@ -28,6 +28,12 @@ export interface Instrument {
 }
 
 export type ExecutionMode = 'simulation' | 'shadow' | 'canary' | 'live';
+export type LiveExecutionPhase =
+  | 'simulation'
+  | 'shadow'
+  | 'canary_probe'
+  | 'autonomous_canary'
+  | 'live';
 
 export interface RiskLimits {
   totalCapitalUsd: number;
@@ -129,6 +135,8 @@ export interface VenueHealth {
 
 export interface LiveStatusView {
   mode: ExecutionMode;
+  phase: LiveExecutionPhase;
+  autonomyEnabled: boolean;
   halted: boolean;
   haltReason: string | null;
   capitalStage: number;
@@ -160,6 +168,20 @@ export interface LiveStatusView {
     failedOrders: number;
     collateralizedUsdg: number;
   };
+  experiment?: {
+    id: number;
+    state: string;
+    sponsorBotId: number;
+    walletAddress: string;
+    buyOrderId: number | null;
+    sellOrderId: number | null;
+    reconciliationRunId: number | null;
+    idempotencyKey: string;
+    failureReason: string | null;
+    createdAt: number;
+    completedAt: number | null;
+    updatedAt: number;
+  } | null;
   lastReconciliation?: { at: number; clean: boolean } | null;
   preflightStatus?: { at: number; mode: string; passed: boolean } | null;
 }

@@ -32,8 +32,8 @@ EPOCH_CRON=0 0 * * *
 PAYOUTS_ENABLED=false
 SIGNER_PROVIDER=privy
 PRIVY_APP_ID=<privy app id>
-PRIVY_APP_SECRET=<secret>
 PRIVY_WALLET_ID=<dedicated trader wallet id>
+PRIVY_SIGNER_ID=<runtime additional-signer quorum id>
 PRIVY_POLICY_IDS=<reviewed policy ids, comma-separated>
 TRADING_WALLET_ADDRESS=<dedicated trader wallet public address>
 SIGNER_ALLOWED_TARGETS=0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168,0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73,0x0000000000001fF3684f28c67538d4D072C22734
@@ -48,12 +48,18 @@ chown punklabz:punklabz /opt/punklabz/.env && chmod 600 /opt/punklabz/.env
 ```
 
 Install the Privy P-256 authorization key as a root-owned systemd credential,
-not in `.env`:
+not in `.env`. The Privy app secret is a separate credential:
 
 ```bash
 install -d -m 700 /etc/punklabz
 install -m 600 /path/to/privy-authorization-key /etc/punklabz/privy-authorization-key
+install -m 600 /path/to/privy-app-secret /etc/punklabz/privy-app-secret
 ```
+
+For the Intern, install `x-app-key`, `x-app-secret`, `x-access-token`, and
+`x-access-secret` in the same directory and set `X_PROVIDER=api` plus the exact
+`X_HANDLE` in `.env`. Keep zero-length credential placeholders while the
+provider is disabled so the unit remains installable without X access.
 
 **Day-one check:** `curl -s https://api.binance.com/api/v3/ping` from the box.
 If it returns HTTP 451 (geoblocked range), set `FEED_MODE=coinbase`.
@@ -87,16 +93,17 @@ back up SQLite, and apply migrations to a disposable backup copy before restarti
 
 ## Mainnet arming
 
-Migration `016_mainnet_safety.sql` always returns execution to halted shadow at stage `$0`.
-After deployment, use the wallet-authenticated Control Room to:
+Migrations `016_mainnet_safety.sql` and `017_mainnet_experiment.sql` return any
+old real-money state to halted shadow at stage `$0`. The immediate experiment
+then uses the wallet-authenticated Control Room to:
 
-1. Import each historical USDG and ETH funding transaction by hash.
-2. Run reconciliation and persisted preflight.
-3. Observe at least 24 hours of clean shadow operation.
-4. Arm `canary` stage 1 by typing `ARM ROBINHOOD 4663 $5`.
-5. Run one idempotent `$0.50` operator buy and sell; these never count toward promotion.
-6. Assign each autonomous bot a USDG allocation no larger than authorized capital.
-7. Wait for 10 reconciled autonomous fills at each stage before promotion.
+1. Reclassify the funded wallet as `MANAGER_OPERATING_01`.
+2. Provision a fresh externally owned `ROBINHOOD_TRADER_01` wallet with a separate runtime signer policy.
+3. Transfer exactly `5 USDG` and `0.005 ETH`, wait for 12 confirmations, and post both custody sides idempotently.
+4. Reconcile Manager and Trader balances, then arm `canary` stage 1 by typing `ARM ROBINHOOD 4663 $5`.
+5. Run the durable `$0.50` round-trip probe. Its sell quantity comes from the confirmed buy receipt and it must leave zero WETH after reconciliation.
+6. Enable autonomous canary only after a fresh safety gate; Manager allocations are `0.75 USDG` each for the three approved house bots.
+7. Wait for 10 reconciled autonomous fills at each later stage before promotion.
 
 Do not switch to `live` until stage 4 is fully funded and has 10 clean, non-forced fills.
 

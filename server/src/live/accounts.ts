@@ -17,9 +17,11 @@ export interface ExecutionAccount {
   active: boolean;
   chainId: number | null;
   settlementAsset: string | null;
+  role: 'book' | 'manager_operating' | 'trader';
 }
 
 export const ROBINHOOD_TRADER_ACCOUNT = 'ROBINHOOD_TRADER_01';
+export const MANAGER_OPERATING_ACCOUNT = 'MANAGER_OPERATING_01';
 
 function row(r: any): ExecutionAccount {
   return {
@@ -33,7 +35,77 @@ function row(r: any): ExecutionAccount {
     active: r.active === 1,
     chainId: r.chain_id ?? null,
     settlementAsset: r.settlement_asset ?? null,
+    role: r.role ?? (r.venue === 'evm:robinhood' ? 'trader' : 'book'),
   };
+}
+
+/**
+ * Reclassify the funded wallet as Manager custody and bind a fresh Trader.
+ * Nothing moves between books here: historical funding stays attached to the
+ * wallet that actually received it. The later confirmed custody transfers are
+ * the only events that can capitalize the new Trader account.
+ */
+export function separateManagerAndTrader(
+  db: DB,
+  traderWalletAddress: string,
+  actor: string,
+): { manager: ExecutionAccount; trader: ExecutionAccount } {
+  const next = traderWalletAddress.toLowerCase();
+  const existingManager = db.prepare(`SELECT * FROM execution_accounts WHERE name=?`)
+    .get(MANAGER_OPERATING_ACCOUNT) as any;
+  const existingTrader = db.prepare(`SELECT * FROM execution_accounts WHERE name=?`)
+    .get(ROBINHOOD_TRADER_ACCOUNT) as any;
+
+  if (existingManager && existingTrader) {
+    const manager = row(existingManager);
+    const trader = row(existingTrader);
+    if (trader.walletAddress?.toLowerCase() !== next) {
+      throw new Error(`trader account is already bound to ${trader.walletAddress}`);
+    }
+    return { manager, trader };
+  }
+  if (!existingTrader?.wallet_address) throw new Error('funded Trader account has no wallet to reclassify');
+  if (existingTrader.wallet_address.toLowerCase() === next) {
+    throw new Error('Manager and Trader wallets must be different addresses');
+  }
+
+  const unresolvedOrders = (db.prepare(
+    `SELECT COUNT(*) n FROM live_orders
+     WHERE execution_account_id=? AND state IN ('submitting','submitted','pending','open','partial','reconciling')`,
+  ).get(existingTrader.id) as { n: number }).n;
+  const unresolvedTx = (db.prepare(
+    `SELECT COUNT(*) n FROM execution_transactions
+     WHERE execution_account_id=? AND state IN ('prepared','signed','broadcast','unknown')`,
+  ).get(existingTrader.id) as { n: number }).n;
+  if (unresolvedOrders + unresolvedTx > 0) {
+    throw new Error('unresolved real orders or transactions block wallet separation');
+  }
+
+  return db.transaction(() => {
+    const now = Date.now();
+    db.prepare(
+      `UPDATE execution_accounts SET name=?, role='manager_operating', active=1 WHERE id=?`,
+    ).run(MANAGER_OPERATING_ACCOUNT, existingTrader.id);
+    db.prepare(
+      `INSERT INTO execution_accounts
+        (name, mode, venue, wallet_address, currency, funded_usd, active, created_at,
+         chain_id, settlement_asset, role)
+       VALUES (?, 'canary', 'evm:robinhood', ?, 'USDG', 0, 1, ?, 4663, 'USDG', 'trader')`,
+    ).run(ROBINHOOD_TRADER_ACCOUNT, next, now);
+    db.prepare(
+      `UPDATE live_config SET mode='shadow', halted=1, halt_reason=?, capital_stage=0,
+       execution_phase='shadow', autonomy_enabled=0, updated_at=? WHERE id=1`,
+    ).run('separate Trader wallet created; confirmed funding and reconciliation required', now);
+    appendAudit(db, actor, 'custody_wallet_separated', {
+      managerAccountId: existingTrader.id,
+      traderWalletAddress: next,
+    });
+    return {
+      manager: getAccount(db, existingTrader.id)!,
+      trader: row(db.prepare(`SELECT * FROM execution_accounts WHERE name=?`)
+        .get(ROBINHOOD_TRADER_ACCOUNT)),
+    };
+  })();
 }
 
 export function listAccounts(db: DB): ExecutionAccount[] {
@@ -211,6 +283,75 @@ export function recordFunding(
       n++;
     }
     return n;
+  })();
+}
+
+export interface CustodyTransferEntry {
+  fromAccountId: number;
+  toAccountId: number;
+  asset: 'USDG' | 'ETH';
+  qty: number;
+  txRef: string;
+  logIndex: number;
+  gasEth?: number;
+  confirmations: number;
+}
+
+/** Record both sides of a confirmed Manager -> Trader transfer exactly once. */
+export function recordCustodyTransfer(db: DB, entry: CustodyTransferEntry, actor: string): number {
+  if (!(entry.qty > 0) || !Number.isFinite(entry.qty)) throw new Error('custody transfer quantity must be positive');
+  if (entry.fromAccountId === entry.toAccountId) throw new Error('custody transfer accounts must be different');
+  if (entry.confirmations < 12) throw new Error('custody transfer requires 12 confirmations');
+  if (!/^0x[0-9a-fA-F]{64}$/.test(entry.txRef)) throw new Error('custody transfer needs a transaction hash');
+  const from = getAccount(db, entry.fromAccountId);
+  const to = getAccount(db, entry.toAccountId);
+  if (from?.role !== 'manager_operating' || to?.role !== 'trader') {
+    throw new Error('custody transfer must move from Manager Operating to Trader');
+  }
+  const existing = db.prepare(
+    `SELECT id, from_account_id, to_account_id, qty, confirmations FROM custody_transfers
+     WHERE lower(tx_ref)=lower(?) AND asset=? AND log_index=?`,
+  ).get(entry.txRef, entry.asset, entry.logIndex) as
+    { id: number; from_account_id: number; to_account_id: number; qty: string; confirmations: number } | undefined;
+  if (existing) {
+    if (existing.from_account_id !== entry.fromAccountId || existing.to_account_id !== entry.toAccountId
+      || Number(existing.qty) !== entry.qty || existing.confirmations < 12) {
+      throw new Error('existing custody transfer reference does not match this ceremony');
+    }
+    return existing.id;
+  }
+
+  return db.transaction(() => {
+    const now = Date.now();
+    const info = db.prepare(
+      `INSERT INTO custody_transfers
+        (from_account_id, to_account_id, asset, qty, tx_ref, log_index, gas_eth,
+         confirmations, actor, confirmed_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(entry.fromAccountId, entry.toAccountId, entry.asset, String(entry.qty),
+      entry.txRef.toLowerCase(), entry.logIndex, String(entry.gasEth ?? 0),
+      entry.confirmations, actor, now, now);
+    recordFunding(db, entry.fromAccountId, [{
+      asset: entry.asset, qty: -entry.qty, txRef: entry.txRef.toLowerCase(),
+      logIndex: entry.logIndex, note: `confirmed transfer to ${to.name}`,
+    }], actor);
+    recordFunding(db, entry.toAccountId, [{
+      asset: entry.asset, qty: entry.qty, txRef: entry.txRef.toLowerCase(),
+      logIndex: entry.logIndex, note: `confirmed transfer from ${from.name}`,
+    }], actor);
+    if ((entry.gasEth ?? 0) > 0) {
+      db.prepare(
+        `INSERT INTO execution_asset_ledger
+          (execution_account_id, asset, qty_delta, event_type, tx_ref, log_index, ts)
+         VALUES (?, 'ETH', ?, 'gas', ?, -2, ?)`,
+      ).run(entry.fromAccountId, String(-entry.gasEth!), entry.txRef.toLowerCase(), now);
+    }
+    appendAudit(db, actor, 'custody_transfer_confirmed', {
+      transferId: Number(info.lastInsertRowid), fromAccountId: entry.fromAccountId,
+      toAccountId: entry.toAccountId, asset: entry.asset, qty: entry.qty,
+      txRef: entry.txRef.toLowerCase(), confirmations: entry.confirmations,
+    });
+    return Number(info.lastInsertRowid);
   })();
 }
 

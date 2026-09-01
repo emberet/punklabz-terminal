@@ -1,19 +1,70 @@
 import { describe, expect, it } from 'vitest';
 import { keccak256, type Hex } from 'viem';
 import { openTestDb, type DB } from '../src/db/db.js';
-import { accountForMode, bindTraderWallet, custodyHoldings, recordFunding, setBotAllocation } from '../src/live/accounts.js';
+import {
+  accountForMode, bindTraderWallet, custodyHoldings, recordCustodyTransfer,
+  recordFunding, separateManagerAndTrader, setBotAllocation,
+} from '../src/live/accounts.js';
 import { TransactionCoordinator } from '../src/live/transactionCoordinator.js';
 import { settleConfirmedOrder } from '../src/live/settlement.js';
 import { reconcileAccount } from '../src/live/reconciler.js';
 import type { TradingSigner } from '../src/live/signing/signer.js';
 import { evaluateIntent, getLiveConfig } from '../src/live/riskEngine.js';
 import { runPreflight } from '../src/live/preflight.js';
-import { buildPolicy, USDG_ADDRESS, WETH_ADDRESS, ZEROX_ALLOWANCE_HOLDER } from '../src/live/signing/provisionPrivy.js';
+import {
+  buildManagerFundingPolicy, buildPolicy, USDG_ADDRESS, WETH_ADDRESS, ZEROX_ALLOWANCE_HOLDER,
+} from '../src/live/signing/provisionPrivy.js';
 import { LiveNetwork } from '../src/live/liveNetwork.js';
 import { parseIndexedEthFunding, ZeroXRobinhoodAdapter } from '../src/live/adapters/zeroXRobinhood.js';
 
 const WALLET = '0x1111111111111111111111111111111111111111';
 const TARGET = '0x2222222222222222222222222222222222222222';
+
+describe('isolated Manager to Trader custody', () => {
+  it('does not capitalize the Trader until a confirmed transfer is recorded exactly once', () => {
+    const db = openTestDb();
+    const funded = bindTraderWallet(db, WALLET);
+    recordFunding(db, funded.id, [
+      { asset: 'USDG', qty: 10, txRef: `0x${'01'.repeat(32)}`, logIndex: 0 },
+      { asset: 'ETH', qty: 0.01, txRef: `0x${'02'.repeat(32)}`, logIndex: -1 },
+    ], 'test');
+    const accounts = separateManagerAndTrader(db, TARGET, 'test');
+
+    expect(custodyHoldings(db, accounts.manager.id).get('USDG')).toBe(10);
+    expect(custodyHoldings(db, accounts.trader.id).get('USDG') ?? 0).toBe(0);
+
+    const txRef = `0x${'03'.repeat(32)}`;
+    const first = recordCustodyTransfer(db, {
+      fromAccountId: accounts.manager.id, toAccountId: accounts.trader.id,
+      asset: 'USDG', qty: 5, txRef, logIndex: 7, confirmations: 12,
+    }, 'test');
+    const replay = recordCustodyTransfer(db, {
+      fromAccountId: accounts.manager.id, toAccountId: accounts.trader.id,
+      asset: 'USDG', qty: 5, txRef, logIndex: 7, confirmations: 12,
+    }, 'test');
+
+    expect(replay).toBe(first);
+    expect(custodyHoldings(db, accounts.manager.id).get('USDG')).toBe(5);
+    expect(custodyHoldings(db, accounts.trader.id).get('USDG')).toBe(5);
+    expect((db.prepare(`SELECT COUNT(*) n FROM custody_transfers`).get() as any).n).toBe(1);
+  });
+
+  it('builds a temporary Manager policy for only the exact seed transfers', () => {
+    const policy = buildManagerFundingPolicy(TARGET) as any;
+    expect(policy.rules).toHaveLength(2);
+    expect(policy.rules[0].conditions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: 'chain_id', value: '4663' }),
+      expect.objectContaining({ field: 'to', value: USDG_ADDRESS }),
+      expect.objectContaining({ field: 'transfer.to', value: TARGET }),
+      expect.objectContaining({ field: 'transfer.amount', value: '0x4C4B40' }),
+    ]));
+    expect(policy.rules[1].conditions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: 'chain_id', value: '4663' }),
+      expect.objectContaining({ field: 'to', value: TARGET }),
+      expect.objectContaining({ field: 'value', value: '0x11C37937E08000' }),
+    ]));
+  });
+});
 
 describe('historical native funding proofs', () => {
   it('accepts only a successful trace into the exact wallet and transaction', () => {
@@ -171,7 +222,7 @@ describe('durable transaction coordination', () => {
 describe('receipt settlement and clean-fill evidence', () => {
   it('posts exact receipt deltas once and only becomes clean after reconciliation', async () => {
     const db = openTestDb();
-    const account = accountForMode(db, 'canary', 'evm:robinhood');
+    const account = bindTraderWallet(db, WALLET);
     recordFunding(db, account.id, [
       { asset: 'USDG', qty: 5, txRef: '0xfund', logIndex: 0 },
       { asset: 'ETH', qty: 0.01, txRef: '0xfund', logIndex: -1 },
@@ -229,7 +280,10 @@ describe('Manager capital allocation', () => {
        VALUES ('ALLOCATED BOT', 'house', 'momentum', '{}', 1)`,
     ).run().lastInsertRowid);
     recordFunding(db, account.id, [{ asset: 'USDG', qty: 5, txRef: '0xallocfund', logIndex: 0 }], 'test');
-    db.prepare(`UPDATE live_config SET mode='canary', halted=0, capital_stage=1 WHERE id=1`).run();
+    db.prepare(
+      `UPDATE live_config SET mode='canary', halted=0, capital_stage=1,
+       execution_phase='autonomous_canary', autonomy_enabled=1 WHERE id=1`,
+    ).run();
     const intent = {
       intentId: 'allocated-entry', botId, instrumentId: 'CRYPTO_SPOT://robinhood/WETH-USDG',
       venue: 'evm:robinhood', side: 'buy' as const, notionalUsd: 0.5, confidence: 99, reason: 'test',
@@ -250,6 +304,30 @@ describe('Manager capital allocation', () => {
 });
 
 describe('bounded exit routing', () => {
+  it('records the full notional for a trusted receipt-derived lot close', () => {
+    const db = openTestDb();
+    getLiveConfig(db);
+    const account = accountForMode(db, 'canary', 'evm:robinhood');
+    db.prepare(
+      `UPDATE live_config SET mode='canary', halted=0, capital_stage=1,
+       execution_phase='canary_probe', autonomy_enabled=0 WHERE id=1`,
+    ).run();
+    const intent = {
+      intentId: 'exact-exit', botId: null,
+      instrumentId: 'CRYPTO_SPOT://robinhood/WETH-USDG', venue: 'evm:robinhood',
+      side: 'sell' as const, notionalUsd: 0.52, confidence: 1, reason: 'close exact receipt lot',
+      forcedBy: 'operator:test',
+    };
+    const decision = evaluateIntent(db, intent, undefined, account.id, undefined, {
+      isExit: true, exactFullExit: true,
+    });
+    expect(decision.checks.filter((check) => !check.pass)).toEqual([]);
+    expect(decision.approved).toBe(true);
+    expect(decision.sizeUsd).toBe(0.52);
+    expect(decision.checks.find((check) => check.name === 'max_trade')?.detail)
+      .toContain('full-lot exit');
+  });
+
   it('routes the risk-approved slice instead of the full open lot', async () => {
     const db = openTestDb();
     getLiveConfig(db);

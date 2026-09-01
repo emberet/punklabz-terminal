@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Panel } from '../components/Panel';
 import { api } from '../lib/api';
 import { usePageMeta } from '../lib/pageMeta';
+import { useAuth } from '../lib/auth';
 
 interface InternPost {
   id: number;
@@ -13,12 +14,17 @@ interface InternPost {
   blockedRules: string[];
   publishedId: string | null;
   publishedAt: number | null;
+  providerKind: string;
+  sourceCount: number;
+  reviewedAt: number | null;
+  reviewApproved: boolean;
 }
 
 interface InternView {
   mode: 'off' | 'shadow' | 'live';
   shadowDays: number;
   provider: { kind: string; ready: boolean; detail: string };
+  sourceLabel: string;
   quota: { halted: boolean; haltReason: string | null; readsUsed: number; postsUsed: number; driftPct: number | null };
   maxPostsPerDay: number;
   readsIngested: number;
@@ -41,6 +47,9 @@ export function Intern() {
   usePageMeta('Intern', 'The newest agent reads the timeline out loud, and everything it drafts is screened before it is published.');
   const [d, setD] = useState<InternView | null>(null);
   const [filter, setFilter] = useState<'all' | 'blocked' | 'shadow' | 'published'>('all');
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState('');
+  const { user } = useAuth();
 
   const load = useCallback(() => {
     api.get<InternView>('/api/intern').then(setD).catch(() => {});
@@ -50,6 +59,19 @@ export function Intern() {
     const t = setInterval(load, 60_000);
     return () => clearInterval(t);
   }, [load]);
+
+  const act = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    setNotice('');
+    try {
+      await fn();
+      load();
+    } catch (error: any) {
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   if (!d) {
     return (
@@ -120,12 +142,33 @@ export function Intern() {
             </span>
           </div>
           <div className="row" style={{ gap: 10, marginTop: 4 }}>
+            <span className="soft" style={{ width: 150 }}>SOURCE</span>
+            <span className={d.sourceLabel === 'X-BACKED' ? 'phos' : 'amber'}>{d.sourceLabel}</span>
+          </div>
+          <div className="row" style={{ gap: 10, marginTop: 4 }}>
             <span className="soft" style={{ width: 150 }}>QUOTA</span>
             <span className="soft">
               {d.quota.readsUsed} reads, {d.quota.postsUsed} posts used · cap {d.maxPostsPerDay}/day
               {d.quota.driftPct !== null && ` · drift ${d.quota.driftPct.toFixed(1)}%`}
             </span>
           </div>
+          {user?.isAdmin && (
+            <div className="row" style={{ gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+              <button disabled={busy} onClick={() => void act(() => api.post('/api/admin/intern/cycle'))}>
+                RUN PREVIEW
+              </button>
+              {d.mode !== 'live' ? (
+                <button className="primary" disabled={busy} onClick={() => void act(() => api.post('/api/intern/mode', { mode: 'live' }))}>
+                  ENABLE LIVE X
+                </button>
+              ) : (
+                <button className="danger" disabled={busy} onClick={() => void act(() => api.post('/api/intern/mode', { mode: 'shadow' }))}>
+                  RETURN TO SHADOW
+                </button>
+              )}
+              {notice && <span className="red">{notice}</span>}
+            </div>
+          )}
           <div className="row" style={{ gap: 10, marginTop: 4 }}>
             <span className="soft" style={{ width: 150 }}>MODEL SPEND</span>
             <span className="soft">
@@ -219,6 +262,10 @@ export function Intern() {
             <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
               <span className="soft">{time(p.ts)}</span>
               <span className={VERDICT_TONE[p.verdict] ?? 'soft'}>{p.verdict.toUpperCase()}</span>
+              <span className={p.sourceCount > 0 && p.providerKind === 'api' ? 'phos' : 'amber'}>
+                {p.sourceCount > 0 && p.providerKind === 'api' ? `X ${p.sourceCount}` : 'INTERNAL DATA ONLY'}
+              </span>
+              {p.reviewApproved && <span className="phos">APPROVED</span>}
               {p.blockedRules.map((r) => <span key={r} className="red">{r}</span>)}
             </div>
             <div style={{ marginTop: 4 }}>{p.draft}</div>
@@ -226,6 +273,20 @@ export function Intern() {
               <div className="soft" style={{ marginTop: 4, fontSize: '0.9em' }}>
                 numbers it was allowed to use: {p.allowedNumbers.slice(0, 12).join(', ')}
                 {p.allowedNumbers.length > 12 && ' …'}
+              </div>
+            )}
+            {user?.isAdmin && p.verdict === 'shadow' && !p.reviewApproved && (
+              <div className="row" style={{ gap: 8, marginTop: 8 }}>
+                <button
+                  className="primary"
+                  disabled={busy || p.providerKind !== 'api' || p.sourceCount <= 0}
+                  onClick={() => void act(() => api.post('/api/admin/intern/review', { postId: p.id, approved: true }))}
+                >
+                  APPROVE PREVIEW
+                </button>
+                <button disabled={busy} onClick={() => void act(() => api.post('/api/admin/intern/review', { postId: p.id, approved: false }))}>
+                  REJECT
+                </button>
               </div>
             )}
           </div>

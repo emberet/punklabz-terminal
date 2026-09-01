@@ -172,21 +172,27 @@ export function publicKeyFromAuthorizationKey(privateKeyBase64: string): string 
   return createPublicKey(priv).export({ format: 'der', type: 'spki' }).toString('base64');
 }
 
-interface Ctx {
+export interface Ctx {
   appId: string;
   appSecret: string;
   walletId: string;
   authorizationKey?: string;
 }
 
-function authorizationSignature(ctx: Ctx, method: string, url: string, body: unknown): string | null {
+function authorizationSignature(
+  ctx: Ctx,
+  method: string,
+  url: string,
+  body: unknown,
+  extraHeaders: Record<string, string> = {},
+): string | null {
   if (!ctx.authorizationKey) return null;
   const payload = {
     version: 1,
     method,
     url,
     body,
-    headers: { 'privy-app-id': ctx.appId },
+    headers: { 'privy-app-id': ctx.appId, ...extraHeaders },
   };
   const key = createPrivateKey({
     key: normalizeAuthorizationKey(ctx.authorizationKey), format: 'der', type: 'pkcs8',
@@ -197,15 +203,26 @@ function authorizationSignature(ctx: Ctx, method: string, url: string, body: unk
   return signer.sign(key).toString('base64');
 }
 
-async function call(ctx: Ctx, method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, sign = false) {
+async function call(
+  ctx: Ctx,
+  method: 'GET' | 'POST' | 'PATCH',
+  path: string,
+  body?: unknown,
+  sign = false,
+  idempotencyKey?: string,
+) {
   const url = `${PRIVY_API}${path}`;
   const headers: Record<string, string> = {
     Authorization: `Basic ${Buffer.from(`${ctx.appId}:${ctx.appSecret}`).toString('base64')}`,
     'privy-app-id': ctx.appId,
     'Content-Type': 'application/json',
   };
+  if (idempotencyKey) headers['privy-idempotency-key'] = idempotencyKey;
   if (sign) {
-    const sig = authorizationSignature(ctx, method, url, body ?? {});
+    const sig = authorizationSignature(
+      ctx, method, url, body ?? {},
+      idempotencyKey ? { 'privy-idempotency-key': idempotencyKey } : {},
+    );
     if (sig) headers['privy-authorization-signature'] = sig;
   }
   const res = await fetch(url, {
@@ -217,6 +234,182 @@ async function call(ctx: Ctx, method: 'GET' | 'POST' | 'PATCH', path: string, bo
   let parsed: any;
   try { parsed = JSON.parse(text); } catch { parsed = { raw: text }; }
   return { ok: res.ok, status: res.status, body: parsed };
+}
+
+const ERC20_TRANSFER_ABI = [{
+  inputs: [
+    { internalType: 'address', name: 'to', type: 'address' },
+    { internalType: 'uint256', name: 'amount', type: 'uint256' },
+  ],
+  name: 'transfer',
+  outputs: [{ internalType: 'bool', name: '', type: 'bool' }],
+  stateMutability: 'nonpayable',
+  type: 'function',
+}];
+
+export function buildManagerFundingPolicy(traderAddress: string) {
+  return {
+    version: '1.0',
+    name: 'PunkLabz exact Trader seed',
+    chain_type: 'ethereum',
+    rules: [
+      {
+        name: 'Exactly 5 USDG to Trader', method: 'eth_signTransaction', action: 'ALLOW',
+        conditions: [
+          { field_source: 'ethereum_transaction', field: 'chain_id', operator: 'eq', value: '4663' },
+          { field_source: 'ethereum_transaction', field: 'to', operator: 'eq', value: USDG_ADDRESS },
+          { field_source: 'ethereum_calldata', field: 'transfer.to', abi: ERC20_TRANSFER_ABI, operator: 'eq', value: traderAddress },
+          { field_source: 'ethereum_calldata', field: 'transfer.amount', abi: ERC20_TRANSFER_ABI, operator: 'eq', value: usdgCapHex(5) },
+        ],
+      },
+      {
+        name: 'Exactly 0.005 ETH to Trader', method: 'eth_signTransaction', action: 'ALLOW',
+        conditions: [
+          { field_source: 'ethereum_transaction', field: 'chain_id', operator: 'eq', value: '4663' },
+          { field_source: 'ethereum_transaction', field: 'to', operator: 'eq', value: traderAddress },
+          { field_source: 'ethereum_transaction', field: 'value', operator: 'eq', value: '0x11C37937E08000' },
+        ],
+      },
+    ],
+  };
+}
+
+export async function prepareManagerFundingPolicy(
+  ctx: Ctx,
+  traderAddress: string,
+  runId: string,
+): Promise<{ policyId: string; previousPolicyIds: string[]; ownerId: string; walletAddress: string }> {
+  const before = await call(ctx, 'GET', `/wallets/${ctx.walletId}`);
+  if (!before.ok || !before.body?.owner_id || !before.body?.address) {
+    throw new Error('Manager wallet owner/address could not be verified');
+  }
+  const previousPolicyIds = [...(before.body.policy_ids ?? [])];
+  const created = await call(ctx, 'POST', '/policies', {
+    ...buildManagerFundingPolicy(traderAddress), owner_id: before.body.owner_id,
+  }, false, `${runId}-manager-funding-policy`);
+  if (!created.ok || !created.body?.id) {
+    throw new Error(`Manager funding policy creation failed: ${created.status}`);
+  }
+  const policyId = created.body.id as string;
+  const patched = await call(ctx, 'PATCH', `/wallets/${ctx.walletId}`, { policy_ids: [policyId] }, true);
+  if (!patched.ok) throw new Error(`Manager funding policy attach failed: ${patched.status}`);
+  const verified = await call(ctx, 'GET', `/wallets/${ctx.walletId}`);
+  if (!verified.ok || !(verified.body?.policy_ids ?? []).includes(policyId)) {
+    throw new Error('Manager funding policy read-back failed');
+  }
+  return {
+    policyId, previousPolicyIds, ownerId: before.body.owner_id, walletAddress: before.body.address,
+  };
+}
+
+export async function restoreManagerPolicies(ctx: Ctx, policyIds: string[]): Promise<void> {
+  const patched = await call(ctx, 'PATCH', `/wallets/${ctx.walletId}`, { policy_ids: policyIds }, true);
+  if (!patched.ok) throw new Error(`Manager policy restore failed: ${patched.status}`);
+  const verified = await call(ctx, 'GET', `/wallets/${ctx.walletId}`);
+  const actual = [...(verified.body?.policy_ids ?? [])].sort();
+  const expected = [...policyIds].sort();
+  if (!verified.ok || JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error('Manager policy restore read-back failed');
+  }
+}
+
+export async function signPrivyOperatorTransaction(ctx: Ctx, opts: {
+  to: string;
+  value: bigint;
+  data: string;
+  nonce: number;
+  gas: bigint;
+  maxFeePerGas: bigint;
+  maxPriorityFeePerGas: bigint;
+  idempotencyKey: string;
+}): Promise<string> {
+  const body = {
+    method: 'eth_signTransaction',
+    params: { transaction: {
+      to: opts.to,
+      value: `0x${opts.value.toString(16)}`,
+      data: opts.data,
+      chain_id: 4663,
+      nonce: opts.nonce,
+      gas_limit: `0x${opts.gas.toString(16)}`,
+      max_fee_per_gas: `0x${opts.maxFeePerGas.toString(16)}`,
+      max_priority_fee_per_gas: `0x${opts.maxPriorityFeePerGas.toString(16)}`,
+    } },
+  };
+  const signed = await call(
+    ctx, 'POST', `/wallets/${ctx.walletId}/rpc`, body, true, opts.idempotencyKey,
+  );
+  const raw = signed.body?.data?.signed_transaction ?? signed.body?.data?.signedTransaction;
+  if (!signed.ok || typeof raw !== 'string' || !raw.startsWith('0x')) {
+    throw new Error(`Privy Manager signing failed: ${signed.status}`);
+  }
+  return raw;
+}
+
+export interface IsolatedTraderProvisionResult {
+  walletId: string;
+  walletAddress: string;
+  managementQuorumId: string;
+  runtimeSignerId: string;
+  policyId: string;
+}
+
+/** Create the isolated Trader in one reviewable, idempotent Privy ceremony. */
+export async function provisionIsolatedTrader(opts: {
+  appId: string;
+  appSecret: string;
+  managementPublicKey: string;
+  runtimePublicKey: string;
+  runId: string;
+}): Promise<IsolatedTraderProvisionResult> {
+  const ctx: Ctx = { appId: opts.appId, appSecret: opts.appSecret, walletId: '' };
+  const create = async (path: string, body: unknown, key: string) => {
+    const result = await call(ctx, 'POST', path, body, false, `${opts.runId}-${key}`);
+    if (!result.ok) throw new Error(`Privy ${path} ${result.status}: ${JSON.stringify(result.body).slice(0, 300)}`);
+    return result.body as any;
+  };
+  const management = await create('/key_quorums', {
+    display_name: 'PunkLabz Trader management',
+    public_keys: [opts.managementPublicKey],
+    authorization_threshold: 1,
+  }, 'management-quorum');
+  const runtime = await create('/key_quorums', {
+    display_name: 'PunkLabz Trader runtime',
+    public_keys: [opts.runtimePublicKey],
+    authorization_threshold: 1,
+  }, 'runtime-quorum');
+  if (!management.id || !runtime.id) throw new Error('Privy did not return both quorum ids');
+
+  const policy = await create('/policies', {
+    ...buildPolicy(5, 4663),
+    owner_id: management.id,
+  }, 'runtime-policy');
+  if (!policy.id) throw new Error('Privy did not return the runtime policy id');
+
+  const wallet = await create('/wallets', {
+    chain_type: 'ethereum',
+    display_name: 'PunkLabz Robinhood Trader 01',
+    external_id: `punklabz_trader_${opts.runId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40)}`,
+    owner_id: management.id,
+    policy_ids: [],
+    additional_signers: [{ signer_id: runtime.id, override_policy_ids: [policy.id] }],
+  }, 'trader-wallet');
+  if (!wallet.id || !wallet.address) throw new Error('Privy did not return the Trader wallet identity');
+
+  ctx.walletId = wallet.id;
+  const verified = await call(ctx, 'GET', `/wallets/${wallet.id}`);
+  const signer = (verified.body?.additional_signers ?? []).find((entry: any) => entry.signer_id === runtime.id);
+  if (!verified.ok || verified.body?.owner_id !== management.id
+    || !signer?.override_policy_ids?.includes(policy.id)) {
+    throw new Error('Privy read-back did not prove the intended owner, runtime signer, and override policy');
+  }
+  return {
+    walletId: wallet.id,
+    walletAddress: wallet.address,
+    managementQuorumId: management.id,
+    runtimeSignerId: runtime.id,
+    policyId: policy.id,
+  };
 }
 
 export interface ProvisionResult {

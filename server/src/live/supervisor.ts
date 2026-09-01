@@ -4,13 +4,18 @@ import type { ExecutionAdapter } from './adapters.js';
 import type { TradingSigner } from './signing/signer.js';
 import { runPreflight, preflightLines, type PreflightResult } from './preflight.js';
 import { recoverPendingOrders, reconcileAll } from './reconciler.js';
-import { getLiveConfig, haltNetwork, resumeAfterSafetyChecks, setCapitalStage, setLiveMode, stageCapUsd } from './riskEngine.js';
-import { accountForMode, accountBook } from './accounts.js';
+import {
+  completedCanaryExperiment, enableCanaryAutonomy, getLiveConfig, haltNetwork,
+  resumeAfterSafetyChecks, setCapitalStage, setLiveMode, stageCapUsd,
+} from './riskEngine.js';
+import { accountForMode, accountBook, custodyHoldings, setBotAllocation } from './accounts.js';
 import { bindTraderWallet } from './accounts.js';
 import { revocationCache } from './delegation/revocationCache.js';
 import { expireDueGrants } from './delegation/grants.js';
 import { settleConfirmedOrder } from './settlement.js';
 import type { ExecutionMode } from '@punklabz/shared';
+import type { CanaryExperimentCoordinator } from './canaryExperiment.js';
+import { signerPolicyFingerprint } from './signing/signer.js';
 
 // AUTONOMOUS SUPERVISOR.
 //
@@ -45,6 +50,7 @@ export class AutonomousSupervisor {
     private feedStatus: Record<string, { connected: boolean; stale: boolean }>,
     /** ETH/USD mark, so the gas-reserve check can price itself */
     private ethUsd?: () => number | null,
+    private experiment?: CanaryExperimentCoordinator,
   ) {}
 
   /**
@@ -145,6 +151,7 @@ export class AutonomousSupervisor {
         },
         cfg.mode,
         'supervisor:boot',
+        { purpose: cfg.phase === 'autonomous_canary' ? 'autonomy' : 'probe' },
       );
       lines.push(pad('PREFLIGHT', preflight.passed ? 'PASS' : 'FAIL'));
     }
@@ -192,7 +199,7 @@ export class AutonomousSupervisor {
     if (targetMode === 'canary' && stage < 1) throw new Error('canary starts at the $5 stage');
     if (targetMode === 'live' && stage !== 4) throw new Error('live mode requires the $100 stage');
 
-    const preflight = await this.safetyGate(targetMode, stage, actor);
+    const preflight = await this.safetyGate(targetMode, stage, actor, targetMode === 'canary' ? 'probe' : 'autonomy');
 
     this.db.transaction(() => {
       setCapitalStage(this.db, stage, actor);
@@ -243,13 +250,18 @@ export class AutonomousSupervisor {
     if (cfg.mode !== 'canary' && cfg.mode !== 'live') {
       throw new Error('capital promotion requires an armed canary or live network');
     }
-    const preflight = await this.safetyGate(cfg.mode, stage, actor);
+    const preflight = await this.safetyGate(cfg.mode, stage, actor, 'autonomy');
     setCapitalStage(this.db, stage, actor);
     this.hub.publish('live', { event: 'stage_change', stage });
     return preflight;
   }
 
-  private async safetyGate(targetMode: ExecutionMode, stage: number, actor: string): Promise<PreflightResult> {
+  private async safetyGate(
+    targetMode: ExecutionMode,
+    stage: number,
+    actor: string,
+    purpose: 'probe' | 'autonomy',
+  ): Promise<PreflightResult> {
     let unresolved = 0;
     for (const adapter of this.adapters.values()) {
       if (typeof adapter.recoverTransactions !== 'function') continue;
@@ -265,8 +277,39 @@ export class AutonomousSupervisor {
     const preflight = await runPreflight({
       db: this.db, signer: this.signer, adapters: this.adapters, feedStatus: this.feedStatus,
       ethUsd: this.ethUsd?.() ?? null,
-    }, targetMode, actor, { targetStage: stage });
+    }, targetMode, actor, { targetStage: stage, purpose });
     if (!preflight.passed) throw new Error(`preflight failed: ${preflight.blockers.join('; ')}`);
+    return preflight;
+  }
+
+  /** Open autonomous execution only after the exact probe and a fresh full gate. */
+  async enableCanaryAutonomy(actor: string): Promise<PreflightResult> {
+    const cfg = getLiveConfig(this.db);
+    if (cfg.mode !== 'canary' || cfg.phase !== 'canary_probe' || cfg.halted || cfg.capitalStage !== 1) {
+      throw new Error('autonomy requires an active stage-1 canary probe');
+    }
+    const wallet = await this.signer.getAddress();
+    const policy = signerPolicyFingerprint(this.signer);
+    if (!wallet || !policy) throw new Error('guarded Trader signer identity is unavailable');
+    const evidence = completedCanaryExperiment(this.db, wallet, policy);
+    if (!evidence) throw new Error('no completed round trip matches this Trader wallet and signer policy');
+
+    const preflight = await this.safetyGate('canary', 1, actor, 'autonomy');
+    const required = ['MOMENTUM RUNNER', 'MEAN REVERSION', 'GRID TRADER'];
+    const bots = this.db.prepare(
+      `SELECT id, name FROM bots WHERE name IN ('MOMENTUM RUNNER','MEAN REVERSION','GRID TRADER')
+       AND status IN ('running','paused')`,
+    ).all() as { id: number; name: string }[];
+    const missing = required.filter((name) => !bots.some((bot) => bot.name === name));
+    if (missing.length) throw new Error(`required canary bot(s) unavailable: ${missing.join(', ')}`);
+    const account = accountForMode(this.db, 'canary', 'evm:robinhood');
+    const authorized = Math.min(stageCapUsd(1), custodyHoldings(this.db, account.id).get('USDG') ?? 0);
+    for (const bot of bots) setBotAllocation(this.db, account.id, bot.id, 0.75, actor, authorized);
+    enableCanaryAutonomy(this.db, actor, {
+      experimentRunId: evidence.id,
+      reconciliationRunId: evidence.reconciliationRunId,
+    });
+    this.hub.publish('live', { event: 'canary_autonomy_enabled', stage: 1 });
     return preflight;
   }
 
@@ -274,7 +317,9 @@ export class AutonomousSupervisor {
   startLoops(): void {
     // resolve orders the venue still owes us an answer on
     this.orderTimer = setInterval(() => {
-      void this.pollPendingOrders().catch((e) => console.error('order poll failed:', e));
+      void this.pollPendingOrders()
+        .then(() => this.experiment?.advance())
+        .catch((e) => console.error('order/experiment poll failed:', e));
     }, 30_000);
 
     // full ledger-vs-venue reconciliation

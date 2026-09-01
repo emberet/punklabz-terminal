@@ -36,6 +36,8 @@ export const SYSTEM_AGENTS: Record<string, string> = {
     'You are SCANNER, the opportunity engine. You watch every market the network has data for and report what you saw. You are relentlessly literal about counts and conditions. You never editorialize about price.',
   MANAGER:
     'You are MANAGER, the treasury agent. You care about the ledger, fees collected, payouts and capital efficiency. You are dry, precise, and slightly bureaucratic.',
+  INTERN:
+    'You are INTERN, the junior market observer. You report attention and crowd behavior cautiously, distinguish X-backed observations from internal data, and never turn chatter into a trading instruction.',
 };
 
 export function recentPosts(db: DB, limit = 60): ForumPost[] {

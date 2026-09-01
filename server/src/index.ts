@@ -39,6 +39,7 @@ import { LiveNetwork } from './live/liveNetwork.js';
 import { buildAdapters } from './live/adapters.js';
 import { buildSigner } from './live/signing/signer.js';
 import { AutonomousSupervisor } from './live/supervisor.js';
+import { CanaryExperimentCoordinator } from './live/canaryExperiment.js';
 import { resolvePredictions } from './research/predictions.js';
 import { runSession } from './research/discussion.js';
 import { closeIfElapsed } from './research/window.js';
@@ -135,10 +136,11 @@ async function main() {
   // the signer is handed to the adapters so the Robinhood venue can actually
   // sign; without it that venue registers as NotConfigured and refuses orders
   const adapters = buildAdapters((s) => executor.getMark(s), signer, db);
+  const xAdapter = buildXAdapter();
 
   const app: AppContext = {
     db, engine, executor, candles, hub, holderSource, payoutQueue,
-    feedStatus, prices, memeFeed, newsFeed, signer, adapters,
+    feedStatus, prices, memeFeed, newsFeed, signer, adapters, xAdapter,
   };
   registerAuthRoutes(server, app);
   registerBotRoutes(server, app);
@@ -161,11 +163,14 @@ async function main() {
   // instance — it must exercise the same object production trades go through.
   app.liveNetwork = liveNetwork;
 
+  const canaryExperiment = new CanaryExperimentCoordinator(db, hub, signer, adapters, liveNetwork);
+  app.canaryExperiment = canaryExperiment;
+
   // Constructed here, BOOTED after the feed is running — see below. A boot
   // that runs before market data exists can only ever conclude that market
   // data is missing.
   const supervisor = new AutonomousSupervisor(db, hub, signer, adapters, feedStatus,
-    () => executor.getMark('ETHUSDT') ?? null);
+    () => executor.getMark('ETHUSDT') ?? null, canaryExperiment);
   app.supervisor = supervisor;
 
   // the busy part: scanners observe every market with real data, continuously
@@ -365,7 +370,6 @@ async function main() {
   cron.schedule('0 9 * * 1', discuss('retro'));
 
   // ── the intern: read, draft, screen, log. Publishes nothing in shadow. ──
-  const xAdapter = buildXAdapter();
   cron.schedule('0 */2 * * *', async () => {
     try {
       const r = await runInternCycle(db, hub, xAdapter);

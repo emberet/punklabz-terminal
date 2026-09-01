@@ -13,14 +13,24 @@ RestartSec=5
 Environment=NODE_ENV=production
 EnvironmentFile=/opt/punklabz/.env
 LoadCredential=privy_authorization_key:/etc/punklabz/privy-authorization-key
+LoadCredential=privy_app_secret:/etc/punklabz/privy-app-secret
 Environment=PRIVY_AUTHORIZATION_KEY_FILE=%d/privy_authorization_key
+Environment=PRIVY_APP_SECRET_FILE=%d/privy_app_secret
+LoadCredential=x_app_key:/etc/punklabz/x-app-key
+LoadCredential=x_app_secret:/etc/punklabz/x-app-secret
+LoadCredential=x_access_token:/etc/punklabz/x-access-token
+LoadCredential=x_access_secret:/etc/punklabz/x-access-secret
+Environment=X_APP_KEY_FILE=%d/x_app_key
+Environment=X_APP_SECRET_FILE=%d/x_app_secret
+Environment=X_ACCESS_TOKEN_FILE=%d/x_access_token
+Environment=X_ACCESS_SECRET_FILE=%d/x_access_secret
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/punklabz/data /opt/punklabz/backups
-# secrets live in /opt/punklabz/.env (never rsynced by deploy.sh)
+# non-secret configuration lives in .env; private credentials are root-owned files above
 
 [Install]
 WantedBy=multi-user.target

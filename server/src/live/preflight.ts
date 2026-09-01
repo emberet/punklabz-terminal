@@ -15,6 +15,8 @@ import { delegationCeiling } from './delegation/delegationPolicy.js';
 import { buildDelegationProvider } from './delegation/provider.js';
 import { revocationCache } from './delegation/revocationCache.js';
 import { getLiveConfig } from './riskEngine.js';
+import { completedCanaryExperiment } from './riskEngine.js';
+import { signerPolicyFingerprint } from './signing/signer.js';
 
 // LIVE PREFLIGHT.
 //
@@ -55,7 +57,7 @@ export async function runPreflight(
   deps: PreflightDeps,
   targetMode: ExecutionMode,
   actor = 'system',
-  options: { persist?: boolean; targetStage?: number } = {},
+  options: { persist?: boolean; targetStage?: number; purpose?: 'probe' | 'autonomy' } = {},
 ): Promise<PreflightResult> {
   const { db, signer, adapters, feedStatus } = deps;
   const checks: PreflightCheck[] = [];
@@ -95,23 +97,6 @@ export async function runPreflight(
     config.operatorAlertWebhook ? 'operator alert webhook configured' : 'OPERATOR_ALERT_WEBHOOK_URL is not configured',
     needsVenue);
 
-  if (needsVenue) {
-    const shadow = db.prepare(`SELECT shadow_armed_at started FROM live_config WHERE id=1`)
-      .get() as { started: number | null } | undefined;
-    const started = shadow?.started ?? null;
-    const failed = started === null ? 0 : (db.prepare(
-      `SELECT COUNT(*) n FROM live_orders
-       WHERE mode='shadow' AND created_at >= ?
-         AND state IN ('submitting','submitted','pending','open','partial','reconciling','failed')`,
-    ).get(started) as { n: number }).n;
-    const elapsed = started === null ? 0 : Date.now() - started;
-    const cleanShadow = started !== null && elapsed >= 24 * 60 * 60_000 && failed === 0;
-    add('shadow_observation', cleanShadow,
-      started === null
-        ? 'no shadow observation window has been armed'
-        : `${(elapsed / 3_600_000).toFixed(1)}h observed, ${failed} failed/unresolved shadow order(s); 24 clean hours required`);
-  }
-
   if (!needsVenue) {
     const passed = checks.filter((c) => c.blocking).every((c) => c.pass);
     return record(db, targetMode, passed, checks, actor, options.persist !== false);
@@ -128,6 +113,21 @@ export async function runPreflight(
 
   const address = await signer.getAddress();
   add('wallet_address', !!address, address ? `trading wallet ${address}` : 'no trading wallet address available');
+  if (targetMode === 'canary') {
+    if (options.purpose === 'probe') {
+      add('launch_evidence', true,
+        'isolated canary probe requested; autonomous strategy execution remains disabled');
+    } else if (address) {
+      const fingerprint = signerPolicyFingerprint(signer);
+      const evidence = fingerprint ? completedCanaryExperiment(db, address, fingerprint) : null;
+      add('launch_evidence', !!evidence,
+        evidence
+          ? `round-trip experiment ${evidence.id} completed and reconciled for this wallet/policy`
+          : 'no completed reconciled round-trip exists for the exact Trader wallet and signer policy');
+    } else {
+      add('launch_evidence', false, 'cannot bind launch evidence without a signer address');
+    }
+  }
   if (address) {
     try {
       const account = assertTraderWallet(db, address);

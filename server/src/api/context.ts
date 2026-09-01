@@ -12,6 +12,8 @@ import type { TradingSigner } from '../live/signing/signer.js';
 import type { ExecutionAdapter } from '../live/adapters.js';
 import type { LiveNetwork } from '../live/liveNetwork.js';
 import type { AutonomousSupervisor } from '../live/supervisor.js';
+import type { CanaryExperimentCoordinator } from '../live/canaryExperiment.js';
+import type { XAdapter } from '../intern/xAdapter.js';
 
 export interface AppContext {
   db: DB;
@@ -31,4 +33,6 @@ export interface AppContext {
   /** present once the live pipeline is wired; the force-trade route needs it */
   liveNetwork?: LiveNetwork;
   supervisor?: AutonomousSupervisor;
+  canaryExperiment?: CanaryExperimentCoordinator;
+  xAdapter: XAdapter;
 }

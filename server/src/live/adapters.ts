@@ -95,15 +95,17 @@ export interface ExecutionAdapter {
       expectedPrice?: number;
       grossEdgeBps?: number;
       safetyBufferBps?: number;
+      /** exact base quantity for a receipt-derived close; only valid for sells */
+      exactSellQuantity?: number;
     },
   ): Promise<AdapterOrderResult>;
   /** poll a submitted order until it resolves */
   getOrderStatus?(venueOrderId: string): Promise<AdapterOrderStatus>;
   cancelOrder?(venueOrderId: string): Promise<void>;
-  getBalances?(): Promise<AdapterBalance[]>;
+  getBalances?(walletAddress?: string): Promise<AdapterBalance[]>;
   getPositions?(): Promise<AdapterPosition[]>;
   /** authoritative venue state for the reconciler */
-  reconcile?(): Promise<ReconciliationResult>;
+  reconcile?(walletAddress?: string): Promise<ReconciliationResult>;
   recoverTransactions?(): Promise<{ recovered: number; unresolved: number }>;
   getFundingTransfers?(txHash: string, walletAddress: string): Promise<FundingTransfer[]>;
   verifyCoreAssets?(): Promise<{ ok: boolean; failures: string[] }>;
