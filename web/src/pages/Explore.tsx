@@ -43,6 +43,9 @@ export function Explore() {
           </div>
         </div>
       </div>
+      <div className="banner" style={{ marginBottom: 12 }}>
+        DEMO MARKET — clone credits are not cash, crypto, membership payments, or withdrawable creator earnings.
+      </div>
       {notice && <div className="banner bad" style={{ marginBottom: 12, border: '1px solid var(--border)' }}>{notice}</div>}
 
       <Panel title="PUBLIC MACHINE EXCHANGE" sub="community strategies, ranked by 24h performance" noPad>

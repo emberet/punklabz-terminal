@@ -47,6 +47,15 @@ export const config = {
   // economy and can never be enabled in production by an environment toggle.
   payoutsEnabled: process.env.NODE_ENV !== 'production' && (process.env.PAYOUTS_ENABLED ?? 'true') === 'true',
   operatorAlertWebhook: process.env.OPERATOR_ALERT_WEBHOOK_URL ?? '',
+  /** Real product billing. The demo-credit ledger remains independent. */
+  billingProvider: (process.env.BILLING_PROVIDER ?? 'none') as 'none' | 'stripe',
+  billingEnforced: (process.env.BILLING_ENFORCED ?? 'false') === 'true',
+  appOrigin: process.env.APP_ORIGIN ?? (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:4710'),
+  stripeSecretKey: process.env.STRIPE_SECRET_KEY ?? '',
+  stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET ?? '',
+  stripeLabMonthlyPriceId: process.env.STRIPE_PRICE_LAB_MONTHLY ?? '',
+  resendApiKey: process.env.RESEND_API_KEY ?? '',
+  billingEmailFrom: process.env.BILLING_EMAIL_FROM ?? '',
 };
 
 if (!config.isDev && !config.adminWallet) {
@@ -54,4 +63,19 @@ if (!config.isDev && !config.adminWallet) {
 }
 if (!config.isDev && (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32)) {
   throw new Error('SESSION_SECRET must be at least 32 characters in production');
+}
+if (!['none', 'stripe'].includes(config.billingProvider)) {
+  throw new Error('BILLING_PROVIDER must be none or stripe');
+}
+if (config.billingProvider === 'stripe') {
+  if (!config.stripeSecretKey || !config.stripeWebhookSecret || !config.stripeLabMonthlyPriceId) {
+    throw new Error('BILLING_PROVIDER=stripe requires the secret key, webhook secret, and Lab monthly price id');
+  }
+  if (!config.appOrigin) throw new Error('BILLING_PROVIDER=stripe requires APP_ORIGIN');
+  if (!config.isDev && !config.appOrigin.startsWith('https://')) {
+    throw new Error('BILLING_PROVIDER=stripe requires an HTTPS APP_ORIGIN in production');
+  }
+}
+if (config.billingEnforced) {
+  if (config.billingProvider !== 'stripe') throw new Error('BILLING_ENFORCED requires BILLING_PROVIDER=stripe');
 }

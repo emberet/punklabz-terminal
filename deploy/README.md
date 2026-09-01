@@ -45,6 +45,10 @@ RPC_ROBINHOOD_PRIMARY=<chain 4663 private RPC>
 RPC_ROBINHOOD_SECONDARY=<independent chain 4663 RPC>
 OPERATOR_ALERT_WEBHOOK_URL=<private incident webhook>
 ROBINHOOD_TRACE_API_URL=https://robinscan.io/api
+# Keep billing disabled for the first deploy. See "Lab membership activation".
+BILLING_PROVIDER=none
+BILLING_ENFORCED=false
+APP_ORIGIN=https://punklabz.app
 EOF
 chown punklabz:punklabz /opt/punklabz/.env && chmod 600 /opt/punklabz/.env
 ```
@@ -65,6 +69,42 @@ provider is disabled so the unit remains installable without X access.
 
 **Day-one check:** `curl -s https://api.binance.com/api/v3/ping` from the box.
 If it returns HTTP 451 (geoblocked range), set `FEED_MODE=coinbase`.
+
+## Lab membership activation
+
+Create one active recurring Stripe Price for exactly USD 20 every month. Add a
+Stripe webhook endpoint at `https://punklabz.app/api/billing/webhooks/stripe`
+for these events:
+
+```text
+checkout.session.completed
+customer.subscription.created
+customer.subscription.updated
+customer.subscription.deleted
+customer.subscription.paused
+customer.subscription.resumed
+invoice.paid
+invoice.payment_failed
+invoice.voided
+charge.refunded
+```
+
+Install `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
+`STRIPE_PRICE_LAB_MONTHLY`, `RESEND_API_KEY`, and `BILLING_EMAIL_FROM` in the
+root-owned production environment. Then deploy in two passes:
+
+1. Set `BILLING_PROVIDER=stripe` and leave `BILLING_ENFORCED=false`. Complete a
+   real low-risk operator Checkout, verify the webhook journal, subscription,
+   invoice record, portal, and reminder outbox, then cancel the subscription and
+   refund it in Stripe.
+2. Back up the database, confirm every intended operator has an entitlement,
+   set `BILLING_ENFORCED=true`, deploy, and smoke-test synthesis, backtest and
+   deploy with both subscribed and unsubscribed accounts.
+
+The service refuses partial Stripe configuration and verifies the configured
+Price is active, recurring monthly, USD-denominated, and exactly 2000 cents
+before creating Checkout. Do not enable creator cash payouts with this rail;
+Black Market clone transfers remain demo credits.
 
 ## 3. systemd (once)
 

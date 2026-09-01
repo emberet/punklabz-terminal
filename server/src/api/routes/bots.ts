@@ -15,6 +15,8 @@ import { validateStrategyConfig } from '../../toolkit/validator.js';
 import { chargeCreation, chargeReuse, InsufficientFunds } from '../../billing/ledger.js';
 import { toMicro, fromMicro } from '../../money.js';
 import { getOpenPositions } from '../../engine/accounting.js';
+import { subscriptionAccess } from '../../billing/subscriptions.js';
+import { config } from '../../config.js';
 
 export function registerBotRoutes(server: FastifyInstance, app: AppContext) {
   const markOf = (s: string) => app.executor.getMark(s);
@@ -98,10 +100,15 @@ export function registerBotRoutes(server: FastifyInstance, app: AppContext) {
     return { ok: true, persona };
   });
 
-  // deploy a quant bot from a validated DSL config — charges the $20 creation fee
+  // Deploy is included in the paid Lab membership. Until billing enforcement
+  // is enabled, the legacy 20-credit sandbox fee remains for the demo economy.
   server.post('/api/bots', async (request, reply) => {
     const user = requireUser(app, request, reply);
     if (!user) return;
+    const access = subscriptionAccess(app.db, user.id, config.billingEnforced);
+    if (!access.allowed) {
+      return reply.code(402).send({ error: access.reason, code: 'subscription_required' });
+    }
     const body = z.object({ config: z.unknown() }).parse(request.body);
     const result = validateStrategyConfig(body.config);
     if (!result.ok || !result.config) {
@@ -125,7 +132,7 @@ export function registerBotRoutes(server: FastifyInstance, app: AppContext) {
         app.db
           .prepare(`INSERT INTO bot_accounts (bot_id, cash_micro, initial_balance_micro, updated_at) VALUES (?, ?, ?, ?)`)
           .run(id, toMicro(QUANT_INITIAL_BALANCE_USD), toMicro(QUANT_INITIAL_BALANCE_USD), Date.now());
-        chargeCreation(app.db, user.id, id);
+        if (!config.billingEnforced) chargeCreation(app.db, user.id, id);
         return id;
       })();
       app.engine.loadBots();
@@ -140,12 +147,13 @@ export function registerBotRoutes(server: FastifyInstance, app: AppContext) {
       return { ok: true, botId };
     } catch (e) {
       if (e instanceof InsufficientFunds)
-        return reply.code(402).send({ error: 'insufficient balance for $20 creation fee' });
+        return reply.code(402).send({ error: 'insufficient demo credits for the 20-credit sandbox fee' });
       throw e;
     }
   });
 
-  // clone someone's bot — $10 to the original creator
+  // Clone fees remain entirely inside the demo ledger. Real creator payments
+  // require a separately reviewed marketplace payout rail.
   server.post('/api/bots/:id/clone', async (request, reply) => {
     const user = requireUser(app, request, reply);
     if (!user) return;
@@ -192,7 +200,7 @@ export function registerBotRoutes(server: FastifyInstance, app: AppContext) {
       return { ok: true, botId };
     } catch (e) {
       if (e instanceof InsufficientFunds)
-        return reply.code(402).send({ error: 'insufficient balance for $10 clone fee' });
+        return reply.code(402).send({ error: 'insufficient demo credits for the 10-credit clone fee' });
       throw e;
     }
   });

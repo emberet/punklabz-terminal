@@ -60,7 +60,8 @@ export function App() {
           <Item to="/intern" idx="08" label="INTERN" sub="reads the timeline, out loud" />
           <Item to="/delegation" idx="09" label="DELEGATION" sub="let a machine trade your wallet" />
           <Item to="/learn" idx="10" label="ARCHIVE" sub="documentation" />
-          {user && <Item to={`/u/${user.id}`} idx="11" label="OPERATOR" sub="your dossier" />}
+          {user && <Item to="/billing" idx="11" label="ACCESS" sub="Lab membership" />}
+          {user && <Item to={`/u/${user.id}`} idx="12" label="OPERATOR" sub="your dossier" />}
           {user?.isAdmin && <Item to="/control-room" idx="SYS" label="CONTROL ROOM" />}
           <div className="nav-footer">
             {user ? (

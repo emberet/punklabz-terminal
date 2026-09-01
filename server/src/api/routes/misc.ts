@@ -13,6 +13,8 @@ import { XP } from '@punklabz/shared';
 import { awardXp } from '../../social/xp.js';
 import { seasonLeaderboardRows } from './social.js';
 import { verifyChain } from '../../audit/auditLog.js';
+import { subscriptionAccess } from '../../billing/subscriptions.js';
+import { config } from '../../config.js';
 
 const WINDOWS: Record<string, number | null> = {
   '24h': 86_400_000,
@@ -50,6 +52,12 @@ function requireFreshManagerAdmin(app: AppContext, request: any, reply: any) {
 
 export function registerMiscRoutes(server: FastifyInstance, app: AppContext) {
   const markOf = (s: string) => app.executor.getMark(s);
+  const requireLabMember = (userId: number, reply: any) => {
+    const access = subscriptionAccess(app.db, userId, config.billingEnforced);
+    if (access.allowed) return true;
+    reply.code(402).send({ error: access.reason, code: 'subscription_required' });
+    return false;
+  };
 
   // ── leaderboard ──
   server.get('/api/leaderboard', async (request) => {
@@ -64,6 +72,7 @@ export function registerMiscRoutes(server: FastifyInstance, app: AppContext) {
   }, async (request, reply) => {
     const user = requireUser(app, request, reply);
     if (!user) return;
+    if (!requireLabMember(user.id, reply)) return;
     const body = z.object({
       messages: z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string().max(4000) })).max(40),
     }).parse(request.body);
@@ -76,6 +85,7 @@ export function registerMiscRoutes(server: FastifyInstance, app: AppContext) {
   }, async (request, reply) => {
     const user = requireUser(app, request, reply);
     if (!user) return;
+    if (!requireLabMember(user.id, reply)) return;
     if (backtestLoad.inFlight >= 2) return reply.code(429).send({ error: 'backtester busy — try again in a moment' });
     const body = z.object({
       config: z.unknown(),
@@ -101,6 +111,7 @@ export function registerMiscRoutes(server: FastifyInstance, app: AppContext) {
   server.post('/api/toolkit/validate', async (request, reply) => {
     const user = requireUser(app, request, reply);
     if (!user) return;
+    if (!requireLabMember(user.id, reply)) return;
     const body = z.object({ config: z.unknown() }).parse(request.body);
     const result = validateStrategyConfig(body.config);
     return { valid: result.ok, errors: result.errors };

@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
+import fastifyRawBody from 'fastify-raw-body';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -35,6 +36,7 @@ import { registerLiveRoutes } from './api/routes/live.js';
 import { registerDelegationRoutes } from './api/routes/delegation.js';
 import { registerInternRoutes } from './api/routes/intern.js';
 import { assertProductionBuildIdentity, registerVersionRoutes } from './api/routes/version.js';
+import { registerBillingRoutes } from './api/routes/billing.js';
 import { LiveNetwork } from './live/liveNetwork.js';
 import { buildAdapters } from './live/adapters.js';
 import { buildSigner } from './live/signing/signer.js';
@@ -56,6 +58,7 @@ import { ensureActiveSeason, closeDueSeasons } from './social/seasons.js';
 import { awardXp } from './social/xp.js';
 import { checkStreakBadges, checkTradeBadges } from './social/badges.js';
 import { emitActivity } from './social/activity.js';
+import { processBillingReminders } from './billing/reminders.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -110,6 +113,9 @@ async function main() {
   });
   await server.register(cookie, { secret: config.sessionSecret });
   await server.register(rateLimit, { global: false });
+  await server.register(fastifyRawBody, {
+    field: 'rawBody', global: false, encoding: false, runFirst: true,
+  });
 
   const webDist = path.resolve(__dirname, '../../web/dist');
   if (fs.existsSync(webDist)) {
@@ -143,6 +149,7 @@ async function main() {
     feedStatus, prices, memeFeed, newsFeed, signer, adapters, xAdapter,
   };
   registerAuthRoutes(server, app);
+  registerBillingRoutes(server, app);
   registerBotRoutes(server, app);
   registerMiscRoutes(server, app);
   registerSocialRoutes(server, app);
@@ -425,6 +432,21 @@ async function main() {
       server.log.error(`delegation expiry cron failed: ${String(e)}`);
     }
   });
+
+  // Provider state is billing truth; this durable outbox only turns a
+  // verified renewal period into one idempotent reminder email.
+  const billingReminders = async () => {
+    try {
+      const result = await processBillingReminders(db);
+      if (result.sent || result.failed) {
+        server.log.info(`billing reminders: ${result.sent} sent, ${result.failed} failed`);
+      }
+    } catch (e) {
+      server.log.error(`billing reminder pass failed: ${String(e)}`);
+    }
+  };
+  void billingReminders();
+  cron.schedule('17 * * * *', billingReminders);
 
   // ── manager epoch cron ──
   if (config.payoutsEnabled) {

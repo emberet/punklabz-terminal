@@ -57,8 +57,8 @@ export function MyBots() {
         <div>
           <h1 className="page-title">Botnet</h1>
           <div className="page-sub">
-            Credits ${balance === null ? '—' : fmtUsd(balance)}
-            {earned > 0 ? ` · +$${fmtUsd(earned)} earned from clones of your bots` : ''}
+            Demo credits {balance === null ? '—' : fmtUsd(balance)}
+            {earned > 0 ? ` · +${fmtUsd(earned)} demo credits from clones of your bots` : ''}
           </div>
         </div>
         <Link to="/build"><button className="primary">[ NEW MACHINE ]</button></Link>
@@ -96,7 +96,7 @@ export function MyBots() {
         </div>
       </Panel>
 
-      <Panel title="Billing history" sub="mock ledger — demo credits only" noPad>
+      <Panel title="Demo ledger" sub="credits only — no cash value" noPad>
         <div className="table-scroll">
           <table>
             <thead>
@@ -111,7 +111,7 @@ export function MyBots() {
                     <td className="soft">{e.type.replace('fee_', '').replace('_', ' ')}</td>
                     <td className="num">
                       <span className={`pill ${incoming ? 'pill-pos' : 'pill-neg'}`}>
-                        {incoming ? '+' : '−'}${fmtUsd(e.amountUsd)}
+                        {incoming ? '+' : '−'}{fmtUsd(e.amountUsd)} CR
                       </span>
                     </td>
                     <td className="dim">{e.memo}</td>

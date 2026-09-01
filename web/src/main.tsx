@@ -20,6 +20,7 @@ import { Feed } from './pages/Feed';
 import { Profile } from './pages/Profile';
 import { Delegation } from './pages/Delegation';
 import { Intern } from './pages/Intern';
+import { Billing } from './pages/Billing';
 
 const router = createBrowserRouter([
   {
@@ -39,6 +40,7 @@ const router = createBrowserRouter([
       { path: 'forum', element: <Forum /> },
       { path: 'delegation', element: <Delegation /> },
       { path: 'intern', element: <Intern /> },
+      { path: 'billing', element: <Billing /> },
       { path: 'learn', element: <Learn /> },
       { path: 'login', element: <Login /> },
       // legacy routes from v1

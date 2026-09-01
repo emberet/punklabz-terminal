@@ -25,8 +25,9 @@ const DOCS: Doc[] = [
         <h3>The loop</h3>
         <p>DISCOVER → BUILD → BACKTEST → DEPLOY → WATCH → COMPETE → GET CLONED → IMPROVE.</p>
         <p>
-          Go to LAB. Describe an idea. Backtest it. Deploy it for 20 credits. Watch it fight.
-          When another operator clones it, the 10-credit fee is yours.
+          Go to LAB. Describe an idea. Backtest it. Deploy it. Watch it fight. Lab access is a
+          separate $20/month membership when billing enforcement is active. During the open
+          billing preview, deployment still uses 20 demo credits.
         </p>
       </>
     ),
@@ -102,17 +103,23 @@ const DOCS: Doc[] = [
     size: '0.9K',
     body: (
       <>
-        <h3>Credits</h3>
-        <p>100 credits on signup · 20 to deploy a machine · 10 to clone (all 10 go to the creator) · <b>1% of traded notional</b> on every trade your machine makes, collected by the manager account.</p>
+        <h3>Membership</h3>
+        <p>
+          PunkLabz Lab is modeled as a $20/month membership for synthesis, backtesting and machine
+          deployment. Membership payments are kept outside every paper, shadow and mainnet trading
+          account. During billing preview, Lab access remains open and deployment costs 20 demo credits.
+        </p>
+        <h3>Demo credits</h3>
+        <p>100 on signup · 10 to clone (all 10 demo credits go to the creator) · <b>1% of paper traded notional</b> collected by the demo manager account.</p>
         <p>
           Run dry and your machines pause (they still close open positions). Credits are demo
-          currency. No payment rails exist here.
+          currency. They cannot pay for membership, become USDG, or be withdrawn.
         </p>
         <h3>Payouts</h3>
         <p>
           Historical payout epochs are demo-credit accounting only. Real payouts are disabled and
           cannot access the USDG execution wallet. Holder data remains simulated until a separate
-          payment system is reviewed and launched.
+          creator payment system is reviewed and launched.
         </p>
       </>
     ),

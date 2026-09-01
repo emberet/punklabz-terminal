@@ -8,6 +8,7 @@ import { describeStrategy } from '../lib/dslText';
 import { fmtUsd, fmtPct } from '../lib/format';
 import { useAuth } from '../lib/auth';
 import { usePageMeta } from '../lib/pageMeta';
+import type { SubscriptionView } from './Billing';
 
 interface ChatMsg {
   role: 'user' | 'assistant';
@@ -52,6 +53,8 @@ export function Build() {
   const [showJson, setShowJson] = useState(false);
   const [bt, setBt] = useState<BacktestRes | null>(null);
   const [btBusy, setBtBusy] = useState(false);
+  const [membership, setMembership] = useState<SubscriptionView | null>(null);
+  const [deploying, setDeploying] = useState<'run' | 'done' | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
 
   const loadMoney = () => {
@@ -71,6 +74,10 @@ export function Build() {
 
   useEffect(loadMoney, [user?.id]);
   useEffect(() => {
+    if (!user) return;
+    void api.get<SubscriptionView>('/api/billing/subscription').then(setMembership).catch(() => {});
+  }, [user?.id]);
+  useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
   }, [messages, busy]);
 
@@ -86,8 +93,8 @@ export function Build() {
         <Panel title="MACHINE LABORATORY" term>
           <p>
             Tell the builder what you want in plain English — "buy bitcoin dips, sell at 5% profit" —
-            and it becomes a paper bot competing in the arena. Backtest it first, deploy it for 20
-            demo credits, and earn 10 demo credits every time someone clones it.
+            and it becomes a paper bot competing in the arena. Lab membership is $20/month when
+            billing opens; creator payments remain demo credits until their payout rail is launched.
           </p>
           <p style={{ marginTop: 10 }}>
             <Link to="/login"><button className="primary">[ CONNECT TO BUILD ]</button></Link>
@@ -102,10 +109,11 @@ export function Build() {
     const p = strategyConfigSchema.safeParse(draft);
     return p.success ? p.data : null;
   })();
+  const membershipLocked = membership?.enforced === true && !membership.access.allowed;
 
   const send = async (text?: string) => {
     const content = (text ?? input).trim();
-    if (!content || busy) return;
+    if (!content || busy || membershipLocked) return;
     const next: ChatMsg[] = [...messages, { role: 'user', content }];
     setMessages(next);
     setInput('');
@@ -133,7 +141,7 @@ export function Build() {
   };
 
   const backtest = async (window: string) => {
-    if (!draft || btBusy) return;
+    if (!draft || btBusy || membershipLocked) return;
     setBtBusy(true);
     setNotice('');
     try {
@@ -145,10 +153,8 @@ export function Build() {
     }
   };
 
-  const [deploying, setDeploying] = useState<'run' | 'done' | null>(null);
-
   const deploy = async () => {
-    if (!draft) return;
+    if (!draft || membershipLocked) return;
     setBusy(true);
     setNotice('');
     setDeploying('run');
@@ -165,7 +171,7 @@ export function Build() {
   };
 
   const summary = parsedDraft ? describeStrategy(parsedDraft) : null;
-  const afterDeploy = balance !== null ? balance - 20 : null;
+  const afterDeploy = membership?.enforced ? null : balance !== null ? balance - 20 : null;
 
   return (
     <div>
@@ -195,13 +201,22 @@ export function Build() {
           <div className="page-sub">BUILD // TEST // MUTATE // DEPLOY — describe a machine, we synthesize it.</div>
         </div>
         <div style={{ textAlign: 'right' }}>
-          <div className="dim" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>Credits</div>
-          <div style={{ fontSize: 20, fontFamily: 'var(--font)' }} className="acid">
-            ${balance === null ? '—' : fmtUsd(balance)}
+          <div className="dim" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>
+            {membership?.enforced ? 'Lab membership' : 'Demo credits'}
           </div>
-          {earned > 0 && <div className="soft" style={{ fontSize: 12 }}>+${fmtUsd(earned)} earned from your bots</div>}
+          <div style={{ fontSize: 20, fontFamily: 'var(--font)' }} className="acid">
+            {membership?.enforced
+              ? membership.access.allowed ? 'ACTIVE' : 'LOCKED'
+              : balance === null ? '—' : fmtUsd(balance)}
+          </div>
+          {!membership?.enforced && earned > 0 && <div className="soft" style={{ fontSize: 12 }}>+{fmtUsd(earned)} demo credits from clones</div>}
         </div>
       </div>
+      {membershipLocked && (
+        <div className="banner bad" style={{ marginBottom: 12 }}>
+          LAB ACCESS LOCKED — <Link to="/billing">activate the $20/month membership</Link>.
+        </div>
+      )}
       {notice && <div className="banner bad" style={{ marginBottom: 12, border: '1px solid var(--border)' }}>{notice}</div>}
 
       <div className="toolkit-layout">
@@ -239,9 +254,9 @@ export function Build() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && send()}
               placeholder="describe your strategy…"
-              disabled={busy}
+              disabled={busy || membershipLocked}
             />
-            <button className="primary" onClick={() => send()} disabled={busy || !input.trim()}>Send</button>
+            <button className="primary" onClick={() => send()} disabled={busy || membershipLocked || !input.trim()}>Send</button>
           </div>
         </Panel>
 
@@ -281,16 +296,16 @@ export function Build() {
                 <div className="chat-input" style={{ borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
                   <span className="dim" style={{ alignSelf: 'center', fontSize: 11 }}>Backtest:</span>
                   {['24h', '7d', '30d', '90d'].map((w) => (
-                    <button key={w} disabled={btBusy} onClick={() => backtest(w)}>{w}</button>
+                    <button key={w} disabled={btBusy || membershipLocked} onClick={() => backtest(w)}>{w}</button>
                   ))}
                   <span className="spacer" />
-                  <button className="primary" disabled={!draftValid || busy} onClick={deploy}>
-                    DEPLOY MACHINE · 20 CREDITS
+                  <button className="primary" disabled={!draftValid || busy || membershipLocked} onClick={deploy}>
+                    {membership?.enforced ? 'DEPLOY MACHINE // INCLUDED' : 'DEPLOY MACHINE · 20 DEMO CREDITS'}
                   </button>
                 </div>
                 {afterDeploy !== null && draftValid && (
                   <div className="panel-body dim" style={{ paddingTop: 0, fontSize: 12 }}>
-                    You'll have ${fmtUsd(Math.max(0, afterDeploy))} left after deploying.
+                    You'll have {fmtUsd(Math.max(0, afterDeploy))} demo credits left after deploying.
                     {afterDeploy < 0 && <span className="red"> Not enough credits.</span>}
                   </div>
                 )}

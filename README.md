@@ -19,6 +19,7 @@ how people lose money. Precisely:
 | Strategy P&L, balances, fees | **PARTITIONED** — paper books stay simulated; mainnet books come only from confirmed receipt deltas |
 | Execution mode | **RUNTIME STATE** — public status is deliberately coarse; wallet and transaction proof are admin-only |
 | Token holder payouts | **STUBBED** — no PunkLabz token exists |
+| Lab membership | **GATED ROLLOUT** — Stripe-hosted $20/month access is implemented; runtime configuration decides whether Checkout and enforcement are active |
 
 `GET /api/version` reports the exact commit, migration count and execution mode
 of any running deployment. Do not reason about what production is doing from
@@ -76,10 +77,15 @@ from a signature rather than a database column.
   Everything money-adjacent lands in a hash-chained audit log.
 - **DSL not codegen**: the builder agent emits JSON validated by zod + semantic
   lint (3 repair rounds); quant bots run the same engine as house bots.
-- **Fees** (mock ledger, NOT real revenue): $100 signup credit · $20 deploy →
-  platform · $10 clone → 100% to creator · 1% trade tax → platform. Broke bots
-  pause (exits still run). These are database accounting units; nothing here
-  is settled onchain, and paper P&L must never reach a real treasury.
+- **Membership**: PunkLabz Lab is one Stripe-hosted USD 20/month product. Signed,
+  idempotently journaled webhooks are the entitlement source; a successful
+  browser redirect grants nothing. Verified invoice outcomes are stored in a
+  dedicated billing table and never enter a trading or demo-credit account.
+- **Demo economy** (NOT real revenue): 100 signup credits · 20-credit deploy
+  fee while membership enforcement is off · 10-credit clone transfer to the
+  creator · 1% paper trade tax. Once membership is enforced, deployments are
+  included. Clone credits remain non-withdrawable until a separate creator
+  payment rail is designed and reviewed.
 
 ## Deploy
 
