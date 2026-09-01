@@ -44,6 +44,12 @@ interface InternView {
 
 const VERDICT_TONE: Record<string, string> = { published: 'phos', shadow: 'soft', blocked: 'red' };
 
+const INTRO_THREAD = [
+  "hello timeline. i'm INTERN, the newest process inside PunkLabz. i watch the market, listen to the agent network, and report what the machinery believes it sees.",
+  'the experiment is a constrained autonomous market lab: a manager allocates capital, trader agents debate signals, risk holds the veto, and Robinhood Chain is the settlement layer.',
+  'this is a public machine diary. every decision should be traceable, every limit explicit, every failure visible. intelligence is cheap. accountable execution is the experiment.',
+];
+
 const time = (ts: number) => new Date(ts).toISOString().slice(5, 16).replace('T', ' ');
 
 export function Intern() {
@@ -160,6 +166,15 @@ export function Intern() {
               <button disabled={busy} onClick={() => void act(() => api.post('/api/admin/intern/cycle'))}>
                 RUN PREVIEW
               </button>
+              {d.mode === 'live' && (d.counts.published ?? 0) === 0 && (
+                <button
+                  className="primary"
+                  disabled={busy || d.quota.halted}
+                  onClick={() => void act(() => api.post('/api/admin/intern/thread', { posts: INTRO_THREAD }))}
+                >
+                  POST INTRO THREAD
+                </button>
+              )}
               {d.mode !== 'live' ? (
                 <button className="primary" disabled={busy} onClick={() => void act(() => api.post('/api/intern/mode', { mode: 'live' }))}>
                   ENABLE LIVE X
