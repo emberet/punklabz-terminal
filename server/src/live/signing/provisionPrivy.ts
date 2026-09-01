@@ -1,4 +1,5 @@
 import { createPrivateKey, createPublicKey, createSign } from 'node:crypto';
+import { getAddress, parseEther } from 'viem';
 import { canonicalize, normalizeAuthorizationKey } from './privySigner.js';
 
 // PROVISIONING WALL #2.
@@ -274,32 +275,85 @@ export function buildManagerFundingPolicy(traderAddress: string) {
   };
 }
 
-export async function prepareManagerFundingPolicy(
+/** A temporary policy for one exact native-ETH gas-reserve transfer. */
+export function buildManagerGasTopUpPolicy(traderAddress: string, amountEth: string) {
+  const recipient = getAddress(traderAddress);
+  const amountWei = parseEther(amountEth);
+  if (amountWei <= 0n || amountWei > parseEther('0.01')) {
+    throw new Error('Manager gas top-up must be greater than 0 and no more than 0.01 ETH');
+  }
+  return {
+    version: '1.0',
+    name: 'PunkLabz exact Trader gas top-up',
+    chain_type: 'ethereum',
+    rules: [{
+      name: `Exactly ${amountEth} ETH to Trader`,
+      method: 'eth_signTransaction',
+      action: 'ALLOW',
+      conditions: [
+        { field_source: 'ethereum_transaction', field: 'chain_id', operator: 'eq', value: '4663' },
+        { field_source: 'ethereum_transaction', field: 'to', operator: 'eq', value: recipient },
+        { field_source: 'ethereum_transaction', field: 'value', operator: 'eq', value: `0x${amountWei.toString(16).toUpperCase()}` },
+      ],
+    }],
+  };
+}
+
+async function attachTemporaryManagerPolicy(
   ctx: Ctx,
-  traderAddress: string,
-  runId: string,
+  policy: ReturnType<typeof buildManagerFundingPolicy> | ReturnType<typeof buildManagerGasTopUpPolicy>,
+  idempotencyKey: string,
+  beforeAttach?: (previousPolicyIds: string[]) => void | Promise<void>,
 ): Promise<{ policyId: string; previousPolicyIds: string[]; ownerId: string; walletAddress: string }> {
   const before = await call(ctx, 'GET', `/wallets/${ctx.walletId}`);
   if (!before.ok || !before.body?.owner_id || !before.body?.address) {
     throw new Error('Manager wallet owner/address could not be verified');
   }
   const previousPolicyIds = [...(before.body.policy_ids ?? [])];
+  await beforeAttach?.(previousPolicyIds);
   const created = await call(ctx, 'POST', '/policies', {
-    ...buildManagerFundingPolicy(traderAddress), owner_id: before.body.owner_id,
-  }, false, `${runId}-manager-funding-policy`);
+    ...policy, owner_id: before.body.owner_id,
+  }, false, idempotencyKey);
   if (!created.ok || !created.body?.id) {
-    throw new Error(`Manager funding policy creation failed: ${created.status}`);
+    throw new Error(`Manager temporary policy creation failed: ${created.status}`);
   }
   const policyId = created.body.id as string;
   const patched = await call(ctx, 'PATCH', `/wallets/${ctx.walletId}`, { policy_ids: [policyId] }, true);
-  if (!patched.ok) throw new Error(`Manager funding policy attach failed: ${patched.status}`);
+  if (!patched.ok) throw new Error(`Manager temporary policy attach failed: ${patched.status}`);
   const verified = await call(ctx, 'GET', `/wallets/${ctx.walletId}`);
   if (!verified.ok || !(verified.body?.policy_ids ?? []).includes(policyId)) {
-    throw new Error('Manager funding policy read-back failed');
+    throw new Error('Manager temporary policy read-back failed');
   }
   return {
     policyId, previousPolicyIds, ownerId: before.body.owner_id, walletAddress: before.body.address,
   };
+}
+
+export async function prepareManagerFundingPolicy(
+  ctx: Ctx,
+  traderAddress: string,
+  runId: string,
+): Promise<{ policyId: string; previousPolicyIds: string[]; ownerId: string; walletAddress: string }> {
+  return attachTemporaryManagerPolicy(
+    ctx,
+    buildManagerFundingPolicy(traderAddress),
+    `${runId}-manager-funding-policy`,
+  );
+}
+
+export async function prepareManagerGasTopUpPolicy(
+  ctx: Ctx,
+  traderAddress: string,
+  amountEth: string,
+  runId: string,
+  beforeAttach?: (previousPolicyIds: string[]) => void | Promise<void>,
+): Promise<{ policyId: string; previousPolicyIds: string[]; ownerId: string; walletAddress: string }> {
+  return attachTemporaryManagerPolicy(
+    ctx,
+    buildManagerGasTopUpPolicy(traderAddress, amountEth),
+    `${runId}-manager-gas-top-up-policy`,
+    beforeAttach,
+  );
 }
 
 export async function restoreManagerPolicies(ctx: Ctx, policyIds: string[]): Promise<void> {

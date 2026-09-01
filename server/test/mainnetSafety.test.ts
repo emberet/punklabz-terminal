@@ -12,7 +12,8 @@ import type { TradingSigner } from '../src/live/signing/signer.js';
 import { evaluateIntent, getLiveConfig } from '../src/live/riskEngine.js';
 import { runPreflight } from '../src/live/preflight.js';
 import {
-  buildManagerFundingPolicy, buildPolicy, USDG_ADDRESS, WETH_ADDRESS, ZEROX_ALLOWANCE_HOLDER,
+  buildManagerFundingPolicy, buildManagerGasTopUpPolicy, buildPolicy, USDG_ADDRESS, WETH_ADDRESS,
+  ZEROX_ALLOWANCE_HOLDER,
 } from '../src/live/signing/provisionPrivy.js';
 import { LiveNetwork } from '../src/live/liveNetwork.js';
 import { parseIndexedEthFunding, ZeroXRobinhoodAdapter } from '../src/live/adapters/zeroXRobinhood.js';
@@ -63,6 +64,18 @@ describe('isolated Manager to Trader custody', () => {
       expect.objectContaining({ field: 'to', value: TARGET }),
       expect.objectContaining({ field: 'value', value: '0x11C37937E08000' }),
     ]));
+  });
+
+  it('builds a temporary Manager policy for one exact bounded gas top-up', () => {
+    const policy = buildManagerGasTopUpPolicy(TARGET, '0.002') as any;
+    expect(policy.rules).toHaveLength(1);
+    expect(policy.rules[0].conditions).toEqual([
+      expect.objectContaining({ field: 'chain_id', value: '4663' }),
+      expect.objectContaining({ field: 'to', value: TARGET }),
+      expect.objectContaining({ field: 'value', value: '0x71AFD498D0000' }),
+    ]);
+    expect(() => buildManagerGasTopUpPolicy(TARGET, '0')).toThrow(/greater than 0/);
+    expect(() => buildManagerGasTopUpPolicy(TARGET, '0.011')).toThrow(/no more than 0.01/);
   });
 });
 
