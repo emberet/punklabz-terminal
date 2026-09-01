@@ -68,7 +68,15 @@ ssh "$HOST" "set -e
   systemctl daemon-reload
   chown -R punklabz:punklabz $DEST
   systemctl restart punklabz
-  sleep 2
-  systemctl is-active punklabz
-  curl -sf localhost:4700/api/healthz && echo ' healthz OK'"
+  for ATTEMPT in \$(seq 1 45); do
+    if systemctl is-active --quiet punklabz && curl -sf localhost:4700/api/healthz; then
+      echo ' healthz OK'
+      exit 0
+    fi
+    sleep 1
+  done
+  echo 'health check timed out after 45 seconds' >&2
+  systemctl status punklabz --no-pager -l >&2 || true
+  journalctl -u punklabz -n 80 --no-pager >&2 || true
+  exit 1"
 echo ">> deployed"
