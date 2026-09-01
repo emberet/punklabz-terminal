@@ -1,13 +1,13 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openTestDb, type DB } from '../src/db/db.js';
 import { WsHub } from '../src/realtime/wsHub.js';
 import { config } from '../src/config.js';
 import {
-  allowedNumbers, getInternConfig, haltIntern, quotaState, reconcileQuota,
-  runInternCycle, setInternMode,
+  allowedNumbers, getInternConfig, haltIntern, internLaunchEvidence, quotaState,
+  reconcileInternPublishing, reconcileQuota, runInternCycle, setInternMode,
 } from '../src/intern/intern.js';
 import {
-  NullXAdapter, RecordingXAdapter, buildXAdapter, type XPost,
+  NullXAdapter, RecordingXAdapter, buildXAdapter, type XAdapter, type XPost,
 } from '../src/intern/xAdapter.js';
 import { getLiveConfig, haltNetwork } from '../src/live/riskEngine.js';
 
@@ -24,6 +24,21 @@ function feed(n = 5): XPost[] {
     metrics: { likes: i * 10, reposts: i, replies: i },
     postedAt: Date.now() - i * 60_000,
   }));
+}
+
+const generate = (text = 'Attention is loud. Conviction is not.') => async () => ({
+  text, inputTokens: 100, outputTokens: 20,
+});
+
+function apiRecording(posts: XPost[] = feed()) {
+  const recording = new RecordingXAdapter(posts);
+  const adapter: XAdapter = {
+    kind: 'api',
+    isReady: () => Promise.resolve({ ready: true, detail: 'authenticated as @PunkLabz' }),
+    read: (max) => recording.read(max),
+    publish: (text, inReplyTo) => recording.publish(text, inReplyTo),
+  };
+  return { adapter, recording };
 }
 
 describe('the X boundary', () => {
@@ -66,12 +81,12 @@ describe('the intern cycle', () => {
     expect(r.reason).toMatch(/test halt/);
   });
 
-  it('stops when the network stops', async () => {
+  it('is independent of the trading kill switch', async () => {
     getLiveConfig(db);
     haltNetwork(db, 'circuit breaker', 'test');
-    const r = await runInternCycle(db, hub, new RecordingXAdapter(feed()));
-    expect(r.ran).toBe(false);
-    expect(r.reason).toMatch(/network halted/);
+    const r = await runInternCycle(db, hub, new RecordingXAdapter(feed()), { generateDraft: generate() });
+    expect(r.ran).toBe(true);
+    expect(r.verdict).toBe('shadow');
   });
 
   it('is off means off', async () => {
@@ -92,28 +107,142 @@ describe('quota reconciliation', () => {
   let db: DB;
   beforeEach(() => { db = openTestDb(); });
 
-  it('agreeing counts do not halt anything', () => {
-    const drift = reconcileQuota(db, { reads: 8000, posts: 3000 });
-    expect(drift).toBe(0);
+  it('records endpoint-rate headers without comparing incompatible units', () => {
+    expect(reconcileQuota(db, { reads: 299, posts: 17 })).toBeNull();
     expect(quotaState(db).halted).toBe(false);
-  });
-
-  it('a disagreement about what we have already done halts the intern', () => {
-    // we think we have used nothing of an 8000 budget; the platform says 200 left
-    const drift = reconcileQuota(db, { reads: 200, posts: 3000 });
-    expect(drift).toBeGreaterThan(5);
-    const state = quotaState(db);
-    expect(state.halted).toBe(true);
-    expect(state.haltReason).toMatch(/quota drift/);
-  });
-
-  it('a small disagreement is tolerated', () => {
-    reconcileQuota(db, { reads: 7800, posts: 3000 }); // 2.5% off
-    expect(quotaState(db).halted).toBe(false);
+    expect(db.prepare(`SELECT reads_reported, posts_reported, drift_pct FROM intern_quota`).get())
+      .toMatchObject({ reads_reported: 299, posts_reported: 17, drift_pct: null });
   });
 
   it('no reported figure means no reconciliation, not a silent pass', () => {
     expect(reconcileQuota(db, { reads: null, posts: null })).toBeNull();
+  });
+
+  it('halts on a publish attempt left ambiguous by a crash', () => {
+    db.prepare(
+      `INSERT INTO intern_posts
+       (ts, kind, draft, allowed_numbers_json, verdict, audit_hash, provider_kind,
+        source_count, publish_state, publish_attempted_at)
+       VALUES (?, 'post', 'test', '[]', 'shadow', 'hash', 'api', 1, 'publishing', ?)`,
+    ).run(Date.now(), Date.now());
+    expect(reconcileInternPublishing(db)).toMatchObject({ clean: false, ambiguous: 1 });
+    expect(quotaState(db).halted).toBe(true);
+  });
+});
+
+describe('the live launch gate', () => {
+  let db: DB;
+  let now: number;
+
+  beforeEach(() => {
+    db = openTestDb();
+    now = Date.now();
+    db.prepare(`UPDATE intern_config SET shadow_started_at=? WHERE id=1`).run(now - 60_000);
+  });
+
+  const insert = (overrides: Partial<{
+    ts: number; verdict: string; provider: string; sources: number; blocked: string | null;
+    reviewedAt: number | null; approved: number; publishState: string; publishedId: string | null;
+  }> = {}) => {
+    const value = {
+      ts: now - 1_000, verdict: 'shadow', provider: 'api', sources: 2, blocked: null,
+      reviewedAt: now, approved: 1, publishState: 'not_attempted', publishedId: null,
+      ...overrides,
+    };
+    db.prepare(
+      `INSERT INTO intern_posts
+       (ts, kind, draft, allowed_numbers_json, verdict, blocked_rules_json, published_id,
+        audit_hash, provider_kind, source_count, reviewed_at, review_approved, publish_state)
+       VALUES (?, 'post', ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      value.ts, `candidate-${Math.random()}`, value.verdict, value.blocked, value.publishedId,
+      `hash-${Math.random()}`, value.provider, value.sources, value.reviewedAt,
+      value.approved, value.publishState,
+    );
+  };
+
+  it('counts one clean, fresh, X-backed, explicitly reviewed shadow draft', () => {
+    insert({ provider: 'none' });
+    insert({ verdict: 'blocked', blocked: '["filter"]' });
+    insert({ ts: now - 25 * 60 * 60_000, reviewedAt: now - 25 * 60 * 60_000 });
+    insert({ approved: 0 });
+    insert({ reviewedAt: null });
+    expect(internLaunchEvidence(db, now).count).toBe(0);
+
+    insert();
+    expect(internLaunchEvidence(db, now).count).toBe(1);
+  });
+
+  it('keeps approved launch evidence unpublished when mode changes', () => {
+    insert();
+    setInternMode(db, 'live', 'user:1');
+    expect(db.prepare(`SELECT verdict, published_id, publish_state FROM intern_posts`).get())
+      .toMatchObject({ verdict: 'shadow', published_id: null, publish_state: 'not_attempted' });
+  });
+});
+
+describe('live publishing', () => {
+  let db: DB;
+  beforeEach(() => {
+    db = openTestDb();
+    config.anthropicApiKey = '';
+    setInternMode(db, 'live', 'test');
+    db.prepare(`UPDATE intern_config SET max_posts_per_day=3 WHERE id=1`).run();
+  });
+
+  it('publishes nothing when a live X read returns zero sources', async () => {
+    const { adapter, recording } = apiRecording([]);
+    const draft = vi.fn(generate());
+    const result = await runInternCycle(db, hub, adapter, { generateDraft: draft });
+
+    expect(result.reason).toMatch(/zero X sources/);
+    expect(draft).not.toHaveBeenCalled();
+    expect(recording.published).toHaveLength(0);
+    expect(db.prepare(`SELECT COUNT(*) n FROM intern_posts`).get()).toMatchObject({ n: 0 });
+  });
+
+  it('publishes one fresh X-backed candidate exactly once and records the returned id', async () => {
+    const { adapter, recording } = apiRecording();
+    const first = await runInternCycle(db, hub, adapter, { generateDraft: generate() });
+    const second = await runInternCycle(db, hub, adapter, { generateDraft: generate('A different draft.') });
+
+    expect(first.verdict).toBe('published');
+    expect(second.ran).toBe(false);
+    expect(recording.published).toHaveLength(1);
+    expect(db.prepare(
+      `SELECT verdict, publish_state, published_id FROM intern_posts`,
+    ).get()).toMatchObject({ verdict: 'published', publish_state: 'published', published_id: 'rec_1' });
+    expect(quotaState(db).postsUsed).toBe(1);
+  });
+
+  it('persists the three-post daily cap independently of the cycle cooldown', async () => {
+    const { adapter, recording } = apiRecording();
+    const drafts = [
+      'Attention is loud. Conviction is not.',
+      'Crowds keep mistaking motion for meaning.',
+      'The timeline wants certainty the market does not owe it.',
+    ];
+    for (const text of drafts) {
+      const result = await runInternCycle(db, hub, adapter, { generateDraft: generate(text) });
+      expect(result.verdict).toBe('published');
+      db.prepare(`DELETE FROM agent_rate_limits WHERE key='intern:cycle'`).run();
+    }
+
+    const blocked = await runInternCycle(db, hub, adapter, { generateDraft: generate('Another candidate.') });
+    expect(blocked.reason).toMatch(/public post quota.*3\/3/);
+    expect(recording.published).toHaveLength(3);
+  });
+
+  it('halts after a failed or ambiguous publish without claiming success', async () => {
+    const { adapter } = apiRecording();
+    adapter.publish = async () => { throw new Error('upstream timeout'); };
+    const result = await runInternCycle(db, hub, adapter, { generateDraft: generate() });
+
+    expect(result.verdict).toBe('blocked');
+    expect(result.reason).toMatch(/halted/);
+    expect(quotaState(db).halted).toBe(true);
+    expect(db.prepare(`SELECT verdict, publish_state, published_id FROM intern_posts`).get())
+      .toMatchObject({ verdict: 'blocked', publish_state: 'failed', published_id: null });
   });
 });
 

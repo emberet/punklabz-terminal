@@ -5,7 +5,8 @@ import { requireUser } from './auth.js';
 import { budgetView } from '../../research/budget.js';
 import { trackRecord } from '../../research/scoring.js';
 import {
-  INTERN_AGENT, getInternConfig, quotaState, runInternCycle, setInternMode,
+  INTERN_AGENT, INTERN_LAUNCH_REVIEW_WINDOW_MS, getInternConfig, internLaunchEvidence,
+  quotaState, reconcileInternPublishing, runInternCycle, setInternMode,
 } from '../../intern/intern.js';
 import { appendAudit } from '../../audit/auditLog.js';
 
@@ -56,7 +57,7 @@ export function registerInternRoutes(server: FastifyInstance, app: AppContext) {
       .prepare(
         `SELECT id, ts, kind, draft, allowed_numbers_json, verdict, blocked_rules_json,
                 published_id, ts_published, provider_kind, source_count,
-                reviewed_at, reviewed_by, review_approved
+                reviewed_at, reviewed_by, review_approved, publish_state, publish_attempted_at
          FROM intern_posts ORDER BY id DESC LIMIT 100`,
       )
       .all() as any[];
@@ -92,7 +93,7 @@ export function registerInternRoutes(server: FastifyInstance, app: AppContext) {
       counts: Object.fromEntries(counts.map((c) => [c.verdict, c.n])),
       blockedByRule: [...byRule.entries()].map(([rule, n]) => ({ rule, n })).sort((a, b) => b.n - a.n),
       trackRecord: trackRecord(app.db, INTERN_AGENT),
-      budget: budgetView(app.db),
+      budget: budgetView(app.db, 'intern'),
       posts: posts.map((p) => ({
         id: p.id, ts: p.ts, kind: p.kind, draft: p.draft,
         allowedNumbers: JSON.parse(p.allowed_numbers_json),
@@ -102,6 +103,9 @@ export function registerInternRoutes(server: FastifyInstance, app: AppContext) {
         providerKind: p.provider_kind, sourceCount: p.source_count,
         reviewedAt: p.reviewed_at, reviewedBy: p.reviewed_by,
         reviewApproved: p.review_approved === 1,
+        publishState: p.publish_state,
+        publishAttemptedAt: p.publish_attempted_at,
+        publishedUrl: p.published_id ? `https://x.com/PunkLabz/status/${p.published_id}` : null,
       })),
     };
   });
@@ -115,23 +119,28 @@ export function registerInternRoutes(server: FastifyInstance, app: AppContext) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message });
 
     if (parsed.data.mode === 'live') {
+      const quota = quotaState(app.db);
+      if (quota.halted) return reply.code(409).send({ error: `Intern halted: ${quota.haltReason}` });
+      const reconciliation = reconcileInternPublishing(app.db);
+      if (!reconciliation.clean) {
+        return reply.code(409).send({ error: 'Intern publish state is not reconciled' });
+      }
       const readiness = await app.xAdapter.isReady();
       if (!readiness.ready) return reply.code(409).send({ error: readiness.detail });
-      const cfg = getInternConfig(app.db);
-      const freshAfter = Math.max(cfg.shadowStartedAt ?? 0, Date.now() - 24 * 60 * 60_000);
-      const reviewed = app.db.prepare(
-        `SELECT COUNT(*) n FROM intern_posts
-         WHERE verdict='shadow' AND provider_kind='api' AND source_count > 0
-           AND review_approved=1 AND reviewed_at >= ? AND ts >= ?`,
-      ).get(freshAfter, freshAfter) as { n: number };
-      if (reviewed.n < 3) {
+      if (app.xAdapter.kind !== 'api') {
+        return reply.code(409).send({ error: `Live publishing requires X_PROVIDER=api, got ${app.xAdapter.kind}` });
+      }
+      const evidence = internLaunchEvidence(app.db);
+      if (evidence.count < 1) {
         return reply.code(409).send({
-          error: `${reviewed.n}/3 fresh X-backed shadow drafts explicitly approved by the operator`,
+          error: `${evidence.count}/1 fresh X-backed shadow draft explicitly approved by the operator`,
         });
       }
-      app.db.prepare(`UPDATE intern_config SET max_posts_per_day=3 WHERE id=1`).run();
-      setInternMode(app.db, 'live', `user:${user.id}`);
-      return { mode: 'live', candidatesReviewed: reviewed.n, maxPostsPerDay: 3 };
+      app.db.transaction(() => {
+        app.db.prepare(`UPDATE intern_config SET max_posts_per_day=3 WHERE id=1`).run();
+        setInternMode(app.db, 'live', `user:${user.id}`);
+      })();
+      return { mode: 'live', candidatesReviewed: evidence.count, maxPostsPerDay: 3 };
     }
 
     setInternMode(app.db, parsed.data.mode, `user:${user.id}`);
@@ -153,12 +162,25 @@ export function registerInternRoutes(server: FastifyInstance, app: AppContext) {
     if (!user) return;
     const body = z.object({ postId: z.number().int().positive(), approved: z.boolean() }).parse(request.body);
     const post = app.db.prepare(
-      `SELECT verdict, provider_kind, source_count, ts FROM intern_posts WHERE id=?`,
-    ).get(body.postId) as { verdict: string; provider_kind: string; source_count: number; ts: number } | undefined;
+      `SELECT verdict, provider_kind, source_count, ts, blocked_rules_json,
+              published_id, publish_state
+       FROM intern_posts WHERE id=?`,
+    ).get(body.postId) as {
+      verdict: string; provider_kind: string; source_count: number; ts: number;
+      blocked_rules_json: string | null; published_id: string | null; publish_state: string;
+    } | undefined;
     if (!post) return reply.code(404).send({ error: 'candidate not found' });
     if (post.verdict !== 'shadow') return reply.code(409).send({ error: 'only shadow candidates can be reviewed' });
-    if (body.approved && (post.provider_kind !== 'api' || post.source_count <= 0)) {
-      return reply.code(409).send({ error: 'INTERNAL DATA ONLY drafts cannot satisfy the X-backed launch gate' });
+    if (body.approved) {
+      const cfg = getInternConfig(app.db);
+      const freshAfter = Math.max(cfg.shadowStartedAt ?? 0, Date.now() - INTERN_LAUNCH_REVIEW_WINDOW_MS);
+      if (post.provider_kind !== 'api' || post.source_count <= 0) {
+        return reply.code(409).send({ error: 'INTERNAL DATA ONLY drafts cannot satisfy the X-backed launch gate' });
+      }
+      if (post.ts < freshAfter) return reply.code(409).send({ error: 'candidate is older than the 24-hour launch window' });
+      if (post.blocked_rules_json || post.published_id || post.publish_state !== 'not_attempted') {
+        return reply.code(409).send({ error: 'candidate is not clean unpublished launch evidence' });
+      }
     }
     const now = Date.now();
     app.db.prepare(

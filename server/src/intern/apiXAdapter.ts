@@ -1,5 +1,5 @@
 import { createHmac, randomBytes } from 'node:crypto';
-import type { XAdapter, XPost, XPublishResult, XQuota } from './xAdapter.js';
+import type { XAdapter, XPost, XPublishResult, XQuota, XReadResult } from './xAdapter.js';
 
 // THE REAL X CLIENT.
 //
@@ -169,7 +169,7 @@ export class ApiXAdapter implements XAdapter {
     }
   }
 
-  async read(max: number): Promise<{ posts: XPost[]; quota: XQuota }> {
+  async read(max: number): Promise<XReadResult> {
     const query = this.cfg.query ?? '(crypto OR bitcoin OR ethereum) lang:en -is:retweet -is:reply';
     try {
       const { json, headers } = await this.call('GET', '/2/tweets/search/recent', {
@@ -195,7 +195,7 @@ export class ApiXAdapter implements XAdapter {
         },
         postedAt: t.created_at ? Date.parse(t.created_at) : Date.now(),
       }));
-      return { posts, quota: quotaFrom(headers) };
+      return { posts, quota: quotaFrom(headers), availability: 'ok' };
     } catch (e) {
       const status = (e as { status?: number }).status;
       // 402 means the project has no credits, 403 means the access tier does
@@ -204,7 +204,14 @@ export class ApiXAdapter implements XAdapter {
       // quota: reconciliation would compare it with the monthly allowance and
       // halt on false drift. An unavailable upstream quota is unknown.
       if (status === 402 || status === 403 || status === 429) {
-        return { posts: [], quota: { readsRemaining: null, postsRemaining: null, resetAt: null } };
+        const availability = status === 402
+          ? 'credits_depleted'
+          : status === 403 ? 'entitlement_missing' : 'rate_limited';
+        return {
+          posts: [],
+          quota: { readsRemaining: null, postsRemaining: null, resetAt: null },
+          availability,
+        };
       }
       throw e;
     }

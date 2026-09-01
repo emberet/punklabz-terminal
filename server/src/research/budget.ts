@@ -27,12 +27,21 @@ export function costUsd(tokensIn: number, tokensOut: number): number {
 }
 
 const month = () => new Date().toISOString().slice(0, 7);
+export type BudgetScope = 'shared' | 'intern';
 
-export function monthlySpendUsd(db: DB): number {
-  const row = db
-    .prepare(`SELECT COALESCE(SUM(cost_micro), 0) c FROM llm_budget WHERE month = ?`)
-    .get(month()) as { c: number };
+export function monthlySpendUsd(db: DB, scope: BudgetScope = 'shared'): number {
+  const row = (scope === 'intern'
+    ? db.prepare(`SELECT COALESCE(SUM(cost_micro), 0) c FROM llm_budget WHERE month = ? AND caller = 'intern'`).get(month())
+    : db.prepare(`SELECT COALESCE(SUM(cost_micro), 0) c FROM llm_budget WHERE month = ? AND caller <> 'intern'`).get(month())) as { c: number };
   return row.c / 1_000_000;
+}
+
+function scopeFor(caller: string): BudgetScope {
+  return caller === 'intern' ? 'intern' : 'shared';
+}
+
+function capFor(scope: BudgetScope): number {
+  return scope === 'intern' ? config.internLlmBudgetUsd : config.llmBudgetUsd;
 }
 
 export interface BudgetVerdict {
@@ -43,18 +52,19 @@ export interface BudgetVerdict {
 }
 
 /** Called BEFORE every model request. Fails closed on an unreadable budget. */
-export function spendGuard(db: DB, caller: string): BudgetVerdict {
-  const capUsd = config.llmBudgetUsd;
+export function spendGuard(db: DB, caller: string, reservedUsd = 0): BudgetVerdict {
+  const scope = scopeFor(caller);
+  const capUsd = capFor(scope);
   let spentUsd: number;
   try {
-    spentUsd = monthlySpendUsd(db);
+    spentUsd = monthlySpendUsd(db, scope);
   } catch {
     return { allowed: false, spentUsd: 0, capUsd, reason: 'budget ledger unreadable — refusing to spend' };
   }
-  if (spentUsd >= capUsd) {
+  if (spentUsd >= capUsd || spentUsd + reservedUsd > capUsd) {
     return {
       allowed: false, spentUsd, capUsd,
-      reason: `monthly LLM budget reached: $${spentUsd.toFixed(2)} of $${capUsd.toFixed(2)} (${caller})`,
+      reason: `monthly LLM budget reached: $${spentUsd.toFixed(2)} of $${capUsd.toFixed(2)} (${caller}; $${reservedUsd.toFixed(4)} reserved)`,
     };
   }
   return { allowed: true, spentUsd, capUsd, reason: `$${(capUsd - spentUsd).toFixed(2)} left this month` };
@@ -139,14 +149,14 @@ export interface BudgetView {
   byCaller: { caller: string; calls: number; tokensIn: number; tokensOut: number; costUsd: number }[];
 }
 
-export function budgetView(db: DB): BudgetView {
-  const rows = db
-    .prepare(`SELECT * FROM llm_budget WHERE month = ? ORDER BY cost_micro DESC`)
-    .all(month()) as any[];
+export function budgetView(db: DB, scope: BudgetScope = 'shared'): BudgetView {
+  const rows = (scope === 'intern'
+    ? db.prepare(`SELECT * FROM llm_budget WHERE month = ? AND caller = 'intern' ORDER BY cost_micro DESC`).all(month())
+    : db.prepare(`SELECT * FROM llm_budget WHERE month = ? AND caller <> 'intern' ORDER BY cost_micro DESC`).all(month())) as any[];
   return {
     month: month(),
-    capUsd: config.llmBudgetUsd,
-    spentUsd: monthlySpendUsd(db),
+    capUsd: capFor(scope),
+    spentUsd: monthlySpendUsd(db, scope),
     byCaller: rows.map((r) => ({
       caller: r.caller, calls: r.calls, tokensIn: r.tokens_in, tokensOut: r.tokens_out,
       costUsd: r.cost_micro / 1_000_000,

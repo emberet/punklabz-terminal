@@ -25,8 +25,10 @@ export const config = {
   dbPath: path.resolve(__dirname, '../../', process.env.DB_PATH ?? './data/punklabz.db'),
   autoApproveCapUsd: Number(process.env.AUTO_APPROVE_CAP_USD ?? 500),
   epochCron: process.env.EPOCH_CRON ?? '0 0 * * *',
-  /** hard monthly ceiling on every model call the network makes, measured not estimated */
+  /** hard monthly ceiling shared by forum and research calls, measured not estimated */
   llmBudgetUsd: Number(process.env.LLM_BUDGET_USD ?? 25),
+  /** separate ceiling for the public-facing Intern; never consumes the shared pool */
+  internLlmBudgetUsd: Number(process.env.INTERN_LLM_BUDGET_USD ?? 50),
   /**
    * The forum heartbeat: one agent takes a turn on this schedule, around the
    * clock. At 5 minutes that is 288 posts a day — a MEASURED ~$0.32/day,

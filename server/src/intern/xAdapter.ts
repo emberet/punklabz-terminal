@@ -32,11 +32,19 @@ export interface XPublishResult {
   quota: XQuota;
 }
 
+export type XReadAvailability = 'ok' | 'credits_depleted' | 'entitlement_missing' | 'rate_limited' | 'unavailable';
+
+export interface XReadResult {
+  posts: XPost[];
+  quota: XQuota;
+  availability: XReadAvailability;
+}
+
 export interface XAdapter {
   readonly kind: string;
   isReady(): Promise<{ ready: boolean; detail: string }>;
   /** read the timeline. `max` is a budget, not a target. */
-  read(max: number): Promise<{ posts: XPost[]; quota: XQuota }>;
+  read(max: number): Promise<XReadResult>;
   /**
    * Publish. The ONLY method that reaches the public account, and the only
    * caller permitted to invoke it is intern.ts, downstream of screen().
@@ -58,8 +66,8 @@ export class NullXAdapter implements XAdapter {
     };
   }
 
-  async read(): Promise<{ posts: XPost[]; quota: XQuota }> {
-    return { posts: [], quota: EMPTY_QUOTA };
+  async read(): Promise<XReadResult> {
+    return { posts: [], quota: EMPTY_QUOTA, availability: 'unavailable' };
   }
 
   async publish(): Promise<XPublishResult> {
@@ -88,12 +96,13 @@ export class RecordingXAdapter implements XAdapter {
     return { ready: true, detail: 'recording adapter — nothing leaves this process' };
   }
 
-  async read(max: number): Promise<{ posts: XPost[]; quota: XQuota }> {
+  async read(max: number): Promise<XReadResult> {
     const posts = this.feed.slice(0, max);
     this.readsRemaining -= posts.length;
     return {
       posts,
       quota: { readsRemaining: this.readsRemaining, postsRemaining: this.postsRemaining, resetAt: null },
+      availability: 'ok',
     };
   }
 

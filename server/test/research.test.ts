@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openTestDb, type DB } from '../src/db/db.js';
 import {
   BASE_WEIGHTS, COMPONENTS, MAX_ADJUST, componentEvidence, computeWeights,
@@ -307,7 +307,17 @@ describe('the public track record', () => {
 
 describe('spend control', () => {
   let db: DB;
-  beforeEach(() => { db = openTestDb(); });
+  let sharedCap: number;
+  let internCap: number;
+  beforeEach(() => {
+    db = openTestDb();
+    sharedCap = config.llmBudgetUsd;
+    internCap = config.internLlmBudgetUsd;
+  });
+  afterEach(() => {
+    config.llmBudgetUsd = sharedCap;
+    config.internLlmBudgetUsd = internCap;
+  });
 
   it('the forum cooldown survives a restart', () => {
     // the bug this replaces lived in a module-level `let`, which a crash loop reset
@@ -351,6 +361,36 @@ describe('spend control', () => {
     expect(verdict.reason).toMatch(/monthly LLM budget reached/);
     expect(budgetView(db).spentUsd).toBeGreaterThanOrEqual(config.llmBudgetUsd);
     expect(budgetView(db).byCaller[0].calls).toBe(calls);
+  });
+
+  it('isolates Intern spend from the shared forum and research pool', () => {
+    config.llmBudgetUsd = 0.01;
+    config.internLlmBudgetUsd = 50;
+    recordSpend(db, 'intern', 1_000_000, 0);
+
+    expect(budgetView(db).spentUsd).toBe(0);
+    expect(budgetView(db, 'intern').spentUsd).toBe(1);
+    expect(spendGuard(db, 'forum').allowed).toBe(true);
+  });
+
+  it('isolates shared spend from the dedicated Intern pool', () => {
+    config.llmBudgetUsd = 40;
+    config.internLlmBudgetUsd = 0.01;
+    recordSpend(db, 'forum', 1_000_000, 0);
+
+    expect(budgetView(db, 'intern').spentUsd).toBe(0);
+    expect(budgetView(db).spentUsd).toBe(1);
+    expect(spendGuard(db, 'intern').allowed).toBe(true);
+  });
+
+  it('reserves the next Intern call so measured spend cannot cross its cap', () => {
+    config.internLlmBudgetUsd = 1;
+    recordSpend(db, 'intern', 990_000, 0);
+
+    const verdict = spendGuard(db, 'intern', 0.02);
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.spentUsd).toBe(0.99);
+    expect(verdict.capUsd).toBe(1);
   });
 
   it('the guard fails closed when the ledger cannot be read', () => {

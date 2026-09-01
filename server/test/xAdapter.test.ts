@@ -78,7 +78,11 @@ describe('read availability', () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
-  it.each([402, 403, 429])('treats X status %s as unavailable input, not a fatal read', async (status) => {
+  it.each([
+    [402, 'credits_depleted'],
+    [403, 'entitlement_missing'],
+    [429, 'rate_limited'],
+  ] as const)('classifies X status %s as %s without inventing quota', async (status, availability) => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
       JSON.stringify({ detail: 'upstream read unavailable' }),
       { status, headers: { 'content-type': 'application/json' } },
@@ -87,6 +91,7 @@ describe('read availability', () => {
     await expect(new ApiXAdapter(cfg).read(10)).resolves.toEqual({
       posts: [],
       quota: { readsRemaining: null, postsRemaining: null, resetAt: null },
+      availability,
     });
   });
 });

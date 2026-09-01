@@ -18,6 +18,9 @@ interface InternPost {
   sourceCount: number;
   reviewedAt: number | null;
   reviewApproved: boolean;
+  publishState: 'not_attempted' | 'publishing' | 'published' | 'failed';
+  publishAttemptedAt: number | null;
+  publishedUrl: string | null;
 }
 
 interface InternView {
@@ -170,7 +173,7 @@ export function Intern() {
             </div>
           )}
           <div className="row" style={{ gap: 10, marginTop: 4 }}>
-            <span className="soft" style={{ width: 150 }}>MODEL SPEND</span>
+            <span className="soft" style={{ width: 150 }}>INTERN MODEL SPEND</span>
             <span className="soft">
               ${d.budget.spentUsd.toFixed(2)} of ${d.budget.capUsd.toFixed(2)} this month
             </span>
@@ -266,9 +269,15 @@ export function Intern() {
                 {p.sourceCount > 0 && p.providerKind === 'api' ? `X ${p.sourceCount}` : 'INTERNAL DATA ONLY'}
               </span>
               {p.reviewApproved && <span className="phos">APPROVED</span>}
+              {p.publishState === 'publishing' && <span className="red">PUBLISH UNRESOLVED</span>}
               {p.blockedRules.map((r) => <span key={r} className="red">{r}</span>)}
             </div>
             <div style={{ marginTop: 4 }}>{p.draft}</div>
+            {p.publishedUrl && (
+              <div style={{ marginTop: 6 }}>
+                <a href={p.publishedUrl} target="_blank" rel="noreferrer">VIEW ON X</a>
+              </div>
+            )}
             {p.allowedNumbers.length > 0 && (
               <div className="soft" style={{ marginTop: 4, fontSize: '0.9em' }}>
                 numbers it was allowed to use: {p.allowedNumbers.slice(0, 12).join(', ')}
@@ -300,8 +309,9 @@ export function Intern() {
           and assumes the model has already been manipulated. Its strongest rule is the number
           allowlist: every figure in a draft must be one the intern was actually handed, so an
           invented statistic has nowhere to come from. The rules it cannot cover are qualitative
-          claims carrying no number and no ticker — which is why the log above is public and why
-          nothing publishes until a human has read it.
+          claims carrying no number and no ticker. Live activation therefore requires a reviewed,
+          X-backed launch preview; every later candidate still passes the same filter and stays in
+          this public log.
         </div>
       </Panel>
     </div>
