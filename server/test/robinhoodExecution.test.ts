@@ -340,6 +340,28 @@ describe('routing: exact venue or nothing', () => {
     expect(d.routable).toBe(false);
     expect(d.reason).toMatch(/simulated venue/);
   });
+
+  it('anchors an operator probe to the firm quote while retaining the reference floor for strategy orders', async () => {
+    const receivedFloors: Array<number | undefined> = [];
+    const adapter = {
+      venue: ROBINHOOD_VENUE,
+      async health() { return { venue: ROBINHOOD_VENUE, status: 'online', latencyMs: 1, errorRate: 0, lastOkAt: 1, note: null }; },
+      async getQuote() { return null; },
+      async placeOrder(_instrument: unknown, _side: unknown, _notional: unknown, opts: { minReceive?: number }) {
+        receivedFloors.push(opts.minReceive);
+        return { accepted: true, pending: true, txRef: '0xtest', venueOrderId: '0xtest' };
+      },
+    };
+    const router = new ExecutionRouter(new Map([[ROBINHOOD_VENUE, adapter as any]]));
+    const strategy = { ...req('canary'), intentId: 'strategy', orderId: 1, accountId: 1 };
+    const probe = { ...strategy, intentId: 'probe', operatorTest: true };
+
+    await router.execute(router.route(strategy), strategy, 2400);
+    await router.execute(router.route(probe), probe, 2400);
+
+    expect(receivedFloors[0]).toBeCloseTo(5 / (2400 * 1.01));
+    expect(receivedFloors[1]).toBeUndefined();
+  });
 });
 
 describe('preflight, rebuilt around Robinhood Chain', () => {

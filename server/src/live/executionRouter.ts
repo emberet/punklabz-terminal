@@ -20,6 +20,8 @@ export interface RouteRequest {
   accountId?: number;
   grossEdgeBps?: number;
   safetyBufferBps?: number;
+  /** explicit operator path proof; never promotion evidence or autonomous alpha */
+  operatorTest?: boolean;
   /** exact base quantity for a receipt-derived close; only valid for sells */
   exactSellQuantity?: number;
   /** present when this order spends a delegated wallet rather than the house book */
@@ -142,7 +144,11 @@ export class ExecutionRouter {
         ? (req.notionalUsd / (expectedPrice * (1 + tolerance)))  // min base units received
         : req.notionalUsd * (1 - tolerance);                     // min quote received
     const result = await decision.adapter.placeOrder(decision.instrument, req.side, req.notionalUsd, {
-      minReceive,
+      // A strategy order keeps the independent reference-price floor in
+      // addition to the firm quote's own calldata limit. An operator route
+      // proof has no claimed edge: it is bounded by the separately enforced
+      // 1% reference-deviation check and the quote-local 35bps calldata floor.
+      minReceive: req.operatorTest ? undefined : minReceive,
       intentId: req.intentId,
       orderId: req.orderId,
       accountId: req.accountId,

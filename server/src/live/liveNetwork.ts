@@ -422,6 +422,7 @@ export class LiveNetwork {
       accountId: account.id,
       grossEdgeBps: forcedBy ? undefined : edge.grossEdgeBps,
       safetyBufferBps: Math.max(10, edge.bufferBps),
+      operatorTest: context.experimentRunId !== undefined && context.experimentRunId !== null,
       exactSellQuantity: context.exactSellQuantity,
     };
     const routed = this.router.route(routeReq);

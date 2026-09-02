@@ -935,12 +935,16 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
            signed_payload=NULL, updated_at=? WHERE id=?`,
         ).run(Number(receipt.blockNumber), receipt.blockHash, Date.now(), approval.transactionId);
         const approvalGas = receipt.gasUsed * receipt.effectiveGasPrice;
+        const snapshotHash = this.opts.db ? activeUniverse(this.opts.db)?.contentHash ?? null : null;
         this.opts.db?.prepare(
           `INSERT OR IGNORE INTO execution_asset_ledger
-            (execution_account_id, order_id, transaction_id, asset, qty_delta, event_type, tx_ref, log_index, ts)
-           VALUES (?, ?, ?, 'ETH', ?, 'gas', ?, -1, ?)`,
+            (execution_account_id, order_id, transaction_id, asset, qty_delta, event_type, tx_ref,
+             log_index, ts, chain_id, contract_address, decimals, raw_delta, snapshot_hash)
+           VALUES (?, ?, ?, 'ETH', ?, 'gas', ?, -1, ?, 4663,
+            '0x0000000000000000000000000000000000000000', 18, ?, ?)`,
         ).run(opts.accountId, opts.orderId, approval.transactionId,
-          String(-Number(formatUnits(approvalGas, 18))), approval.hash, Date.now());
+          String(-Number(formatUnits(approvalGas, 18))), approval.hash, Date.now(),
+          (-approvalGas).toString(), snapshotHash);
         approvalConsumedGas = true;
       }
     } catch (e) {

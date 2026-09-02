@@ -9,7 +9,7 @@ import {
 import { FullPairScanner, numberToRaw } from '../src/live/pairScanner.js';
 import { runTradingCouncil } from '../src/live/tradingCouncil.js';
 import { monthlySpendUsd } from '../src/research/budget.js';
-import { insertRawAssetEntry, rawHoldings } from '../src/live/rawAssetLedger.js';
+import { backfillLegacyRawLedger, insertRawAssetEntry, rawHoldings } from '../src/live/rawAssetLedger.js';
 import {
   generateUniversePolicyBundle, recordAppliedUniversePolicy, verifyActiveUniversePolicy,
   signerAmountPolicyGate,
@@ -145,6 +145,21 @@ describe('immutable verified universe', () => {
       SELECT symbol,(bid+ask)/2 mid,source FROM rh_reference_prices WHERE symbol='WETH'
     )`).get() as any;
     expect(row).toMatchObject({ symbol: 'WETH', mid: 2_500, source: 'binance_mark' });
+  });
+});
+
+describe('raw execution accounting', () => {
+  it('recovers an exact legacy approval-gas debit in wei during boot', () => {
+    const db = openTestDb();
+    db.prepare(
+      `INSERT INTO execution_asset_ledger
+        (execution_account_id, asset, qty_delta, event_type, tx_ref, log_index, ts)
+       VALUES (1, 'ETH', '-0.000022711338496', 'gas', ?, -1, 1)`,
+    ).run(`0x${'42'.repeat(32)}`);
+
+    expect(backfillLegacyRawLedger(db)).toBe(1);
+    expect(rawHoldings(db, 1).get('0x0000000000000000000000000000000000000000'))
+      .toBe(-22_711_338_496_000n);
   });
 });
 
