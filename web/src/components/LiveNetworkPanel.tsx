@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import type { LiveStatusView } from '@punklabz/shared';
+import { USDG, type LiveStatusView } from '@punklabz/shared';
+import { useWallets } from '@privy-io/react-auth';
 import { api } from '../lib/api';
 import { wsClient } from '../lib/ws';
 import { Panel } from './Panel';
@@ -48,7 +49,7 @@ interface CapitalControls {
   allocations: { botId: number; botName: string; allocatedUsdg: number; active: number }[];
   bots: { id: number; name: string; status: string }[];
   accounts: {
-    id: number; name: string; role: string; walletAddress: string | null;
+    id: number; name: string; role: string; active: boolean; walletAddress: string | null;
     holdings: Record<string, number>; fundingProof: { total: number; complete: boolean };
   }[];
 }
@@ -107,6 +108,7 @@ const NETWORK_MAP = `                [ PUNKLABZ ]
 
 export function LiveNetworkPanel() {
   const { user } = useAuth();
+  const { wallets: privyWallets } = useWallets();
   const isAdmin = !!user?.isAdmin;
   const [status, setStatus] = useState<LiveStatusView | null>(null);
   const [orders, setOrders] = useState<LiveOrder[]>([]);
@@ -216,6 +218,55 @@ export function LiveNetworkPanel() {
       ? 'AUTONOMOUS CANARY'
       : phase.toUpperCase();
   const sponsor = capital.bots.find((bot) => bot.name === 'MOMENTUM RUNNER');
+  const managerAccount = capital.accounts.find((account) => account.role === 'manager_operating' && account.active);
+  const traderAccount = capital.accounts.find((account) => account.name === 'ROBINHOOD_TRADER_01' && account.active);
+
+  const fundReplacementTrader = async () => {
+    setBusy(true);
+    setNotice('');
+    let submittedHash: string | null = null;
+    try {
+      if (!managerAccount?.walletAddress || !traderAccount?.walletAddress) {
+        throw new Error('active Manager and replacement Trader accounts are not ready');
+      }
+      const managerWallet = privyWallets.find(
+        (wallet) => wallet.address.toLowerCase() === managerAccount.walletAddress!.toLowerCase(),
+      );
+      if (!managerWallet) {
+        throw new Error('Privy Manager wallet is not available in this session; sign in with the Manager owner identity');
+      }
+      await managerWallet.switchChain(4663);
+      const provider = await managerWallet.getEthereumProvider();
+      const recipient = traderAccount.walletAddress.toLowerCase().slice(2).padStart(64, '0');
+      const amount = 5_000_000n.toString(16).padStart(64, '0');
+      const hash = await provider.request({
+        method: 'eth_sendTransaction',
+        params: [{
+          from: managerAccount.walletAddress,
+          to: USDG.address,
+          data: `0xa9059cbb${recipient}${amount}`,
+          value: '0x0',
+        }],
+      });
+      if (typeof hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(hash)) {
+        throw new Error('Privy did not return a valid Manager funding transaction hash');
+      }
+      submittedHash = hash.toLowerCase();
+      try {
+        const imported = await api.post<{ inserted: number }>('/api/admin/live/funding/import', { txHash: submittedHash });
+        setNotice(`5 USDG submitted by Manager and imported after finality (${imported.inserted} ledger event${imported.inserted === 1 ? '' : 's'}).`);
+      } catch (error) {
+        setNotice(`Manager transfer submitted ${submittedHash.slice(0, 10)}…; receipt import is pending: ${String((error as Error)?.message ?? error)}`);
+      }
+      load();
+    } catch (error) {
+      setNotice(submittedHash
+        ? `Manager transfer submitted ${submittedHash.slice(0, 10)}…; operator import required: ${String((error as Error)?.message ?? error)}`
+        : String((error as Error)?.message ?? error));
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <>
       <Panel
@@ -402,8 +453,13 @@ export function LiveNetworkPanel() {
               }}>
                 IMPORT FUNDING TX
               </button>
+              {managerAccount?.walletAddress && traderAccount?.walletAddress && (
+                <button className="primary" disabled={busy} onClick={() => void fundReplacementTrader()}>
+                  SIGN EXACT 5 USDG FUNDING
+                </button>
+              )}
               <span className="dim" style={{ fontSize: 10 }}>
-                Canary/live opens only after recovery, reconciliation, and preflight. Composite score gate {status.limits?.confidenceThreshold ?? 90}/100; this is not a win probability.
+                Manager owner signs this one exact transfer; Trader authority begins only after receipt import and reconciliation. Canary/live opens only after recovery, reconciliation, and preflight. Composite score gate {status.limits?.confidenceThreshold ?? 90}/100; this is not a win probability.
               </span>
             </div>
           )}

@@ -249,12 +249,12 @@ async function fundUsdgOnly(stateFile: string, managerWalletId: string): Promise
   };
   const db = openDb(requireEnv('DB_PATH'));
   haltNetwork(db, 'replacement Trader USDG funding in progress', 'operator-ceremony');
-  const accounts = rotateTraderAccount(db, state.walletAddress, 'operator-ceremony');
   let priorPolicies: string[] | null = null;
 
   try {
     const fundingPolicy = await prepareManagerFundingPolicy(ctx, state.walletAddress, state.runId);
     priorPolicies = fundingPolicy.previousPolicyIds;
+    const accounts = rotateTraderAccount(db, state.walletAddress, 'operator-ceremony');
     if (fundingPolicy.walletAddress.toLowerCase() !== accounts.manager.walletAddress!.toLowerCase()) {
       throw new Error('Privy Manager wallet and Manager account do not match');
     }
