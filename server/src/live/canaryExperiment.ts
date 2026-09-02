@@ -64,6 +64,57 @@ export class CanaryExperimentCoordinator {
     return row ? view(row) : null;
   }
 
+  private recoveryCandidate(
+    accountId: number,
+    wallet: string,
+    policy: string,
+    sponsorBotId?: number,
+  ): { row: any; receivedRaw: bigint } | null {
+    const row = this.db.prepare(
+      `SELECT r.* FROM canary_experiment_runs r
+       JOIN live_orders b ON b.id=r.buy_order_id
+       WHERE r.state='failed' AND r.execution_account_id=?
+         AND (? IS NULL OR r.sponsor_bot_id=?)
+         AND lower(r.wallet_address)=lower(?) AND r.policy_fingerprint=?
+         AND r.sell_order_id IS NULL AND r.failure_reason='sell was risk_rejected: min_size'
+         AND b.state='filled' AND b.operator_test=1
+       ORDER BY r.id DESC LIMIT 1`,
+    ).get(accountId, sponsorBotId ?? null, sponsorBotId ?? null, wallet, policy) as any;
+    if (!row) return null;
+    const unresolvedTransactions = (this.db.prepare(
+      `SELECT COUNT(*) n FROM execution_transactions
+       WHERE state IN ('prepared','signed','broadcast','unknown')`,
+    ).get() as { n: number }).n;
+    const unresolvedOrders = (this.db.prepare(
+      `SELECT COUNT(*) n FROM live_orders
+       WHERE state IN ('risk_approved','submitting','submitted','pending','open','partial','reconciling')`,
+    ).get() as { n: number }).n;
+    const receivedRows = this.db.prepare(
+      `SELECT raw_delta FROM execution_asset_ledger
+       WHERE execution_account_id=? AND order_id=? AND lower(contract_address)=lower(?)
+         AND event_type='fill' AND raw_delta IS NOT NULL`,
+    ).all(accountId, row.buy_order_id, WETH_ROBINHOOD.address) as { raw_delta: string }[];
+    const receivedRaw = receivedRows.reduce((sum, entry) => {
+      const delta = BigInt(entry.raw_delta);
+      return delta > 0n ? sum + delta : sum;
+    }, 0n);
+    const heldRaw = rawHoldings(this.db, accountId).get(WETH_ROBINHOOD.address.toLowerCase()) ?? 0n;
+    return unresolvedTransactions === 0 && unresolvedOrders === 0 && receivedRaw > 0n && heldRaw === receivedRaw
+      ? { row, receivedRaw }
+      : null;
+  }
+
+  async canRecoverExactExit(): Promise<boolean> {
+    const cfg = getLiveConfig(this.db);
+    if (cfg.mode !== 'canary' || cfg.capitalStage !== 1 || cfg.autonomyEnabled) return false;
+    const wallet = await this.signer.getAddress();
+    const policy = signerPolicyFingerprint(this.signer);
+    if (!wallet || !policy) return false;
+    const account = accountForMode(this.db, 'canary', 'evm:robinhood');
+    if (!account.walletAddress || account.walletAddress.toLowerCase() !== wallet.toLowerCase()) return false;
+    return this.recoveryCandidate(account.id, wallet, policy) !== null;
+  }
+
   async start(sponsorBotId: number, idempotencyKey: string, actor: string): Promise<CanaryExperimentView> {
     const existing = this.db.prepare(`SELECT * FROM canary_experiment_runs WHERE idempotency_key=?`)
       .get(idempotencyKey);
@@ -73,7 +124,8 @@ export class CanaryExperimentCoordinator {
     }
 
     const cfg = getLiveConfig(this.db);
-    if (cfg.mode !== 'canary' || cfg.phase !== 'canary_probe' || cfg.autonomyEnabled || cfg.halted || cfg.capitalStage !== 1) {
+    const validPhase = cfg.phase === 'canary_probe' || cfg.phase === 'canary_exit_recovery';
+    if (cfg.mode !== 'canary' || !validPhase || cfg.autonomyEnabled || cfg.halted || cfg.capitalStage !== 1) {
       throw new Error('round-trip probe requires an active, non-autonomous stage-1 canary probe');
     }
     const active = this.db.prepare(
@@ -92,37 +144,9 @@ export class CanaryExperimentCoordinator {
       throw new Error('Trader account and signer wallet do not match');
     }
 
-    const recoverable = this.db.prepare(
-      `SELECT r.* FROM canary_experiment_runs r
-       JOIN live_orders b ON b.id=r.buy_order_id
-       WHERE r.state='failed' AND r.execution_account_id=? AND r.sponsor_bot_id=?
-         AND lower(r.wallet_address)=lower(?) AND r.policy_fingerprint=?
-         AND r.sell_order_id IS NULL AND r.failure_reason='sell was risk_rejected: min_size'
-         AND b.state='filled' AND b.operator_test=1
-       ORDER BY r.id DESC LIMIT 1`,
-    ).get(account.id, sponsorBotId, wallet, policy) as any;
-    if (recoverable) {
-      const unresolvedTransactions = (this.db.prepare(
-        `SELECT COUNT(*) n FROM execution_transactions
-         WHERE state IN ('prepared','signed','broadcast','unknown')`,
-      ).get() as { n: number }).n;
-      const unresolvedOrders = (this.db.prepare(
-        `SELECT COUNT(*) n FROM live_orders
-         WHERE state IN ('risk_approved','submitting','submitted','pending','open','partial','reconciling')`,
-      ).get() as { n: number }).n;
-      const receivedRows = this.db.prepare(
-        `SELECT raw_delta FROM execution_asset_ledger
-         WHERE execution_account_id=? AND order_id=? AND lower(contract_address)=lower(?)
-           AND event_type='fill' AND raw_delta IS NOT NULL`,
-      ).all(account.id, recoverable.buy_order_id, WETH_ROBINHOOD.address) as { raw_delta: string }[];
-      const receivedRaw = receivedRows.reduce((sum, entry) => {
-        const delta = BigInt(entry.raw_delta);
-        return delta > 0n ? sum + delta : sum;
-      }, 0n);
-      const heldRaw = rawHoldings(this.db, account.id).get(WETH_ROBINHOOD.address.toLowerCase()) ?? 0n;
-      if (unresolvedTransactions || unresolvedOrders || receivedRaw <= 0n || heldRaw !== receivedRaw) {
-        throw new Error('stranded probe exit recovery requires no unresolved work and an exact receipt-derived WETH holding');
-      }
+    const recovery = this.recoveryCandidate(account.id, wallet, policy, sponsorBotId);
+    if (recovery) {
+      const recoverable = recovery.row;
       this.db.prepare(
         `UPDATE canary_experiment_runs
          SET state='buy_confirmed', failure_reason=NULL, updated_at=? WHERE id=? AND state='failed'`,
@@ -130,11 +154,14 @@ export class CanaryExperimentCoordinator {
       appendAudit(this.db, actor, 'live_canary_experiment_exit_recovery', {
         experimentRunId: recoverable.id,
         buyOrderId: recoverable.buy_order_id,
-        receivedRaw: receivedRaw.toString(),
+        receivedRaw: recovery.receivedRaw.toString(),
         requestIdempotencyKey: idempotencyKey,
       });
       await this.advance();
       return this.byId(recoverable.id)!;
+    }
+    if (cfg.phase === 'canary_exit_recovery') {
+      throw new Error('exit-only recovery requires an exact stranded probe position and no unresolved work');
     }
 
     const capital = Math.min(stageCapUsd(cfg.capitalStage), custodyHoldings(this.db, account.id).get('USDG') ?? 0);
@@ -186,7 +213,8 @@ export class CanaryExperimentCoordinator {
 
   private async advanceOne(row: any): Promise<void> {
     const cfg = getLiveConfig(this.db);
-    if (cfg.mode !== 'canary' || cfg.phase !== 'canary_probe' || cfg.autonomyEnabled) return;
+    const validPhase = cfg.phase === 'canary_probe' || cfg.phase === 'canary_exit_recovery';
+    if (cfg.mode !== 'canary' || !validPhase || cfg.autonomyEnabled) return;
     if (cfg.halted) return;
 
     if (row.state === 'created') {
@@ -304,6 +332,11 @@ export class CanaryExperimentCoordinator {
       this.hub.publish('live', {
         event: 'canary_probe_complete', experimentRunId: row.id, reconciliationRunId: pass.runId,
       });
+      if (cfg.phase === 'canary_exit_recovery') {
+        this.db.prepare(`UPDATE live_config SET execution_phase='canary_probe', updated_at=? WHERE id=1`)
+          .run(Date.now());
+        haltNetwork(this.db, 'receipt-derived canary exit completed; fresh collateralization and arm required', 'canary-experiment');
+      }
     }
   }
 }

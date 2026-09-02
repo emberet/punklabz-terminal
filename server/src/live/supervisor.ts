@@ -225,11 +225,20 @@ export class AutonomousSupervisor {
     if (targetMode === 'canary' && stage < 1) throw new Error('canary starts at the $5 stage');
     if (targetMode === 'live' && stage !== 4) throw new Error('live mode requires the $100 stage');
 
-    const preflight = await this.safetyGate(targetMode, stage, actor, targetMode === 'canary' ? 'probe' : 'autonomy');
+    const cfg = getLiveConfig(this.db);
+    const exitRecovery = targetMode === 'canary' && stage === 1 && cfg.halted
+      && await this.experiment?.canRecoverExactExit() === true;
+    const purpose = exitRecovery ? 'exit_recovery' : targetMode === 'canary' ? 'probe' : 'autonomy';
+    const preflight = await this.safetyGate(targetMode, stage, actor, purpose, exitRecovery);
 
     this.db.transaction(() => {
       setCapitalStage(this.db, stage, actor);
       setLiveMode(this.db, targetMode, actor, preflight);
+      if (exitRecovery) {
+        this.db.prepare(
+          `UPDATE live_config SET execution_phase='canary_exit_recovery', autonomy_enabled=0, updated_at=? WHERE id=1`,
+        ).run(Date.now());
+      }
       resumeAfterSafetyChecks(this.db, actor, {
         transactionsRecovered: true, reconciliationClean: true, preflightPassed: true,
       });
@@ -286,7 +295,8 @@ export class AutonomousSupervisor {
     targetMode: ExecutionMode,
     stage: number,
     actor: string,
-    purpose: 'probe' | 'autonomy',
+    purpose: 'probe' | 'exit_recovery' | 'autonomy',
+    exitRecoveryEvidence = false,
   ): Promise<PreflightResult> {
     let unresolved = 0;
     for (const adapter of this.adapters.values()) {
@@ -303,7 +313,7 @@ export class AutonomousSupervisor {
     const preflight = await runPreflight({
       db: this.db, signer: this.signer, adapters: this.adapters, feedStatus: this.feedStatus,
       ethUsd: this.ethUsd?.() ?? null,
-    }, targetMode, actor, { targetStage: stage, purpose });
+    }, targetMode, actor, { targetStage: stage, purpose, exitRecoveryEvidence });
     if (!preflight.passed) throw new Error(`preflight failed: ${preflight.blockers.join('; ')}`);
     return preflight;
   }

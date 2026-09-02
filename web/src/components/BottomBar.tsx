@@ -43,6 +43,8 @@ export function BottomBar() {
       ? 'MAINNET HALTED'
       : execution.phase === 'canary_probe'
         ? `MAINNET CANARY PROBE · ${execution.chainId}`
+        : execution.phase === 'canary_exit_recovery'
+          ? `MAINNET EXIT RECOVERY · ${execution.chainId}`
         : execution.phase === 'autonomous_canary'
           ? `MAINNET CANARY · ${execution.chainId}`
           : execution.mode === 'live'

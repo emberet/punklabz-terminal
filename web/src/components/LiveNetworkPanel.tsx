@@ -360,7 +360,7 @@ export function LiveNetworkPanel() {
                   ARM MAINNET
                 </button>
               )}
-              {!status.halted && phase === 'canary_probe' && status.experiment?.state !== 'completed' && (
+              {!status.halted && (phase === 'canary_probe' || phase === 'canary_exit_recovery') && status.experiment?.state !== 'completed' && (
                 <button className="primary" disabled={busy || !sponsor} onClick={() => {
                   const phrase = 'RUN $0.50 ROUND TRIP';
                   requestConfirmation({

@@ -411,6 +411,19 @@ describe('preflight, rebuilt around Robinhood Chain', () => {
     expect(r.checks.find((c) => c.name === 'instrument_mapping')!.pass).toBe(true);
   }, 30_000);
 
+  it('waives entry collateral only for attested exit recovery while keeping the other gates blocking', async () => {
+    const r = await runPreflight(deps(), 'canary', 'test', {
+      persist: false,
+      targetStage: 1,
+      purpose: 'exit_recovery',
+      exitRecoveryEvidence: true,
+    });
+    expect(r.checks.find((c) => c.name === 'exit_recovery_evidence')).toMatchObject({ pass: true, blocking: true });
+    expect(r.checks.find((c) => c.name === 'stage_collateralized')).toMatchObject({ pass: true, blocking: true });
+    expect(r.passed).toBe(false);
+    expect(r.checks.find((c) => c.name === 'signer')).toMatchObject({ pass: false, blocking: true });
+  }, 30_000);
+
   it('live still demands 10 clean canary fills', async () => {
     const r = await runPreflight(deps(), 'live');
     const gate = r.checks.find((c) => c.name === 'canary_evidence')!;

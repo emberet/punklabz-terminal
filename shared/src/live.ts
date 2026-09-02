@@ -32,6 +32,7 @@ export type LiveExecutionPhase =
   | 'simulation'
   | 'shadow'
   | 'canary_probe'
+  | 'canary_exit_recovery'
   | 'autonomous_canary'
   | 'live';
 

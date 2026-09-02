@@ -143,6 +143,25 @@ describe('risk engine', () => {
     expect(halted.checks.find((c) => c.name === 'kill_switch')).toMatchObject({ pass: false });
   });
 
+  it('an exit-recovery phase blocks every order except the exact full-lot close', () => {
+    getLiveConfig(db);
+    db.prepare(
+      `UPDATE live_config SET mode='canary', execution_phase='canary_exit_recovery',
+       autonomy_enabled=0, halted=0, capital_stage=1 WHERE id=1`,
+    ).run();
+    const ordinary = evaluateIntent(db, intent({
+      side: 'sell', notionalUsd: 0.6, confidence: 95, forcedBy: 'operator:test',
+    }), undefined, undefined, undefined, { isExit: true });
+    expect(ordinary.approved).toBe(false);
+    expect(ordinary.checks.find((c) => c.name === 'exit_recovery_only')).toMatchObject({ pass: false });
+
+    const exact = evaluateIntent(db, intent({
+      side: 'sell', notionalUsd: 0.499125, confidence: 95, forcedBy: 'operator:test',
+    }), undefined, undefined, undefined, { isExit: true, exactFullExit: true });
+    expect(exact.approved).toBe(true);
+    expect(exact.checks.find((c) => c.name === 'exit_recovery_only')).toMatchObject({ pass: true });
+  });
+
   it('daily-loss breach rejects new entries', () => {
     setLiveMode(db, 'shadow', 'test');
     setTestStage(db, 1);

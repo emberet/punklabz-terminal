@@ -57,7 +57,12 @@ export async function runPreflight(
   deps: PreflightDeps,
   targetMode: ExecutionMode,
   actor = 'system',
-  options: { persist?: boolean; targetStage?: number; purpose?: 'probe' | 'autonomy' } = {},
+  options: {
+    persist?: boolean;
+    targetStage?: number;
+    purpose?: 'probe' | 'exit_recovery' | 'autonomy';
+    exitRecoveryEvidence?: boolean;
+  } = {},
 ): Promise<PreflightResult> {
   const { db, signer, adapters, feedStatus } = deps;
   const checks: PreflightCheck[] = [];
@@ -114,7 +119,12 @@ export async function runPreflight(
   const address = await signer.getAddress();
   add('wallet_address', !!address, address ? `trading wallet ${address}` : 'no trading wallet address available');
   if (targetMode === 'canary') {
-    if (options.purpose === 'probe') {
+    if (options.purpose === 'exit_recovery') {
+      add('exit_recovery_evidence', options.exitRecoveryEvidence === true,
+        options.exitRecoveryEvidence
+          ? 'failed probe receipt, exact current WETH holding, and zero unresolved work verified'
+          : 'exact stranded-probe recovery evidence is absent');
+    } else if (options.purpose === 'probe') {
       add('launch_evidence', true,
         'isolated canary probe requested; autonomous strategy execution remains disabled');
     } else if (address) {
@@ -211,11 +221,16 @@ export async function runPreflight(
   add('funded_balance', funded, fundedDetail);
   const targetStage = options.targetStage ?? getLiveConfig(db).capitalStage;
   const stageCapital = stageCapUsd(targetStage);
-  add('stage_collateralized', funded && (() => {
+  const exitRecovery = options.purpose === 'exit_recovery' && options.exitRecoveryEvidence === true;
+  const stageCollateralized = funded && (() => {
     const account = accountForMode(db, targetMode, ROBINHOOD_VENUE);
     const held = custodyHoldings(db, account.id).get('USDG') ?? 0;
     return held >= stageCapital && (stageCapital < 100 || held >= 100);
-  })(), `stage $${stageCapital} requires at least ${stageCapital} recorded and reconciled USDG`);
+  })();
+  add('stage_collateralized', exitRecovery || stageCollateralized,
+    exitRecovery
+      ? `exit-only recovery may reduce the existing receipt-derived WETH lot below the $${stageCapital} entry-capital floor`
+      : `stage $${stageCapital} requires at least ${stageCapital} recorded and reconciled USDG`);
 
   // Gas is ETH on this chain and it is a hard trading precondition: a wallet
   // that cannot pay for a transaction cannot exit a position either.

@@ -377,6 +377,11 @@ export function evaluateIntent(
   const transactionCeiling = exactFullExit ? intent.notionalUsd : maxPerTrade;
   const size = Math.min(intent.notionalUsd, transactionCeiling, delegatedHeadroom);
 
+  if (cfg.phase === 'canary_exit_recovery') {
+    if (exactFullExit) pass('exit_recovery_only', 'exact full-lot exit is the only action enabled');
+    else fail('exit_recovery_only', 'canary exit recovery blocks every action except the exact full-lot exit');
+  }
+
   if (stageCap <= 0) fail('capital_stage', 'stage 0: $0 deployable — shadow accounting only');
   else pass('capital_stage', `stage ${cfg.capitalStage}: cap $${stageCap}`);
 

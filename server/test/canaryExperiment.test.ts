@@ -94,6 +94,7 @@ describe('canary experiment exit recovery', () => {
       { forceTrade } as any,
     );
 
+    expect(await coordinator.canRecoverExactExit()).toBe(true);
     const result = await coordinator.start(botId, 'recovery-request', 'operator:test');
 
     expect(forceTrade).toHaveBeenCalledOnce();
