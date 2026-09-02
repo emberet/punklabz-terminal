@@ -4,6 +4,7 @@ import { accountForMode, setBotAllocation } from './accounts.js';
 import { getLiveConfig, haltNetwork } from './riskEngine.js';
 
 const MICRO = 1_000_000;
+const AUTONOMOUS_HOUSE_BOTS = ['MOMENTUM RUNNER', 'MEAN REVERSION', 'PUMP SNIPER'] as const;
 
 interface FillEvidence {
   netMicro: number;
@@ -112,9 +113,9 @@ export function runManagerRebalance(
      FROM bots b LEFT JOIN manager_capital_allocations a
        ON a.bot_id=b.id AND a.execution_account_id=?
      WHERE b.kind='house' AND b.status='running'
-       AND b.name IN ('MOMENTUM RUNNER','MEAN REVERSION','GRID TRADER')
+       AND b.name IN (?,?,?)
      ORDER BY b.id`,
-  ).all(account.id) as { id: number; name: string; allocated: number }[];
+  ).all(account.id, ...AUTONOMOUS_HOUSE_BOTS) as { id: number; name: string; allocated: number }[];
 
   const measured = bots.map((bot) => {
     const fills = fillsFor(db, account.id, bot.id);

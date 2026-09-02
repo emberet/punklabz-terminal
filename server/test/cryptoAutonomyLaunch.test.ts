@@ -317,7 +317,7 @@ describe('Manager allocations and isolated user-bot custody', () => {
       `INSERT INTO reconciliation_runs (execution_account_id,started_at,completed_at,status,actor)
        VALUES (?,?,?,'clean','test')`,
     ).run(account.id, Date.now(), Date.now());
-    for (const name of ['MOMENTUM RUNNER', 'MEAN REVERSION', 'GRID TRADER']) {
+    for (const name of ['MOMENTUM RUNNER', 'MEAN REVERSION', 'GRID TRADER', 'PUMP SNIPER']) {
       db.prepare(
         `INSERT INTO bots (name,kind,strategy_type,config_json,status,created_at)
          VALUES (?,'house','momentum','{}','running',?)`,
@@ -325,6 +325,9 @@ describe('Manager allocations and isolated user-bot custody', () => {
     }
     const result = runManagerRebalance(db, 5);
     expect(result.status).toBe('applied');
+    expect(result.bots.map((bot) => bot.name)).toEqual([
+      'MOMENTUM RUNNER', 'MEAN REVERSION', 'PUMP SNIPER',
+    ]);
     expect(result.reserveUsd).toBeCloseTo(1.5, 8);
     expect(result.bots.every((bot) => bot.appliedAllocationUsd <= 0.5 + 1e-9)).toBe(true);
     expect(result.bots.reduce((sum, bot) => sum + bot.appliedAllocationUsd, 0)).toBeLessThanOrEqual(3.5);
