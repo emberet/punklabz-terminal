@@ -191,8 +191,11 @@ export function WalletPanel() {
             )}
             {wrongChain && (
               <div className="red" style={{ marginBottom: 8 }}>
-                Your wallet is on chain {chainId}. Balances below are read from Robinhood Chain
-                (4663) regardless — this only matters when you come to sign a transaction.{' '}
+                Your personal wallet is currently set to Ethereum Mainnet ({chainId}). Login and
+                Control Room approvals are message signatures only; they do not move funds or sign
+                Trader orders. Balances below come from Robinhood Chain (4663), where the isolated
+                Privy Trader signs its own trades. Switch only for an onchain transaction sent from
+                this personal wallet.{' '}
                 <button
                   type="button"
                   className="linkish"

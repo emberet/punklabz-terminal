@@ -48,7 +48,7 @@ function CoreStatus({ detail }: { detail: Detail }) {
     { label: 'Trade load', value: freq },
   ];
   return (
-    <Panel title="CORE STATUS" sub="live diagnostics from real machine telemetry" noPad>
+    <Panel title="PAPER CORE STATUS" sub="arena diagnostics from simulated capital and real market data" noPad>
       <div className="panel-body">
         {rows.map((r) => (
           <div key={r.label} className="health-row">
@@ -84,6 +84,7 @@ export function BotDetail() {
   if (err) return <div className="red">{err}</div>;
   if (!detail) return <div className="dim">loading…</div>;
   const { bot } = detail;
+  const live = bot.liveCapital;
   const isOwner = user && (user.isAdmin || bot.ownerName === user.displayName);
   const totalPnl = bot.equityUsd - bot.initialBalanceUsd;
   const totalPnlPct = (totalPnl / bot.initialBalanceUsd) * 100;
@@ -98,7 +99,9 @@ export function BotDetail() {
           <h1 className="page-title row" style={{ gap: 12 }}>
             <span className="bot-avatar" style={{ fontSize: 26 }} aria-hidden="true">{machineAvatar(bot.id, bot.name)}</span>
             {bot.name}
-            <span className={`chip chip-${bot.status}`}>● {bot.status}</span>
+            <span className={`chip ${live ? live.halted ? 'chip-stopped' : 'chip-running' : `chip-${bot.status}`}`}>
+              {live ? live.halted ? '■ LIVE HALTED' : live.autonomyEnabled ? '● AUTONOMOUS' : '● MANUAL CANARY' : `● ${bot.status}`}
+            </span>
             {bot.kind === 'house' && <span className="chip chip-house">house</span>}
           </h1>
           <div className="page-sub">
@@ -121,9 +124,49 @@ export function BotDetail() {
         )}
       </div>
 
+      {live && (
+        <div className={`banner ${live.reconciliationStatus === 'clean' ? 'ok' : 'bad'}`} style={{ marginBottom: 12 }}>
+          REAL CAPITAL // ROBINHOOD CHAIN {live.chainId} // {live.reconciliationStatus === 'clean' ? 'RECONCILED' : 'NOT RECONCILED'}
+          {' '}// Manager allocation is the agent limit; the personal Rainbow wallet does not sign these trades.
+        </div>
+      )}
+
       <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', marginBottom: 14 }}>
+        {live ? (
+          <>
+            <div className="stat-tile invert">
+              <div className="label">Live agent capital</div>
+              <div className="value">${fmtUsd(live.navUsd, 2)}</div>
+              <div className="dim" style={{ fontSize: 11 }}>reconciled assets · reference marked</div>
+            </div>
+            <div className="stat-tile">
+              <div className="label">Manager allocation</div>
+              <div className="value">${fmtUsd(live.allocatedUsd, 2)} USDG</div>
+            </div>
+            <div className="stat-tile">
+              <div className="label">Live USDG cash</div>
+              <div className="value">${fmtUsd(live.cashUsd, 2)}</div>
+            </div>
+            <div className="stat-tile">
+              <div className="label">Onchain exposure estimate</div>
+              <div className="value">${fmtUsd(live.exposureUsd, 2)}</div>
+              <div className="dim" style={{ fontSize: 11 }}>
+                {(live.holdings.WETH ?? 0).toFixed(15)} WETH
+              </div>
+            </div>
+            <div className={`stat-tile ${live.netPnlUsd > 0 ? 'pos' : live.netPnlUsd < 0 ? 'neg' : ''}`}>
+              <div className="label">Live net P&amp;L</div>
+              <div className="value">{live.netPnlUsd >= 0 ? '+' : '−'}${fmtUsd(Math.abs(live.netPnlUsd), 2)}</div>
+            </div>
+            <div className="stat-tile">
+              <div className="label">Confirmed live fills</div>
+              <div className="value">{live.fillCount}</div>
+            </div>
+          </>
+        ) : (
+          <>
         <div className="stat-tile">
-          <div className="label">Equity</div>
+          <div className="label">Paper equity</div>
           <div className="value">${fmtUsd(bot.equityUsd, 0)}</div>
         </div>
         <div className={`stat-tile ${totalPnl > 0 ? 'pos' : totalPnl < 0 ? 'neg' : ''}`}>
@@ -142,10 +185,19 @@ export function BotDetail() {
           <div className="value">{bot.tradeCount}</div>
         </div>
         <div className="stat-tile">
-          <div className="label">Cash</div>
+          <div className="label">Paper cash</div>
           <div className="value">${fmtUsd(bot.cashUsd, 0)}</div>
         </div>
+          </>
+        )}
       </div>
+
+      {live && (
+        <div className="panel-body" style={{ border: '1px solid var(--border)', marginBottom: 14 }}>
+          <span className="soft">PAPER ARENA BOOK</span>{' '}
+          <span className="dim">${fmtUsd(bot.equityUsd, 0)} simulated equity · ${fmtUsd(bot.initialBalanceUsd, 0)} simulated start · never live capital</span>
+        </div>
+      )}
 
       <CoreStatus detail={detail} />
 
@@ -165,13 +217,13 @@ export function BotDetail() {
         config={detail.config}
       />
 
-      <Panel title="Equity curve" noPad>
+      <Panel title="Paper equity curve" sub="simulated arena book; not the Trader wallet" noPad>
         <div style={{ padding: '12px 16px' }}>
           <Sparkline values={detail.metrics.map((m) => m.equityUsd)} height={90} />
         </div>
       </Panel>
 
-      <Panel title="Open positions" noPad>
+      <Panel title="Paper positions" sub="simulation only" noPad>
         <div className="table-scroll">
           <table>
             <thead>
@@ -205,7 +257,7 @@ export function BotDetail() {
         </div>
       </Panel>
 
-      <Panel title="Decision log" sub="every trade, with the machine's stated reason" noPad>
+      <Panel title="Paper decision log" sub="simulated trades; live execution is receipt-accounted separately" noPad>
         <div className="table-scroll">
           <table style={{ minWidth: 760 }}>
             <thead>

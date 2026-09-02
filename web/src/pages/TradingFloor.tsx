@@ -140,6 +140,7 @@ export function TradingFloor() {
           const tagline = HOUSE_TAGLINES[b.strategyType];
           const sells = Math.max(1, Math.round(b.tradeCount / 2));
           const winRate = b.tradeCount > 0 ? Math.round((b.winCount / sells) * 100) : 0;
+          const live = b.liveCapital;
           return (
             <Link key={b.id} to={`/bots/${b.id}`} style={{ color: 'inherit' }}>
               <div className="bot-card">
@@ -155,8 +156,13 @@ export function TradingFloor() {
                   <span className="when">24H</span>
                   <span className={`chip chip-${b.status}`} style={{ marginLeft: 10 }}>● {b.status}</span>
                 </div>
-                <div className="bot-equity-label">Equity</div>
-                <div className="bot-equity">${fmtUsd(b.equityUsd, 0)}</div>
+                <div className="bot-equity-label">{live ? 'Live agent capital' : 'Paper equity'}</div>
+                <div className="bot-equity">${fmtUsd(live ? live.navUsd : b.equityUsd, live ? 2 : 0)}</div>
+                {live && (
+                  <div className="dim" style={{ padding: '0 12px', fontSize: 10 }}>
+                    {live.allocatedUsd > 0 ? `${fmtUsd(live.allocatedUsd, 2)} USDG MANAGER ALLOCATION` : 'NO LIVE ALLOCATION'}
+                  </div>
+                )}
                 <div className="bot-spark">
                   <Sparkline values={sparks[b.id] ?? []} />
                 </div>

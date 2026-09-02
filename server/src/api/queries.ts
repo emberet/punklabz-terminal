@@ -2,6 +2,7 @@ import type { BotSummary, LeaderboardRow } from '@punklabz/shared';
 import type { DB } from '../db/db.js';
 import { computeEquity } from '../engine/accounting.js';
 import { fromMicro, toMicro } from '../money.js';
+import { liveBotCapital } from '../live/botCapital.js';
 
 export function botSummaries(db: DB, markOf: (s: string) => number | undefined): BotSummary[] {
   const rows = db
@@ -42,6 +43,7 @@ export function botSummaries(db: DB, markOf: (s: string) => number | undefined):
       winCount: eq.winCount,
       clonedFromBotId: r.cloned_from_bot_id,
       createdAt: r.created_at,
+      liveCapital: r.kind === 'house' ? liveBotCapital(db, r.id, markOf) ?? undefined : undefined,
     } satisfies BotSummary;
   });
 }

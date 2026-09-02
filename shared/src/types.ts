@@ -16,6 +16,24 @@ export type OrderType = 'market' | 'limit';
 export type BotKind = 'house' | 'quant';
 export type BotStatus = 'running' | 'stopped' | 'paused';
 
+export interface LiveBotCapitalView {
+  mode: 'canary' | 'live';
+  chainId: number;
+  settlementAsset: 'USDG';
+  allocatedUsd: number;
+  cashUsd: number;
+  exposureUsd: number;
+  navUsd: number;
+  netPnlUsd: number;
+  fillCount: number;
+  pendingCount: number;
+  holdings: Record<string, number>;
+  reconciliationStatus: string | null;
+  reconciledAt: number | null;
+  autonomyEnabled: boolean;
+  halted: boolean;
+}
+
 export interface BotSummary {
   id: number;
   name: string;
@@ -33,6 +51,8 @@ export interface BotSummary {
   winCount: number;
   clonedFromBotId: number | null;
   createdAt: number;
+  /** Reconciled real-money allocation. Paper account fields above remain arena-only. */
+  liveCapital?: LiveBotCapitalView;
 }
 
 export interface PositionView {
