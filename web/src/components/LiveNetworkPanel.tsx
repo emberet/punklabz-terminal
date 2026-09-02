@@ -267,6 +267,52 @@ export function LiveNetworkPanel() {
       setBusy(false);
     }
   };
+
+  const topUpReplacementTraderGas = async () => {
+    setBusy(true);
+    setNotice('');
+    let submittedHash: string | null = null;
+    try {
+      if (!managerAccount?.walletAddress || !traderAccount?.walletAddress) {
+        throw new Error('active Manager and replacement Trader accounts are not ready');
+      }
+      const managerWallet = privyWallets.find(
+        (wallet) => wallet.address.toLowerCase() === managerAccount.walletAddress!.toLowerCase(),
+      );
+      if (!managerWallet) {
+        throw new Error('Privy Manager wallet is not available in this session; sign in with the Manager owner identity');
+      }
+      await managerWallet.switchChain(4663);
+      const provider = await managerWallet.getEthereumProvider();
+      const amountWei = 5_000_000_000_000_000n;
+      const hash = await provider.request({
+        method: 'eth_sendTransaction',
+        params: [{
+          from: managerAccount.walletAddress,
+          to: traderAccount.walletAddress,
+          data: '0x',
+          value: `0x${amountWei.toString(16)}`,
+        }],
+      });
+      if (typeof hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(hash)) {
+        throw new Error('Privy did not return a valid Manager gas top-up transaction hash');
+      }
+      submittedHash = hash.toLowerCase();
+      try {
+        const imported = await api.post<{ inserted: number }>('/api/admin/live/funding/import', { txHash: submittedHash });
+        setNotice(`0.005 ETH gas submitted by Manager and imported after finality (${imported.inserted} ledger event${imported.inserted === 1 ? '' : 's'}).`);
+      } catch (error) {
+        setNotice(`Manager gas top-up submitted ${submittedHash.slice(0, 10)}…; receipt import is pending: ${String((error as Error)?.message ?? error)}`);
+      }
+      load();
+    } catch (error) {
+      setNotice(submittedHash
+        ? `Manager gas top-up submitted ${submittedHash.slice(0, 10)}…; operator import required: ${String((error as Error)?.message ?? error)}`
+        : String((error as Error)?.message ?? error));
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <>
       <Panel
@@ -454,9 +500,14 @@ export function LiveNetworkPanel() {
                 IMPORT FUNDING TX
               </button>
               {managerAccount?.walletAddress && traderAccount?.walletAddress && (
-                <button className="primary" disabled={busy} onClick={() => void fundReplacementTrader()}>
-                  SIGN EXACT 5 USDG FUNDING
-                </button>
+                <>
+                  <button className="primary" disabled={busy} onClick={() => void fundReplacementTrader()}>
+                    SIGN EXACT 5 USDG FUNDING
+                  </button>
+                  <button disabled={busy} onClick={() => void topUpReplacementTraderGas()}>
+                    SIGN EXACT 0.005 ETH GAS
+                  </button>
+                </>
               )}
               <span className="dim" style={{ fontSize: 10 }}>
                 Manager owner signs this one exact transfer; Trader authority begins only after receipt import and reconciliation. Canary/live opens only after recovery, reconciliation, and preflight. Composite score gate {status.limits?.confidenceThreshold ?? 90}/100; this is not a win probability.
