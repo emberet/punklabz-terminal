@@ -412,7 +412,7 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
     try {
       const [reported, localBlock, endpoints, gasBalance, fees] = await Promise.all([
         this.client.getChainId(),
-        this.client.getBlockNumber(),
+        this.client.getBlockNumber({ cacheTime: 0 }),
         (this.opts.probeImpl ?? probeEndpoints)(ROBINHOOD_MAINNET_CHAIN_ID),
         this.client.getBalance({ address: getAddress(signerAddress) as Address }),
         this.client.estimateFeesPerGas(),
@@ -460,7 +460,7 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
   private async verifySettler(address: string): Promise<{ ok: boolean; detail: string }> {
     try {
       const alleged = getAddress(address) as Address;
-      const blockNumber = await this.client.getBlockNumber();
+      const blockNumber = await this.client.getBlockNumber({ cacheTime: 0 });
       const [current, previous, code] = await Promise.all([
         this.client.readContract({
           address: ZEROX_DEPLOYER, abi: ZEROX_DEPLOYER_ABI, functionName: 'ownerOf', args: [2n], blockNumber,
@@ -496,7 +496,7 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
           note: `RPC reports chain ${reported}, expected ${this.chainId} — refusing to treat this as Robinhood Chain`,
         };
       }
-      const block = await this.client.getBlockNumber();
+      const block = await this.client.getBlockNumber({ cacheTime: 0 });
       const assets = await this.verifyCoreAssets();
       if (!assets.ok) {
         return {
@@ -1091,7 +1091,7 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
         return { state: 'unknown', filledQty: 0, detail: 'cannot decode receipt without pinned assets and signer' };
       }
 
-      const currentBlock = await this.client.getBlockNumber();
+      const currentBlock = await this.client.getBlockNumber({ cacheTime: 0 });
       const confirmations = Number(currentBlock - receipt.blockNumber + 1n);
       if (confirmations < 12) {
         this.opts.db?.prepare(
@@ -1213,7 +1213,7 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
     const [tx, receipt, head] = await Promise.all([
       this.client.getTransaction({ hash }),
       this.client.getTransactionReceipt({ hash }),
-      this.client.getBlockNumber(),
+      this.client.getBlockNumber({ cacheTime: 0 }),
     ]);
     if (receipt.status !== 'success') throw new Error('funding transaction reverted');
     const confirmations = Number(head - receipt.blockNumber + 1n);

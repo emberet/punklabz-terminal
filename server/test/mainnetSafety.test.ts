@@ -386,6 +386,29 @@ describe('bounded exit routing', () => {
 });
 
 describe('mainnet pre-sign gates', () => {
+  it('bypasses the viem polling cache for the execution RPC height', async () => {
+    const adapter = new ZeroXRobinhoodAdapter({
+      apiKey: 'test', signer: new FakeSigner(),
+      probeImpl: async () => [
+        { label: 'primary', url: 'redacted', ok: true, blockNumber: 104, chainIdReported: 4663, latencyMs: 1, error: null },
+        { label: 'public', url: 'redacted', ok: true, blockNumber: 104, chainIdReported: 4663, latencyMs: 1, error: null },
+      ],
+    });
+    let requestedCacheTime: number | undefined;
+    (adapter as any).client = {
+      async getChainId() { return 4663; },
+      async getBlockNumber(options?: { cacheTime?: number }) {
+        requestedCacheTime = options?.cacheTime;
+        return options?.cacheTime === 0 ? 104n : 100n;
+      },
+      async getBalance() { return 10_000_000_000_000_000n; },
+      async estimateFeesPerGas() { return { maxFeePerGas: 20_000_000n }; },
+    };
+
+    await expect((adapter as any).runtimeSafety(WALLET, 2500)).resolves.toBeNull();
+    expect(requestedCacheTime).toBe(0);
+  });
+
   it('refuses a runtime RPC that is more than three blocks behind', async () => {
     const adapter = new ZeroXRobinhoodAdapter({
       apiKey: 'test', signer: new FakeSigner(),
