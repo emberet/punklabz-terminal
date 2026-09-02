@@ -15,6 +15,15 @@ function credential(fileEnv: string, inlineEnv: string): string {
   return process.env[inlineEnv] ?? '';
 }
 
+export function validProductionAppOrigin(value: string): boolean {
+  try {
+    const origin = new URL(value);
+    return origin.protocol === 'https:' && origin.origin === value && origin.pathname === '/';
+  } catch {
+    return false;
+  }
+}
+
 export const config = {
   port: Number(process.env.PORT ?? 4700),
   sessionSecret: process.env.SESSION_SECRET ?? 'dev-secret-do-not-use-in-prod',
@@ -81,6 +90,9 @@ if (!config.isDev && !config.adminWallet) {
 }
 if (!config.isDev && (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32)) {
   throw new Error('SESSION_SECRET must be at least 32 characters in production');
+}
+if (!config.isDev && !validProductionAppOrigin(config.appOrigin)) {
+  throw new Error('APP_ORIGIN must be an exact HTTPS origin in production');
 }
 if (!config.isDev && process.env.CHAINALYSIS_API_KEY) {
   throw new Error('CHAINALYSIS_API_KEY is forbidden in production; use CHAINALYSIS_API_KEY_FILE');
