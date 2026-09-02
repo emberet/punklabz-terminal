@@ -66,7 +66,7 @@ import { auditUsdgPaymentReceipts } from './billing/usdgMembership.js';
 import { backfillLegacyRawLedger } from './live/rawAssetLedger.js';
 import { FullMarketAutonomy } from './live/fullMarketAutonomy.js';
 import { ROBINHOOD_VENUE } from './live/instruments.js';
-import { activeUniverse } from './robinhood/universe.js';
+import { activeUniverse, ensureCryptoCoreUniverse } from './robinhood/universe.js';
 import { pollUniverseReferences } from './robinhood/referencePoller.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -120,6 +120,17 @@ async function main() {
     logger: { level: 'info' },
     disableRequestLogging: !config.isDev,
   });
+  // Retire any earlier stock-token/full-market snapshot before the execution
+  // supervisor starts. If registry evidence is not fresh enough to build the
+  // canonical WETH/USDG snapshot, no universe remains active and execution
+  // stays halted.
+  seedCoreTokens(db);
+  try {
+    const snapshot = ensureCryptoCoreUniverse(db, 'system:crypto-core-boot');
+    server.log.info(`crypto universe: ${snapshot.assetCount} assets, ${snapshot.directedPairCount} directed routes`);
+  } catch (error) {
+    server.log.warn(`crypto universe activation deferred: ${String(error).slice(0, 180)}`);
+  }
   await server.register(cookie, { secret: config.sessionSecret });
   await server.register(rateLimit, { global: false });
   await server.register(fastifyRawBody, {
@@ -418,14 +429,17 @@ async function main() {
   // Ingest the official asset list, then verify a slice of it against the
   // chain each pass. Verification round-robins by staleness so a full sweep of
   // the current registry spreads across passes instead of hammering the RPC.
-  seedCoreTokens(db);
   const rawBackfilled = backfillLegacyRawLedger(db);
   if (rawBackfilled) server.log.info(`raw asset ledger: backfilled ${rawBackfilled} attested legacy entr${rawBackfilled === 1 ? 'y' : 'ies'}`);
   const refreshRh = async () => {
     try {
       const r = await refreshRegistry(db, { verifyLimit: 20 });
       if (r.error) server.log.warn(`asset registry refresh failed (keeping last snapshot): ${r.error}`);
-      else server.log.info(`asset registry: ${r.seen} seen, ${r.verified} verified, ${r.rejected} rejected`);
+      else {
+        server.log.info(`asset registry: ${r.seen} seen, ${r.verified} verified, ${r.rejected} rejected`);
+        const snapshot = ensureCryptoCoreUniverse(db, 'system:registry-refresh');
+        server.log.info(`crypto universe ready: ${snapshot.assetCount} assets, ${snapshot.directedPairCount} routes`);
+      }
       const ca = await refreshCorporateActions(db);
       if (ca.newlyBlocking.length) {
         server.log.warn(`corporate actions pausing: ${ca.newlyBlocking.join(', ')}`);

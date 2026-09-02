@@ -4,7 +4,7 @@ import { openTestDb } from '../src/db/db.js';
 import { marketSessionState } from '../src/robinhood/marketSession.js';
 import { pollUniverseReferences } from '../src/robinhood/referencePoller.js';
 import {
-  activateUniverseSnapshot, createUniverseSnapshot, universeAssets, universeHash,
+  activateUniverseSnapshot, createUniverseSnapshot, ensureCryptoCoreUniverse, universeAssets, universeHash,
 } from '../src/robinhood/universe.js';
 import { FullPairScanner, numberToRaw } from '../src/live/pairScanner.js';
 import { runTradingCouncil } from '../src/live/tradingCouncil.js';
@@ -102,6 +102,34 @@ describe('immutable verified universe', () => {
     expect(universeHash(assets)).toBe(universeHash([...assets].reverse()));
     expect((db.prepare(`SELECT active_universe_hash FROM live_config WHERE id=1`).get() as any).active_universe_hash)
       .toBe(snapshot.contentHash);
+  });
+
+  it('retires a legacy full-market snapshot and preserves canonical crypto on later boots', () => {
+    const db = openTestDb();
+    const crypto = seedUniverse(db);
+    db.prepare(`UPDATE rh_universe_snapshots SET state='retired' WHERE id=?`).run(crypto.id);
+    const run = db.prepare(`SELECT id FROM rh_registry_runs ORDER BY id DESC LIMIT 1`).get() as { id: number };
+    const legacy = Number(db.prepare(
+      `INSERT INTO rh_universe_snapshots
+       (chain_id,content_hash,asset_count,directed_pair_count,state,registry_run_id,created_by,created_at,activated_at)
+       VALUES (4663,'sha256:legacy-full-market',196,38220,'active',?,'test',?,?)`,
+    ).run(run.id, Date.now(), Date.now()).lastInsertRowid);
+    db.prepare(
+      `UPDATE live_config SET active_universe_hash='sha256:legacy-full-market',
+       halted=0,autonomy_enabled=1,full_market_autonomy=1 WHERE id=1`,
+    ).run();
+
+    const first = ensureCryptoCoreUniverse(db, 'test:boot');
+    expect(first.id).toBe(crypto.id);
+    expect(first.assetCount).toBe(2);
+    expect(first.directedPairCount).toBe(2);
+    expect(db.prepare(`SELECT state FROM rh_universe_snapshots WHERE id=?`).get(legacy))
+      .toMatchObject({ state: 'retired' });
+    expect(db.prepare(`SELECT halted,autonomy_enabled,full_market_autonomy FROM live_config WHERE id=1`).get())
+      .toEqual({ halted: 1, autonomy_enabled: 0, full_market_autonomy: 0 });
+
+    const second = ensureCryptoCoreUniverse(db, 'test:restart');
+    expect(second.id).toBe(first.id);
   });
 
   it('records WETH from the independent ETH mark with explicit provenance', async () => {

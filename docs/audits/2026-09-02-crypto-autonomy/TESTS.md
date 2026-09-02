@@ -7,7 +7,7 @@ checkout.
 
 - `npm ci`: passed
 - Targeted custody/delegation suite: 59 tests passed at its final targeted run
-- Complete server suite: 35 files, 486 tests passed
+- Complete server suite: 35 files, 487 tests passed
 - Production Alchemy token-balance probe: HTTP 400 with the legacy hexadecimal
   `maxCount`, HTTP 200 with the corrected integer `maxCount: 100`
 - Shared, server, and web production build: passed

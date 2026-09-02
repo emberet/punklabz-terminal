@@ -148,6 +148,29 @@ export function activeUniverse(db: DB): UniverseSnapshot | null {
   return row ? snapshotRow(row) : null;
 }
 
+export function isCryptoCoreUniverse(db: DB, snapshot: UniverseSnapshot): boolean {
+  const contracts = universeAssets(db, snapshot.id).map((asset) => asset.contractAddress.toLowerCase()).sort();
+  const expected = [USDG.address.toLowerCase(), WETH_ROBINHOOD.address.toLowerCase()].sort();
+  return contracts.length === expected.length && contracts.every((contract, index) => contract === expected[index]);
+}
+
+/** A crypto-only release must never inherit an older stock-token universe. */
+export function ensureCryptoCoreUniverse(db: DB, actor: string): UniverseSnapshot {
+  const current = activeUniverse(db);
+  if (current && isCryptoCoreUniverse(db, current)) return current;
+
+  db.transaction(() => {
+    db.prepare(`UPDATE rh_universe_snapshots SET state='retired' WHERE state='active'`).run();
+    db.prepare(
+      `UPDATE live_config SET active_universe_hash=NULL, full_market_autonomy=0,
+       autonomy_enabled=0, halted=1, halt_reason=?, updated_at=? WHERE id=1`,
+    ).run('non-crypto execution universe retired; canonical WETH/USDG activation required', Date.now());
+  })();
+
+  const snapshot = createUniverseSnapshot(db, actor);
+  return activateUniverseSnapshot(db, snapshot.id, actor);
+}
+
 export function universeAssets(db: DB, snapshotId: number): UniverseAsset[] {
   return (db.prepare(`SELECT * FROM rh_universe_assets WHERE snapshot_id=? ORDER BY symbol`).all(snapshotId) as any[])
     .map((r) => ({
