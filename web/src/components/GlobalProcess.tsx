@@ -4,6 +4,7 @@ import { wsClient } from '../lib/ws';
 import { Panel } from './Panel';
 import { NumberTicker } from './motion/NumberTicker';
 import { fmtTime } from '../lib/format';
+import type { BotSummary } from '@punklabz/shared';
 
 interface ProcessData {
   lastPass: { ts: number; durationMs: number; marketsObserved: number; scansPerformed: number } | null;
@@ -51,12 +52,27 @@ const STAGES: { key: keyof ProcessData['funnel']; label: string }[] = [
   { key: 'executed', label: 'EXECUTED' },
 ];
 
+const MODELS = [
+  { key: 'momentum', label: 'MOMENTUM' },
+  { key: 'mean_reversion', label: 'MEAN REV' },
+  { key: 'volatility', label: 'VOL EXPAND' },
+  { key: 'launch', label: 'LAUNCH' },
+  { key: 'herd', label: 'HERD' },
+  { key: 'cross_chain_momentum', label: 'CROSS-CHAIN' },
+] as const;
+
+const EDGE_W = 360;
+const EDGE_H = 132;
+const EDGE_PAD_X = 22;
+const EDGE_PAD_Y = 14;
+
 const pct = (bps: number) => `${bps >= 0 ? '+' : '−'}${(Math.abs(bps) / 100).toFixed(2)}%`;
 
 export function GlobalProcess() {
   const [data, setData] = useState<ProcessData | null>(null);
   const [opps, setOpps] = useState<Opportunity[]>([]);
   const [capital, setCapital] = useState<{ stageCapUsd: number; capitalStage: number; nav: { reserveUsd: number } } | null>(null);
+  const [capitalBots, setCapitalBots] = useState<BotSummary[]>([]);
   const [expanded, setExpanded] = useState<number | null>(null);
 
   const load = () => {
@@ -64,6 +80,7 @@ export function GlobalProcess() {
     void api.get<{ opportunities: Opportunity[] }>('/api/live/opportunities?limit=24')
       .then((r) => setOpps(r.opportunities)).catch(() => {});
     void api.get<any>('/api/live/status').then(setCapital).catch(() => {});
+    void api.get<{ bots: BotSummary[] }>('/api/bots').then((r) => setCapitalBots(r.bots)).catch(() => {});
   };
 
   useEffect(() => {
@@ -79,28 +96,86 @@ export function GlobalProcess() {
   if (!data) return null;
   const max = Math.max(1, data.funnel.marketsObserved);
   const quiet = data.funnel.signals === 0 && data.funnel.candidates > 0;
+  const activeAllocations = capitalBots
+    .filter((bot) => bot.kind === 'house' && (bot.liveCapital?.allocatedUsd ?? 0) > 0)
+    .sort((a, b) => (b.liveCapital?.allocatedUsd ?? 0) - (a.liveCapital?.allocatedUsd ?? 0));
+  const stageCap = capital?.stageCapUsd ?? 0;
+  const allocatedUsd = activeAllocations.reduce((sum, bot) => sum + (bot.liveCapital?.allocatedUsd ?? 0), 0);
+  const unallocatedUsd = stageCap > 0 ? Math.max(0, stageCap - allocatedUsd) : (capital?.nav.reserveUsd ?? 0);
+  const modelStats = MODELS.map((model) => {
+    const rows = opps.filter((opportunity) => opportunity.scanner === model.key);
+    const avgConfidence = rows.length
+      ? rows.reduce((sum, row) => sum + row.confidence, 0) / rows.length
+      : 0;
+    const avgEdge = rows.length
+      ? rows.reduce((sum, row) => sum + row.edge.netEdgeBps, 0) / rows.length
+      : 0;
+    return { ...model, count: rows.length, avgConfidence, avgEdge };
+  });
+  const maxModelCount = Math.max(1, ...modelStats.map((model) => model.count));
+  const edgeRange = Math.max(25, Math.min(400, ...opps.map((opportunity) => Math.abs(opportunity.edge.netEdgeBps))));
+  const edgeX = (confidence: number) => EDGE_PAD_X + (Math.max(0, Math.min(100, confidence)) / 100) * (EDGE_W - EDGE_PAD_X * 2);
+  const edgeY = (edgeBps: number) => {
+    const clipped = Math.max(-edgeRange, Math.min(edgeRange, edgeBps));
+    return EDGE_H / 2 - (clipped / edgeRange) * (EDGE_H / 2 - EDGE_PAD_Y);
+  };
 
   return (
     <>
       <Panel title="CAPITAL CORE" sub="extreme capital efficiency mode" noPad>
         <div className="panel-body capital-core">
-          <div>
-            <div className="dim" style={{ fontSize: 9.5, letterSpacing: 1.5 }}>DEPLOYABLE</div>
-            <div className="core-amount">${capital?.stageCapUsd.toFixed(2) ?? '0.00'}</div>
-            <div className="dim" style={{ fontSize: 10 }}>
-              stage {capital?.capitalStage ?? 0} · reserve ${capital?.nav.reserveUsd.toFixed(2) ?? '0.00'}
+          <div className="capital-core-summary">
+            <div>
+              <div className="dim" style={{ fontSize: 9.5, letterSpacing: 1.5 }}>CANARY CAP</div>
+              <div className="core-amount">${stageCap.toFixed(2)}</div>
+              <div className="dim" style={{ fontSize: 10 }}>
+                stage {capital?.capitalStage ?? 0} · unallocated ${unallocatedUsd.toFixed(2)}
+              </div>
+            </div>
+            <div className="capital-mission">
+              <div className="dim">MISSION</div>
+              <div className="phos" style={{ fontSize: 13 }}>DO NOT TRADE MORE.</div>
+              <div className="phos" style={{ fontSize: 13 }}>FIND BETTER TRADES.</div>
+            </div>
+            <div className="capital-core-stats">
+              <div className="soft">MARKETS <span className="phos">{data.universeSize.toLocaleString()}</span></div>
+              <div className="soft">SCANNERS <span className="phos">6</span></div>
+              <div className="soft">PASSES/HR <span className="phos">{data.passesLastHour}</span></div>
+              <div className="soft">PASS TIME <span className="phos">{data.avgPassMs}ms</span></div>
             </div>
           </div>
-          <div className="capital-mission">
-            <div className="dim">MISSION</div>
-            <div className="phos" style={{ fontSize: 13 }}>DO NOT TRADE MORE.</div>
-            <div className="phos" style={{ fontSize: 13 }}>FIND BETTER TRADES.</div>
-          </div>
-          <div style={{ fontSize: 11 }}>
-            <div className="soft">MARKETS <span className="phos">{data.universeSize.toLocaleString()}</span></div>
-            <div className="soft">SCANNERS <span className="phos">6</span></div>
-            <div className="soft">PASSES/HR <span className="phos">{data.passesLastHour}</span></div>
-            <div className="soft">PASS TIME <span className="phos">{data.avgPassMs}ms</span></div>
+          <div className="capital-model">
+            <div className="telemetry-head">
+              <span>MANAGER ALLOCATION MODEL</span>
+              <span className="dim">{activeAllocations.length} ACTIVE · ${allocatedUsd.toFixed(2)} BOUNDED</span>
+            </div>
+            <div className="capital-stack" aria-label="Manager allocation distribution">
+              {activeAllocations.map((bot, index) => (
+                <span
+                  key={bot.id}
+                  className={`capital-segment capital-segment-${index % 3}`}
+                  style={{ width: `${stageCap > 0 ? ((bot.liveCapital?.allocatedUsd ?? 0) / stageCap) * 100 : 0}%` }}
+                  title={`${bot.name}: $${(bot.liveCapital?.allocatedUsd ?? 0).toFixed(2)}`}
+                />
+              ))}
+              <span className="capital-segment reserve" style={{ width: `${stageCap > 0 ? (unallocatedUsd / stageCap) * 100 : 100}%` }} />
+            </div>
+            <div className="capital-model-rows">
+              {activeAllocations.map((bot, index) => (
+                <div className="capital-model-row" key={bot.id}>
+                  <span className={`capital-key capital-key-${index % 3}`} />
+                  <span className="capital-agent">{bot.name}</span>
+                  <span className={`capital-line capital-line-${index % 3}`}><span style={{ width: `${stageCap > 0 ? ((bot.liveCapital?.allocatedUsd ?? 0) / stageCap) * 100 : 0}%` }} /></span>
+                  <span className="capital-usd">${(bot.liveCapital?.allocatedUsd ?? 0).toFixed(2)}</span>
+                </div>
+              ))}
+              <div className="capital-model-row">
+                <span className="capital-key reserve" />
+                <span className="capital-agent">USDG RESERVE</span>
+                <span className="capital-line reserve"><span style={{ width: `${stageCap > 0 ? (unallocatedUsd / stageCap) * 100 : 0}%` }} /></span>
+                <span className="capital-usd">${unallocatedUsd.toFixed(2)}</span>
+              </div>
+            </div>
           </div>
         </div>
       </Panel>
@@ -117,36 +192,88 @@ export function GlobalProcess() {
           ) : undefined
         }
       >
-        <div className="panel-body">
-          {STAGES.map((s) => {
-            const value = data.funnel[s.key];
-            // log scale: the funnel spans thousands → single digits
-            const width = value > 0 ? Math.max(1.5, (Math.log10(value + 1) / Math.log10(max + 1)) * 100) : 0;
-            return (
-              <div key={s.key} className="funnel-row">
-                <span className="funnel-label">{s.label}</span>
-                <span className="funnel-value">
-                  <NumberTicker value={value} />
-                </span>
-                <span className="funnel-bar">
-                  <span style={{ width: `${width}%` }} />
-                </span>
-              </div>
-            );
-          })}
-          <div className="row" style={{ marginTop: 10, gap: 16, flexWrap: 'wrap', fontSize: 11 }}>
-            <span className="red">
-              REJECTED ON NET EDGE <b><NumberTicker value={data.funnel.rejectedOnEdge} /></b>
-            </span>
-            <span className="dim">{data.note}</span>
-          </div>
-          {quiet && (
-            <div className="soft" style={{ marginTop: 8, fontSize: 11, borderTop: '1px solid var(--border)', paddingTop: 8 }}>
-              NO QUALIFYING SETUPS. {data.funnel.candidates.toLocaleString()} candidates examined this hour;
-              none cleared their entry conditions. The machines are watching, not trading — this is the
-              system working, not the system broken.
+        <div className="panel-body process-grid">
+          <div className="process-funnel">
+            {STAGES.map((s) => {
+              const value = data.funnel[s.key];
+              // log scale: the funnel spans thousands to single digits
+              const width = value > 0 ? Math.max(1.5, (Math.log10(value + 1) / Math.log10(max + 1)) * 100) : 0;
+              return (
+                <div key={s.key} className="funnel-row">
+                  <span className="funnel-label">{s.label}</span>
+                  <span className="funnel-value">
+                    <NumberTicker value={value} />
+                  </span>
+                  <span className="funnel-bar">
+                    <span style={{ width: `${width}%` }} />
+                  </span>
+                </div>
+              );
+            })}
+            <div className="row" style={{ marginTop: 10, gap: 16, flexWrap: 'wrap', fontSize: 11 }}>
+              <span className="red">
+                REJECTED ON NET EDGE <b><NumberTicker value={data.funnel.rejectedOnEdge} /></b>
+              </span>
+              <span className="dim">{data.note}</span>
             </div>
-          )}
+            {quiet && (
+              <div className="soft process-quiet">
+                NO QUALIFYING SETUPS. {data.funnel.candidates.toLocaleString()} candidates examined this hour;
+                none cleared their entry conditions. The machines are watching, not trading.
+              </div>
+            )}
+          </div>
+          <div className="model-telemetry">
+            <div className="edge-field">
+              <div className="telemetry-head">
+                <span>EDGE FIELD</span>
+                <span className="dim">LATEST {opps.length}</span>
+              </div>
+              <svg viewBox={`0 0 ${EDGE_W} ${EDGE_H}`} role="img" aria-label="Opportunity confidence versus net edge">
+                <line x1={EDGE_PAD_X} y1={EDGE_H / 2} x2={EDGE_W - EDGE_PAD_X} y2={EDGE_H / 2} className="edge-zero" />
+                <line x1={edgeX(90)} y1={EDGE_PAD_Y} x2={edgeX(90)} y2={EDGE_H - EDGE_PAD_Y} className="edge-threshold" />
+                {[25, 50, 75].map((confidence) => (
+                  <line key={confidence} x1={edgeX(confidence)} y1={EDGE_PAD_Y} x2={edgeX(confidence)} y2={EDGE_H - EDGE_PAD_Y} className="edge-grid" />
+                ))}
+                {opps.map((opportunity) => (
+                  <circle
+                    key={opportunity.id}
+                    cx={edgeX(opportunity.confidence)}
+                    cy={edgeY(opportunity.edge.netEdgeBps)}
+                    r={opportunity.state === 'high_confidence' ? 3.8 : 2.7}
+                    className={opportunity.edge.netEdgeBps > 0 ? 'edge-point signal' : 'edge-point rejected'}
+                  >
+                    <title>{opportunity.scanner} · conf {opportunity.confidence} · net {pct(opportunity.edge.netEdgeBps)}</title>
+                  </circle>
+                ))}
+                <text x={EDGE_PAD_X} y={11} className="edge-axis-label">+{(edgeRange / 100).toFixed(2)}%</text>
+                <text x={EDGE_PAD_X} y={EDGE_H - 3} className="edge-axis-label">-{(edgeRange / 100).toFixed(2)}%</text>
+                <text x={edgeX(90) + 4} y={11} className="edge-axis-label threshold">90 SCORE</text>
+              </svg>
+              <div className="edge-field-foot">
+                <span>CONFIDENCE SCORE -&gt;</span>
+                <span><b className="phos">●</b> POSITIVE EDGE <b className="red">●</b> REJECTED</span>
+              </div>
+            </div>
+            <div className="model-array">
+              <div className="telemetry-head">
+                <span>MODEL ARRAY</span>
+                <span className="dim">RECENT LOAD</span>
+              </div>
+              {modelStats.map((model) => (
+                <div className="model-row" key={model.key}>
+                  <span className="model-name">{model.label}</span>
+                  <span className="model-load">
+                    <span className={model.avgEdge > 0 ? 'positive' : ''} style={{ width: `${(model.count / maxModelCount) * 100}%` }} />
+                  </span>
+                  <span className="model-count">{String(model.count).padStart(2, '0')}</span>
+                  <span className={model.avgEdge > 0 ? 'phos model-score' : 'red model-score'}>
+                    {model.count ? `${Math.round(model.avgConfidence)} / ${pct(model.avgEdge)}` : '-- / --'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </Panel>
 
