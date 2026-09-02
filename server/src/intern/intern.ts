@@ -214,6 +214,8 @@ export interface InternMediaAttachment {
   mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
 }
 
+export type InternMediaInput = InternMediaAttachment | InternMediaAttachment[];
+
 export type InternDraftGenerator = (systemPrompt: string) => Promise<InternDraftResult>;
 
 async function anthropicDraft(systemPrompt: string): Promise<InternDraftResult> {
@@ -244,7 +246,7 @@ export async function publishInternThread(
   hub: WsHub,
   x: XAdapter,
   drafts: string[],
-  media?: InternMediaAttachment,
+  media?: InternMediaInput,
 ): Promise<InternThreadResult> {
   const cfg = getInternConfig(db);
   if (cfg.mode !== 'live') throw new Error('Intern must be live before publishing a thread');
@@ -259,6 +261,8 @@ export async function publishInternThread(
   if (drafts.length < 2 || drafts.length > cfg.maxPostsPerDay) {
     throw new Error(`thread must contain between 2 and ${cfg.maxPostsPerDay} posts`);
   }
+  const mediaAttachments = media ? (Array.isArray(media) ? media : [media]) : [];
+  if (mediaAttachments.length > 4) throw new Error('X supports at most four images on the root post');
 
   let read: Awaited<ReturnType<XAdapter['read']>>;
   try {
@@ -353,17 +357,20 @@ export async function publishInternThread(
   }))();
 
   let rootMediaIds: string[] | undefined;
-  if (media) {
+  if (mediaAttachments.length) {
     try {
-      const uploaded = await x.uploadImage(media.bytes, media.mimeType);
-      rootMediaIds = [uploaded.mediaId];
-      appendAudit(db, 'intern', 'intern_media_uploaded', {
-        mediaId: uploaded.mediaId,
-        mimeType: media.mimeType,
-        bytes: media.bytes.byteLength,
-        sha256: createHash('sha256').update(media.bytes).digest('hex'),
-        rootPostId: rowIds[0],
-      });
+      rootMediaIds = [];
+      for (const attachment of mediaAttachments) {
+        const uploaded = await x.uploadImage(attachment.bytes, attachment.mimeType);
+        rootMediaIds.push(uploaded.mediaId);
+        appendAudit(db, 'intern', 'intern_media_uploaded', {
+          mediaId: uploaded.mediaId,
+          mimeType: attachment.mimeType,
+          bytes: attachment.bytes.byteLength,
+          sha256: createHash('sha256').update(attachment.bytes).digest('hex'),
+          rootPostId: rowIds[0],
+        });
+      }
     } catch (error) {
       const placeholders = rowIds.map(() => '?').join(',');
       db.prepare(

@@ -298,18 +298,30 @@ describe('operator introduction threads', () => {
     expect(quotaState(db).postsUsed).toBe(3);
   });
 
-  it('uploads an image and attaches it only to the root post', async () => {
+  it('uploads images and attaches them only to the root post', async () => {
     const { adapter, recording } = apiRecording();
-    await publishInternThread(db, hub, adapter, thread.slice(0, 2), {
-      bytes: new Uint8Array([137, 80, 78, 71]),
-      mimeType: 'image/png',
-    });
+    await publishInternThread(db, hub, adapter, thread.slice(0, 2), [
+      { bytes: new Uint8Array([137, 80, 78, 71]), mimeType: 'image/png' },
+      { bytes: new Uint8Array([255, 216, 255, 217]), mimeType: 'image/jpeg' },
+    ]);
 
     expect(recording.uploaded).toEqual([
       { bytes: 4, mimeType: 'image/png', mediaId: 'rec_media_1' },
+      { bytes: 4, mimeType: 'image/jpeg', mediaId: 'rec_media_2' },
     ]);
-    expect(recording.published[0].mediaIds).toEqual(['rec_media_1']);
+    expect(recording.published[0].mediaIds).toEqual(['rec_media_1', 'rec_media_2']);
     expect(recording.published[1].mediaIds).toBeUndefined();
+  });
+
+  it('refuses more than four root images before reading X', async () => {
+    const { adapter, recording } = apiRecording();
+    await expect(publishInternThread(db, hub, adapter, thread.slice(0, 2), Array.from({ length: 5 }, () => ({
+      bytes: new Uint8Array([137, 80, 78, 71]),
+      mimeType: 'image/png' as const,
+    })))).rejects.toThrow(/at most four images/);
+
+    expect(recording.uploaded).toHaveLength(0);
+    expect(recording.published).toHaveLength(0);
   });
 
   it('screens the entire thread before anything reaches X', async () => {
