@@ -73,6 +73,14 @@ export function App() {
             ) : (
               <NavLink to="/login">[ CONNECT ]</NavLink>
             )}
+            <a
+              className="social-link"
+              href="https://x.com/PunkLabz"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              X.COM/PUNKLABZ
+            </a>
             <div style={{ marginTop: 6 }}>paper credits · mainnet status shown explicitly</div>
           </div>
         </nav>
