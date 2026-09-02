@@ -18,7 +18,6 @@ import { Signals } from './pages/Signals';
 import { Forum } from './pages/Forum';
 import { Feed } from './pages/Feed';
 import { Profile } from './pages/Profile';
-import { Delegation } from './pages/Delegation';
 import { Intern } from './pages/Intern';
 import { Billing } from './pages/Billing';
 import { PrivyProvider } from '@privy-io/react-auth';
@@ -40,7 +39,7 @@ const router = createBrowserRouter([
       { path: 'control-room', element: <Manager /> },
       { path: 'signals', element: <Signals /> },
       { path: 'forum', element: <Forum /> },
-      { path: 'delegation', element: <Delegation /> },
+      { path: 'delegation', element: <Navigate to="/" replace /> },
       { path: 'intern', element: <Intern /> },
       { path: 'billing', element: <Billing /> },
       { path: 'learn', element: <Learn /> },
