@@ -12,7 +12,7 @@ import {
   activateGrant, createGrant, expireDueGrants, grantView, listGrants, revokeGrant, setGrantPaused,
 } from '../../live/delegation/grants.js';
 import { buildDelegationProvider } from '../../live/delegation/provider.js';
-import { runDelegationPreflight } from '../../live/preflight.js';
+import { runDelegationPreflight, type PreflightResult } from '../../live/preflight.js';
 import { config } from '../../config.js';
 import { subscriptionAccess } from '../../billing/subscriptions.js';
 import { screenWallet } from '../../compliance/chainalysis.js';
@@ -22,6 +22,32 @@ import { reconcileAccount } from '../../live/reconciler.js';
 import { ROBINHOOD_VENUE } from '../../live/instruments.js';
 
 const provider = buildDelegationProvider();
+
+export function memberDelegationPreflight(result: PreflightResult): PreflightResult {
+  const checks = result.checks.map((check) => {
+    if (check.name === 'delegation_provider') {
+      return {
+        ...check,
+        detail: check.pass
+          ? 'external wallet provider configured with enforced crypto-only controls'
+          : 'external wallet provider is unavailable; operator review required',
+      };
+    }
+    if (check.name === 'delegation_signer') {
+      return {
+        ...check,
+        detail: check.pass
+          ? 'external signer and app-side policy controls are enforced'
+          : 'external signer is unavailable; operator review required',
+      };
+    }
+    return check;
+  });
+  const blockers = checks
+    .filter((check) => check.blocking && !check.pass)
+    .map((check) => `${check.name}: ${check.detail}`);
+  return { ...result, checks, blockers };
+}
 
 function validSameOrigin(request: any): boolean {
   if (request.headers['x-requested-with'] !== 'punklabz') return false;
@@ -75,7 +101,15 @@ export function registerDelegationRoutes(server: FastifyInstance, app: AppContex
     return {
       ceiling,
       tiers: CEILING_TIERS,
-      provider: { kind: provider.kind, ...readiness },
+      provider: {
+        kind: provider.kind,
+        ready: readiness.ready,
+        detail: readiness.ready
+          ? 'external wallet provider configured with enforced crypto-only controls'
+          : provider.kind === 'none'
+            ? 'no delegation provider configured'
+            : 'external wallet provider is unavailable; operator review required',
+      },
       consentText: DELEGATION_CONSENT_TEXT,
       open: ceiling.tier > 0 && readiness.ready,
     };
@@ -85,7 +119,7 @@ export function registerDelegationRoutes(server: FastifyInstance, app: AppContex
     const user = requireUser(app, request, reply);
     if (!user) return;
     const result = await runDelegationPreflight({ db: app.db, signer: app.signer }, `user:${user.id}`);
-    return result;
+    return memberDelegationPreflight(result);
   });
 
   server.get('/api/delegation/grants', async (request, reply) => {

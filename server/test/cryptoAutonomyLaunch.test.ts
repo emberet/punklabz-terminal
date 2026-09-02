@@ -20,6 +20,7 @@ import { reconcileAccount } from '../src/live/reconciler.js';
 import { PrivyDelegationProvider } from '../src/live/delegation/provider.js';
 import { getLiveConfig } from '../src/live/riskEngine.js';
 import { networkStateLabel } from '../src/live/supervisor.js';
+import { memberDelegationPreflight } from '../src/api/routes/delegation.js';
 
 const WALLET = '0xabc0000000000000000000000000000000000001';
 const TREASURY = '0xabc0000000000000000000000000000000000002';
@@ -188,6 +189,28 @@ describe('crypto release deployment posture', () => {
       expected_signer_policy_hash: null, observed_signer_policy_hash: null,
       executable_scope: 'CRYPTO_CORE',
     });
+  });
+});
+
+describe('member execution-detail privacy', () => {
+  it('redacts signer, wallet, and policy identifiers from delegation preflight', () => {
+    const result = memberDelegationPreflight({
+      targetMode: 'shadow', passed: false,
+      checks: [{
+        name: 'delegation_signer', pass: true, blocking: true,
+        detail: 'wallet private-wallet-id verified as 0xabc; signer private-signer-id; policy private-policy-id',
+      }, {
+        name: 'delegation_provider', pass: false, blocking: true,
+        detail: 'provider user private-user-id',
+      }],
+      blockers: ['delegation_provider: provider user private-user-id'],
+    });
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toMatch(/private-|0xabc/);
+    expect(result.checks[0].detail).toBe('external signer and app-side policy controls are enforced');
+    expect(result.blockers).toEqual([
+      'delegation_provider: external wallet provider is unavailable; operator review required',
+    ]);
   });
 });
 
