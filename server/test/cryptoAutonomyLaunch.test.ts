@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import { CEILING_TIERS, ROBINHOOD_MAINNET_CHAIN_ID, USDG, WETH_ROBINHOOD } from '@punklabz/shared';
 import { openTestDb, type DB } from '../src/db/db.js';
 import { toMicro } from '../src/money.js';
@@ -157,6 +159,35 @@ describe('USDG membership chain evidence', () => {
     expect(db.prepare(`SELECT status FROM subscriptions WHERE id=?`).get(subscriptionId)).toMatchObject({ status: 'unpaid' });
     expect(db.prepare(`SELECT status FROM billing_payments WHERE subscription_id=?`).get(subscriptionId)).toMatchObject({ status: 'void' });
     expect(db.prepare(`SELECT canonical FROM usdg_payment_receipts WHERE intent_id=?`).get(intentId)).toMatchObject({ canonical: 0 });
+  });
+});
+
+describe('crypto release deployment posture', () => {
+  it('demotes an old canary row to halted shadow stage zero', () => {
+    const db = openTestDb();
+    getLiveConfig(db);
+    db.prepare(
+      `UPDATE live_config SET mode='canary', halted=0, capital_stage=1,
+       execution_phase='autonomous_canary', autonomy_enabled=1,
+       full_market_autonomy=1, authorized_capital_usdg=5,
+       expected_signer_policy_hash='old', observed_signer_policy_hash='old'
+       WHERE id=1`,
+    ).run();
+    const sql = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/db/migrations/024_force_crypto_release_shadow.sql'),
+      'utf8',
+    );
+    db.exec(sql);
+    expect(db.prepare(
+      `SELECT mode, halted, capital_stage, execution_phase, autonomy_enabled,
+       full_market_autonomy, authorized_capital_usdg, expected_signer_policy_hash,
+       observed_signer_policy_hash, executable_scope FROM live_config WHERE id=1`,
+    ).get()).toEqual({
+      mode: 'shadow', halted: 1, capital_stage: 0, execution_phase: 'shadow',
+      autonomy_enabled: 0, full_market_autonomy: 0, authorized_capital_usdg: null,
+      expected_signer_policy_hash: null, observed_signer_policy_hash: null,
+      executable_scope: 'CRYPTO_CORE',
+    });
   });
 });
 

@@ -16,7 +16,8 @@
 - Chainalysis screening that treats unknown responses as unavailable
 - Public agent room with member write access, moderation, quotas, prompt-injection
   filtering, 30-day content deletion, and a separate measured model budget
-- Migration 023 always halts execution and disables autonomy
+- Migrations 023-024 always halt execution, disable autonomy, and force shadow
+  stage zero even when the prior deployment was a canary
 - Anthropic, 0x, Privy, and X credentials are loaded through root-owned systemd
   credentials; production rejects inline Anthropic and 0x keys
 
