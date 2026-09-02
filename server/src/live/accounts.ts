@@ -110,6 +110,99 @@ export function separateManagerAndTrader(
   })();
 }
 
+/**
+ * Quarantine the old physical Trader wallet and bind a new one. The old
+ * account remains visible for recovery, but inactive accounts cannot be
+ * selected for execution or reconciliation. This operation never moves or
+ * invents custody; only a later confirmed chain transfer capitalizes the new
+ * account.
+ */
+export function rotateTraderAccount(
+  db: DB,
+  traderWalletAddress: string,
+  actor: string,
+): { manager: ExecutionAccount; trader: ExecutionAccount; recovery: ExecutionAccount | null } {
+  const next = traderWalletAddress.toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(next)) throw new Error('replacement Trader wallet is not a valid EVM address');
+
+  const existingManager = db.prepare(`SELECT * FROM execution_accounts WHERE name=?`)
+    .get(MANAGER_OPERATING_ACCOUNT) as any;
+  const existingTrader = db.prepare(`SELECT * FROM execution_accounts WHERE name=?`)
+    .get(ROBINHOOD_TRADER_ACCOUNT) as any;
+  if (!existingManager?.wallet_address) throw new Error('Manager operating account is not bound to a wallet');
+  if (!existingTrader?.wallet_address) throw new Error('Trader account is not bound to a wallet');
+  if (existingManager.wallet_address.toLowerCase() === next) {
+    throw new Error('Manager and replacement Trader wallets must be different addresses');
+  }
+
+  if (existingTrader.wallet_address.toLowerCase() === next) {
+    return {
+      manager: row(existingManager),
+      trader: row(existingTrader),
+      recovery: null,
+    };
+  }
+
+  const occupied = db.prepare(
+    `SELECT id, name FROM execution_accounts WHERE lower(wallet_address)=?`,
+  ).get(next) as { id: number; name: string } | undefined;
+  if (occupied) throw new Error(`replacement Trader wallet is already bound to ${occupied.name}`);
+
+  const cfg = db.prepare(`SELECT halted FROM live_config WHERE id=1`).get() as { halted: number } | undefined;
+  if (!cfg || cfg.halted !== 1) throw new Error('Trader rotation requires the network to be halted');
+
+  const unresolvedOrders = (db.prepare(
+    `SELECT COUNT(*) n FROM live_orders
+     WHERE execution_account_id=? AND state IN ('submitting','submitted','pending','open','partial','reconciling')`,
+  ).get(existingTrader.id) as { n: number }).n;
+  const unresolvedTx = (db.prepare(
+    `SELECT COUNT(*) n FROM execution_transactions
+     WHERE execution_account_id=? AND state IN ('prepared','signed','broadcast','unknown')`,
+  ).get(existingTrader.id) as { n: number }).n;
+  if (unresolvedOrders + unresolvedTx > 0) {
+    throw new Error('unresolved real orders or transactions block Trader rotation');
+  }
+
+  const recoveryName = `ROBINHOOD_TRADER_RECOVERY_${existingTrader.id}`;
+  if (db.prepare(`SELECT 1 FROM execution_accounts WHERE name=?`).get(recoveryName)) {
+    throw new Error(`Trader recovery account already exists: ${recoveryName}`);
+  }
+
+  return db.transaction(() => {
+    const now = Date.now();
+    db.prepare(
+      `UPDATE execution_accounts SET name=?, active=0 WHERE id=?`,
+    ).run(recoveryName, existingTrader.id);
+    db.prepare(
+      `UPDATE manager_capital_allocations SET active=0, updated_at=? WHERE execution_account_id=?`,
+    ).run(now, existingTrader.id);
+    const insert = db.prepare(
+      `INSERT INTO execution_accounts
+        (name, mode, venue, wallet_address, currency, funded_usd, active, created_at,
+         chain_id, settlement_asset, role)
+       VALUES (?, 'canary', 'evm:robinhood', ?, 'USDG', 0, 1, ?, 4663, 'USDG', 'trader')`,
+    ).run(ROBINHOOD_TRADER_ACCOUNT, next, now);
+    db.prepare(
+      `UPDATE live_config SET mode='shadow', halted=1, halt_reason=?, capital_stage=0,
+       execution_phase='shadow', autonomy_enabled=0, full_market_autonomy=0,
+       authorized_capital_usdg=NULL, authorized_capital_set_at=NULL,
+       expected_signer_policy_hash=NULL, observed_signer_policy_hash=NULL, updated_at=? WHERE id=1`,
+    ).run('fresh Trader wallet bound; exact USDG funding, reconciliation, and preflight required', now);
+    appendAudit(db, actor, 'custody_trader_rotated', {
+      managerAccountId: existingManager.id,
+      recoveryAccountId: existingTrader.id,
+      recoveryWalletAddress: existingTrader.wallet_address,
+      traderAccountId: Number(insert.lastInsertRowid),
+      traderWalletAddress: next,
+    });
+    return {
+      manager: getAccount(db, existingManager.id)!,
+      trader: getAccount(db, Number(insert.lastInsertRowid))!,
+      recovery: getAccount(db, existingTrader.id),
+    };
+  })();
+}
+
 export function listAccounts(db: DB): ExecutionAccount[] {
   return (db.prepare(`SELECT * FROM execution_accounts ORDER BY id`).all() as any[]).map(row);
 }

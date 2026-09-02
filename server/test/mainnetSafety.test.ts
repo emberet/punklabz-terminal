@@ -3,13 +3,13 @@ import { keccak256, type Hex } from 'viem';
 import { openTestDb, type DB } from '../src/db/db.js';
 import {
   accountForMode, bindTraderWallet, custodyHoldings, recordCustodyTransfer,
-  recordFunding, separateManagerAndTrader, setBotAllocation,
+  recordFunding, rotateTraderAccount, separateManagerAndTrader, setBotAllocation,
 } from '../src/live/accounts.js';
 import { TransactionCoordinator } from '../src/live/transactionCoordinator.js';
 import { settleConfirmedOrder } from '../src/live/settlement.js';
 import { reconcileAccount } from '../src/live/reconciler.js';
 import type { TradingSigner } from '../src/live/signing/signer.js';
-import { evaluateIntent, getLiveConfig } from '../src/live/riskEngine.js';
+import { evaluateIntent, getLiveConfig, haltNetwork } from '../src/live/riskEngine.js';
 import { runPreflight } from '../src/live/preflight.js';
 import {
   buildManagerFundingPolicy, buildManagerGasTopUpPolicy, buildPolicy, USDG_ADDRESS, WETH_ADDRESS,
@@ -48,6 +48,43 @@ describe('isolated Manager to Trader custody', () => {
     expect(custodyHoldings(db, accounts.manager.id).get('USDG')).toBe(5);
     expect(custodyHoldings(db, accounts.trader.id).get('USDG')).toBe(5);
     expect((db.prepare(`SELECT COUNT(*) n FROM custody_transfers`).get() as any).n).toBe(1);
+  });
+
+  it('quarantines the old Trader before binding a fresh execution wallet', () => {
+    const db = openTestDb();
+    const funded = bindTraderWallet(db, WALLET);
+    recordFunding(db, funded.id, [
+      { asset: 'USDG', qty: 5, txRef: `0x${'04'.repeat(32)}`, logIndex: 0 },
+    ], 'test');
+    separateManagerAndTrader(db, TARGET, 'test');
+    haltNetwork(db, 'test rotation', 'test');
+
+    const replacement = '0x3333333333333333333333333333333333333333';
+    const rotated = rotateTraderAccount(db, replacement, 'test');
+
+    expect(rotated.trader).toMatchObject({
+      name: 'ROBINHOOD_TRADER_01', walletAddress: replacement, active: true, currency: 'USDG', chainId: 4663,
+    });
+    expect(rotated.recovery).toMatchObject({
+      name: 'ROBINHOOD_TRADER_RECOVERY_4', walletAddress: TARGET, active: false,
+    });
+    expect(custodyHoldings(db, rotated.trader.id).get('USDG') ?? 0).toBe(0);
+    expect(custodyHoldings(db, rotated.recovery!.id).get('USDG') ?? 0).toBe(0);
+    expect(getLiveConfig(db)).toMatchObject({ mode: 'shadow', halted: true, capitalStage: 0, autonomyEnabled: false });
+
+    const replay = rotateTraderAccount(db, replacement, 'test');
+    expect(replay.trader.id).toBe(rotated.trader.id);
+    expect((db.prepare(`SELECT COUNT(*) n FROM execution_accounts WHERE name='ROBINHOOD_TRADER_01'`).get() as any).n).toBe(1);
+  });
+
+  it('refuses rotation while the old Trader has an unresolved real order', () => {
+    const db = openTestDb();
+    const funded = bindTraderWallet(db, WALLET);
+    const separated = separateManagerAndTrader(db, TARGET, 'test');
+    insertOrder(db, separated.trader.id, 'unresolved-before-rotation');
+    haltNetwork(db, 'test rotation', 'test');
+    expect(() => rotateTraderAccount(db, '0x3333333333333333333333333333333333333333', 'test'))
+      .toThrow(/unresolved real orders/);
   });
 
   it('builds a temporary Manager policy for only the exact seed transfers', () => {

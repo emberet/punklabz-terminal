@@ -11,7 +11,7 @@ import {
 } from 'viem';
 import { openDb } from '../db/db.js';
 import {
-  recordCustodyTransfer, separateManagerAndTrader,
+  recordCustodyTransfer, rotateTraderAccount, separateManagerAndTrader,
 } from '../live/accounts.js';
 import { haltNetwork } from '../live/riskEngine.js';
 import {
@@ -230,6 +230,122 @@ async function fund(stateFile: string, managerKeyFile: string): Promise<void> {
   }
 }
 
+/**
+ * Fund a replacement Trader with USDG only. ETH is deliberately a separate
+ * ceremony because it is gas reserve, not trading capital. The Manager policy
+ * is exact and temporary; the original Manager policies are restored before
+ * this command exits.
+ */
+async function fundUsdgOnly(stateFile: string, managerWalletId: string): Promise<void> {
+  const state = loadJson<ProvisionState>(stateFile);
+  state.transactions ??= {};
+  const rpc = requireEnv('RPC_ROBINHOOD_PRIMARY');
+  const client = createPublicClient({ chain: rhChainDef(4663), transport: http(rpc) });
+  if (await client.getChainId() !== 4663) throw new Error('primary RPC is not Robinhood Chain 4663');
+  const ctx: Ctx = {
+    appId: requireEnv('PRIVY_APP_ID'),
+    appSecret: requireSecret('PRIVY_APP_SECRET'),
+    walletId: managerWalletId,
+  };
+  const db = openDb(requireEnv('DB_PATH'));
+  haltNetwork(db, 'replacement Trader USDG funding in progress', 'operator-ceremony');
+  const accounts = rotateTraderAccount(db, state.walletAddress, 'operator-ceremony');
+  let priorPolicies: string[] | null = null;
+
+  try {
+    const fundingPolicy = await prepareManagerFundingPolicy(ctx, state.walletAddress, state.runId);
+    priorPolicies = fundingPolicy.previousPolicyIds;
+    if (fundingPolicy.walletAddress.toLowerCase() !== accounts.manager.walletAddress!.toLowerCase()) {
+      throw new Error('Privy Manager wallet and Manager account do not match');
+    }
+
+    let hash = state.transactions.usdg?.hash as Hex | undefined;
+    if (!hash) {
+      const [nonce, fees] = await Promise.all([
+        client.getTransactionCount({ address: getAddress(accounts.manager.walletAddress!), blockTag: 'pending' }),
+        client.estimateFeesPerGas(),
+      ]);
+      const priority = fees.maxPriorityFeePerGas ?? 1_000_000n;
+      const maxFee = fees.maxFeePerGas ?? priority * 2n;
+      const data = encodeFunctionData({
+        abi: ERC20_TRANSFER_ABI,
+        functionName: 'transfer',
+        args: [getAddress(state.walletAddress), 5_000_000n],
+      });
+      const raw = await signPrivyOperatorTransaction(ctx, {
+        to: USDG_ADDRESS,
+        value: 0n,
+        data,
+        nonce,
+        gas: 100_000n,
+        maxFeePerGas: maxFee,
+        maxPriorityFeePerGas: priority,
+        idempotencyKey: `${state.runId}-fund-usdg`,
+      });
+      hash = keccak256(raw as Hex);
+      state.transactions.usdg = { nonce, hash, signedPayload: raw };
+      writeJson(stateFile, state);
+      try {
+        const returned = await client.sendRawTransaction({ serializedTransaction: raw as Hex });
+        if (returned.toLowerCase() !== hash.toLowerCase()) throw new Error('RPC hash differs from signed hash');
+      } catch (error) {
+        const message = String(error).toLowerCase();
+        if (!message.includes('already known') && !message.includes('known transaction')) throw error;
+      }
+    } else if (state.transactions.usdg.signedPayload) {
+      try {
+        const returned = await client.sendRawTransaction({ serializedTransaction: state.transactions.usdg.signedPayload as Hex });
+        if (returned.toLowerCase() !== hash.toLowerCase()) throw new Error('RPC hash differs from signed hash');
+      } catch (error) {
+        const message = String(error).toLowerCase();
+        if (!message.includes('already known') && !message.includes('known transaction')) throw error;
+      }
+    }
+
+    const receipt = await client.waitForTransactionReceipt({ hash, confirmations: 12, timeout: 15 * 60_000 });
+    if (receipt.status !== 'success') throw new Error('USDG funding transaction reverted');
+    const block = await client.getBlockNumber();
+    const confirmations = Number(block - receipt.blockNumber + 1n);
+    if (confirmations < 12) throw new Error(`USDG funding has only ${confirmations} confirmations`);
+    const matching = receipt.logs.find((log) => {
+      if (log.address.toLowerCase() !== USDG_ADDRESS.toLowerCase()) return false;
+      try {
+        const decoded = decodeEventLog({ abi: TRANSFER_ABI, data: log.data, topics: log.topics });
+        return decoded.eventName === 'Transfer'
+          && decoded.args.from.toLowerCase() === accounts.manager.walletAddress!.toLowerCase()
+          && decoded.args.to.toLowerCase() === state.walletAddress.toLowerCase()
+          && decoded.args.value === 5_000_000n;
+      } catch { return false; }
+    });
+    if (!matching) throw new Error('USDG funding receipt does not contain the exact Manager -> replacement Trader transfer');
+    const gasEth = Number(receipt.gasUsed * receipt.effectiveGasPrice) / 1e18;
+    state.transactions.usdg = {
+      ...state.transactions.usdg,
+      signedPayload: undefined,
+      receipt: {
+        blockNumber: Number(receipt.blockNumber), blockHash: receipt.blockHash, gasEth,
+        logIndex: Number(matching.logIndex),
+      },
+    };
+    writeJson(stateFile, state);
+    recordCustodyTransfer(db, {
+      fromAccountId: accounts.manager.id, toAccountId: accounts.trader.id,
+      asset: 'USDG', qty: 5, txRef: hash, logIndex: Number(matching.logIndex),
+      gasEth, confirmations,
+    }, 'operator-ceremony');
+    console.log(JSON.stringify({
+      manager: accounts.manager.walletAddress,
+      trader: state.walletAddress,
+      usdgTx: hash,
+      confirmations,
+      gasEth,
+    }, null, 2));
+  } finally {
+    if (priorPolicies) await restoreManagerPolicies(ctx, priorPolicies);
+    db.close();
+  }
+}
+
 function readAuthorizationKey(file: string): string {
   const key = readFileSync(file === '-' ? 0 : file, 'utf8').trim();
   if (!key) throw new Error('Manager authorization key is empty');
@@ -384,6 +500,9 @@ async function main(): Promise<void> {
   if (command === 'fund' && args.length >= 2) {
     return fund(path.resolve(args[0]), path.resolve(args[1]));
   }
+  if (command === 'fund-usdg' && args.length >= 2) {
+    return fundUsdgOnly(path.resolve(args[0]), args[1]);
+  }
   if (command === 'top-up-gas' && args.length >= 5) {
     return topUpGas(
       path.resolve(args[0]),
@@ -394,7 +513,7 @@ async function main(): Promise<void> {
     );
   }
   throw new Error(
-    'usage: mainnetExperiment generate-keys <dir> | provision <public-keys.json> <state.json> <run-id> | fund <state.json> <manager-key-file> | top-up-gas <state.json> <manager-key-file|-> <manager-wallet-id> <trader-address> <eth-amount>',
+    'usage: mainnetExperiment generate-keys <dir> | provision <public-keys.json> <state.json> <run-id> | fund <state.json> <manager-key-file> | fund-usdg <state.json> <manager-wallet-id> | top-up-gas <state.json> <manager-key-file|-> <manager-wallet-id> <trader-address> <eth-amount>',
   );
 }
 
