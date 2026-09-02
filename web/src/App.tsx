@@ -75,11 +75,11 @@ export function App() {
             )}
             <a
               className="social-link"
-              href="https://x.com/PunkLabz"
+              href="https://x.com/PunkLabZRH"
               target="_blank"
               rel="noopener noreferrer"
             >
-              X.COM/PUNKLABZ
+              X.COM/PUNKLABZRH
             </a>
             <div style={{ marginTop: 6 }}>paper credits · mainnet status shown explicitly</div>
           </div>

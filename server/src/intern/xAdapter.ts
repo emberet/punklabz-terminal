@@ -53,6 +53,16 @@ export interface XAdapter {
 }
 
 const EMPTY_QUOTA: XQuota = { readsRemaining: null, postsRemaining: null, resetAt: null };
+export const DEFAULT_X_HANDLE = 'PunkLabZRH';
+
+export function configuredXHandle(): string {
+  const handle = (process.env.X_HANDLE ?? DEFAULT_X_HANDLE).replace(/^@/, '');
+  return /^[A-Za-z0-9_]{1,15}$/.test(handle) ? handle : DEFAULT_X_HANDLE;
+}
+
+export function xPostUrl(publishedId: string): string {
+  return `https://x.com/${configuredXHandle()}/status/${encodeURIComponent(publishedId)}`;
+}
 
 export class NullXAdapter implements XAdapter {
   readonly kind = 'none';
@@ -129,7 +139,7 @@ export function buildXAdapter(): XAdapter {
       appSecret: credential('X_APP_SECRET'),
       accessToken: credential('X_ACCESS_TOKEN'),
       accessSecret: credential('X_ACCESS_SECRET'),
-      expectedHandle: process.env.X_HANDLE ?? 'punklabz',
+      expectedHandle: configuredXHandle(),
       query: process.env.X_SEARCH_QUERY,
     });
   }

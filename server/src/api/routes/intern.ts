@@ -10,6 +10,7 @@ import {
   reconcileInternPublishing, runInternCycle, setInternMode,
 } from '../../intern/intern.js';
 import { appendAudit } from '../../audit/auditLog.js';
+import { xPostUrl } from '../../intern/xAdapter.js';
 
 function requireFreshAdmin(app: AppContext, request: any, reply: any) {
   const user = requireUser(app, request, reply);
@@ -106,7 +107,7 @@ export function registerInternRoutes(server: FastifyInstance, app: AppContext) {
         reviewApproved: p.review_approved === 1,
         publishState: p.publish_state,
         publishAttemptedAt: p.publish_attempted_at,
-        publishedUrl: p.published_id ? `https://x.com/PunkLabz/status/${p.published_id}` : null,
+        publishedUrl: p.published_id ? xPostUrl(p.published_id) : null,
       })),
     };
   });

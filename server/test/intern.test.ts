@@ -34,7 +34,7 @@ function apiRecording(posts: XPost[] = feed()) {
   const recording = new RecordingXAdapter(posts);
   const adapter: XAdapter = {
     kind: 'api',
-    isReady: () => Promise.resolve({ ready: true, detail: 'authenticated as @PunkLabz' }),
+    isReady: () => Promise.resolve({ ready: true, detail: 'authenticated as @PunkLabZRH' }),
     read: (max) => recording.read(max),
     publish: (text, inReplyTo) => recording.publish(text, inReplyTo),
   };

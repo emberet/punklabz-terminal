@@ -10,7 +10,7 @@ import { confidenceGate } from '../research/scoring.js';
 import { openPrediction } from '../research/predictions.js';
 import { screen } from './contentFilter.js';
 import { INTERN_VOICE } from './voice.js';
-import type { XAdapter, XPost } from './xAdapter.js';
+import { xPostUrl, type XAdapter, type XPost } from './xAdapter.js';
 
 // THE INTERN.
 //
@@ -357,7 +357,7 @@ export async function publishInternThread(
       threadPosition: index,
     });
 
-    published.push({ rowId, publishedId, url: `https://x.com/PunkLabz/status/${publishedId}` });
+    published.push({ rowId, publishedId, url: xPostUrl(publishedId) });
     hub.publish('intern', { event: 'published', id: publishedId });
     parentId = publishedId;
   }

@@ -1,8 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiXAdapter, oauthHeader, type XApiConfig } from '../src/intern/apiXAdapter.js';
-import { NullXAdapter, buildXAdapter } from '../src/intern/xAdapter.js';
+import { DEFAULT_X_HANDLE, NullXAdapter, buildXAdapter, configuredXHandle, xPostUrl } from '../src/intern/xAdapter.js';
 import { screen } from '../src/intern/contentFilter.js';
 import { INTERN_VOICE } from '../src/intern/voice.js';
+
+describe('the public X identity', () => {
+  it('uses the current account for identity checks and published links', () => {
+    const previous = process.env.X_HANDLE;
+    try {
+      process.env.X_HANDLE = '@PunkLabZRH';
+      expect(configuredXHandle()).toBe(DEFAULT_X_HANDLE);
+      expect(xPostUrl('123')).toBe('https://x.com/PunkLabZRH/status/123');
+    } finally {
+      if (previous === undefined) delete process.env.X_HANDLE;
+      else process.env.X_HANDLE = previous;
+    }
+  });
+});
 
 describe('the OAuth 1.0a signature', () => {
   // X's own worked example, from their developer documentation. A wrong
