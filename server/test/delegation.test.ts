@@ -27,7 +27,7 @@ const YEAR = 365 * 86_400_000;
 
 function seedUserAndBot(db: DB): { userId: number; botId: number } {
   const u = db
-    .prepare(`INSERT INTO users (email, display_name, created_at) VALUES ('a@b.c', 'Ember', ?)`)
+    .prepare(`INSERT INTO users (email, display_name, created_at) VALUES ('a@b.c', 'Operator', ?)`)
     .run(NOW);
   const b = db
     .prepare(

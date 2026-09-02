@@ -7,6 +7,9 @@ import { NumberTicker } from './motion/NumberTicker';
 type Prices = Record<string, { price: number; changePct24h: number }>;
 type Feeds = Record<string, { connected: boolean; stale: boolean }>;
 
+const CONTRACT_ADDRESS = '0x3d4fc26d757ee83ae012a159be7bde1ec3dc40cd';
+const CONTRACT_EXPLORER_URL = `https://robinhoodchain.blockscout.com/address/${CONTRACT_ADDRESS}`;
+
 interface LiveMini {
   mode: string;
   halted: boolean;
@@ -75,6 +78,16 @@ export function TopBar() {
   return (
     <div className="topbar">
       <span className="node">PUNKLABZ<span style={{ opacity: 0.5 }}>▮</span></span>
+      <a
+        className="contract-address"
+        href={CONTRACT_EXPLORER_URL}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={`PunkLabz contract address ${CONTRACT_ADDRESS}`}
+        title="View contract on Robinhood Chain Explorer"
+      >
+        <span>CA-</span> {CONTRACT_ADDRESS}
+      </a>
       <span className="stat dim">NODE 042</span>
       {['BTCUSDT', 'ETHUSDT', 'SOLUSDT'].map((sym) => {
         const p = prices[sym];

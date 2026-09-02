@@ -535,9 +535,9 @@ describe('external funding vs reconciliation', () => {
   });
 
   it('every funding record is audited and attributable', () => {
-    recordFunding(db, accountId, [{ asset: 'USDG', qty: 5, txRef: '0xabc', logIndex: 0 }], 'operator:ember');
+    recordFunding(db, accountId, [{ asset: 'USDG', qty: 5, txRef: '0xabc', logIndex: 0 }], 'operator:test-operator');
     const row = db.prepare(`SELECT * FROM execution_account_funding`).get() as any;
-    expect(row.actor).toBe('operator:ember');
+    expect(row.actor).toBe('operator:test-operator');
     expect(row.tx_ref).toBe('0xabc');
     expect(row.audit_hash).toBeTruthy();
     expect((db.prepare(`SELECT COUNT(*) n FROM audit_log WHERE action='account_funding'`).get() as any).n).toBe(1);

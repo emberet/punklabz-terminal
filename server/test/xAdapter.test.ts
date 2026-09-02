@@ -132,7 +132,7 @@ describe('buildXAdapter', () => {
   });
 });
 
-describe('the Ember voice stays inside the filter', () => {
+describe('the PunkLabz Intern voice stays inside the filter', () => {
   const knownSymbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'SPED'];
   const check = (draft: string, allowedNumbers: number[] = []) =>
     screen({ draft, allowedNumbers, knownSymbols, maxLength: 240 });
