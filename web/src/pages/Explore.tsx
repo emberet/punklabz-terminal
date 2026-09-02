@@ -55,7 +55,7 @@ export function Explore() {
               <tr>
                 <th>bot</th>
                 <th>creator</th>
-                <th className="num">equity</th>
+                <th className="num">live capital</th>
                 <th className="num">24h</th>
                 <th className="num">trades</th>
                 <th className="num">clones</th>
@@ -74,7 +74,10 @@ export function Explore() {
                 <tr key={b.id}>
                   <td><Link to={`/bots/${b.id}`}>{b.name}</Link></td>
                   <td className="soft">{b.ownerName}</td>
-                  <td className="num">${fmtUsd(b.equityUsd, 0)}</td>
+                  <td className="num">
+                    ${fmtUsd(b.liveCapital?.navUsd ?? 0, 2)}
+                    {!b.liveCapital && <div className="dim" style={{ fontSize: 9 }}>PAPER STRATEGY</div>}
+                  </td>
                   <td className="num">
                     <span className={`pill ${pillClass(b.pnlPct24h)}`}>
                       {fmtPct(b.pnlPct24h)} {arrow(b.pnlPct24h)}

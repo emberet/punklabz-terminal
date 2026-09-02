@@ -99,8 +99,10 @@ export function BotDetail() {
           <h1 className="page-title row" style={{ gap: 12 }}>
             <span className="bot-avatar" style={{ fontSize: 26 }} aria-hidden="true">{machineAvatar(bot.id, bot.name)}</span>
             {bot.name}
-            <span className={`chip ${live ? live.halted ? 'chip-stopped' : 'chip-running' : `chip-${bot.status}`}`}>
-              {live ? live.halted ? '■ LIVE HALTED' : live.autonomyEnabled ? '● AUTONOMOUS' : '● MANUAL CANARY' : `● ${bot.status}`}
+            <span className={`chip ${live ? live.halted ? 'chip-stopped' : 'chip-running' : bot.kind === 'quant' ? 'chip-paused' : `chip-${bot.status}`}`}>
+              {live
+                ? live.halted ? '■ LIVE HALTED' : live.autonomyEnabled ? '● AUTONOMOUS' : '● MANUAL CANARY'
+                : bot.kind === 'quant' ? `● PAPER ${bot.status}` : `● ${bot.status}`}
             </span>
             {bot.kind === 'house' && <span className="chip chip-house">house</span>}
           </h1>
@@ -128,6 +130,11 @@ export function BotDetail() {
         <div className={`banner ${live.reconciliationStatus === 'clean' ? 'ok' : 'bad'}`} style={{ marginBottom: 12 }}>
           REAL CAPITAL // ROBINHOOD CHAIN {live.chainId} // {live.reconciliationStatus === 'clean' ? 'RECONCILED' : 'NOT RECONCILED'}
           {' '}// Manager allocation is the agent limit; the personal Rainbow wallet does not sign these trades.
+        </div>
+      )}
+      {!live && bot.kind === 'quant' && (
+        <div className="banner" style={{ marginBottom: 12 }}>
+          PAPER-ONLY STRATEGY // NO LIVE WALLET // REAL TRADING CAPITAL $0.00
         </div>
       )}
 
@@ -161,6 +168,26 @@ export function BotDetail() {
             <div className="stat-tile">
               <div className="label">Confirmed live fills</div>
               <div className="value">{live.fillCount}</div>
+            </div>
+          </>
+        ) : bot.kind === 'quant' ? (
+          <>
+            <div className="stat-tile invert">
+              <div className="label">Live bot capital</div>
+              <div className="value">$0.00</div>
+              <div className="dim" style={{ fontSize: 11 }}>no isolated live wallet</div>
+            </div>
+            <div className="stat-tile">
+              <div className="label">Execution</div>
+              <div className="value">PAPER ONLY</div>
+            </div>
+            <div className={`stat-tile ${bot.pnlPct24h > 0 ? 'pos' : bot.pnlPct24h < 0 ? 'neg' : ''}`}>
+              <div className="label">Paper 24h</div>
+              <div className="value">{fmtPct(bot.pnlPct24h)}</div>
+            </div>
+            <div className="stat-tile">
+              <div className="label">Paper trades</div>
+              <div className="value">{bot.tradeCount}</div>
             </div>
           </>
         ) : (

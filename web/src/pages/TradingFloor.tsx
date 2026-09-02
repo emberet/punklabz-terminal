@@ -125,7 +125,9 @@ export function TradingFloor() {
                       {fmtPct(b.pnlPct24h)} {arrow(b.pnlPct24h)}
                     </span>
                   </td>
-                  <td className="num dim" style={{ width: 100 }}>${fmtUsd(b.equityUsd, 0)}</td>
+                  <td className="num dim" style={{ width: 100 }}>
+                    {b.kind === 'quant' ? 'PAPER ONLY' : `PAPER $${fmtUsd(b.equityUsd, 0)}`}
+                  </td>
                 </tr>
                 );
               })}
@@ -156,11 +158,16 @@ export function TradingFloor() {
                   <span className="when">24H</span>
                   <span className={`chip chip-${b.status}`} style={{ marginLeft: 10 }}>● {b.status}</span>
                 </div>
-                <div className="bot-equity-label">{live ? 'Live agent capital' : 'Paper equity'}</div>
-                <div className="bot-equity">${fmtUsd(live ? live.navUsd : b.equityUsd, live ? 2 : 0)}</div>
+                <div className="bot-equity-label">{live ? 'Live agent capital' : 'Live bot capital'}</div>
+                <div className="bot-equity">${fmtUsd(live?.navUsd ?? 0, 2)}</div>
                 {live && (
                   <div className="dim" style={{ padding: '0 12px', fontSize: 10 }}>
                     {live.allocatedUsd > 0 ? `${fmtUsd(live.allocatedUsd, 2)} USDG MANAGER ALLOCATION` : 'NO LIVE ALLOCATION'}
+                  </div>
+                )}
+                {!live && (
+                  <div className="dim" style={{ padding: '0 12px', fontSize: 10 }}>
+                    NO LIVE WALLET · PAPER ONLY
                   </div>
                 )}
                 <div className="bot-spark">

@@ -115,7 +115,7 @@ export function Profile() {
             <thead>
               <tr>
                 <th>bot</th>
-                <th className="num">equity</th>
+                <th className="num">live capital</th>
                 <th className="num">24h</th>
                 <th className="num">trades</th>
                 <th>status</th>
@@ -126,12 +126,19 @@ export function Profile() {
               {p.bots.map((b) => (
                 <tr key={b.id}>
                   <td><Link to={`/bots/${b.id}`}>{b.name}</Link></td>
-                  <td className="num">${fmtUsd(b.equityUsd, 0)}</td>
+                  <td className="num">
+                    ${fmtUsd(b.liveCapital?.navUsd ?? 0, 2)}
+                    {!b.liveCapital && <div className="dim" style={{ fontSize: 9 }}>PAPER ONLY</div>}
+                  </td>
                   <td className="num">
                     <span className={`pill ${pillClass(b.pnlPct24h)}`}>{fmtPct(b.pnlPct24h)} {arrow(b.pnlPct24h)}</span>
                   </td>
                   <td className="num">{b.tradeCount}</td>
-                  <td><span className={`chip chip-${b.status}`}>● {b.status}</span></td>
+                  <td>
+                    <span className={`chip ${b.liveCapital ? `chip-${b.status}` : 'chip-paused'}`}>
+                      ● {b.liveCapital ? b.status : `PAPER ${b.status}`}
+                    </span>
+                  </td>
                 </tr>
               ))}
             </tbody>
