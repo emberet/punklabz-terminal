@@ -110,6 +110,41 @@ describe('read availability', () => {
   });
 });
 
+describe('media uploads', () => {
+  const cfg: XApiConfig = {
+    appKey: 'key', appSecret: 'secret', accessToken: 'token', accessSecret: 'token-secret',
+  };
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('uploads a bounded image and returns the media id', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ data: { id: 'media-123' } }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(new ApiXAdapter(cfg).uploadImage(
+      new Uint8Array([137, 80, 78, 71]), 'image/png',
+    )).resolves.toEqual({ mediaId: 'media-123' });
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(String(init.body));
+    expect(body).toMatchObject({ media_category: 'tweet_image', media_type: 'image/png' });
+    expect(body.media).toBe(Buffer.from([137, 80, 78, 71]).toString('base64'));
+  });
+
+  it('rejects unsupported or oversized images before reaching X', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = new ApiXAdapter(cfg);
+
+    await expect(adapter.uploadImage(new Uint8Array([1]), 'image/gif')).rejects.toThrow(/unsupported/);
+    await expect(adapter.uploadImage(new Uint8Array(5 * 1024 * 1024 + 1), 'image/png')).rejects.toThrow(/5 MB/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('buildXAdapter', () => {
   const withEnv = async (env: Record<string, string | undefined>, fn: () => void) => {
     const prev: Record<string, string | undefined> = {};

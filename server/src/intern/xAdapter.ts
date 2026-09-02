@@ -32,6 +32,10 @@ export interface XPublishResult {
   quota: XQuota;
 }
 
+export interface XMediaUploadResult {
+  mediaId: string;
+}
+
 export type XReadAvailability = 'ok' | 'credits_depleted' | 'entitlement_missing' | 'rate_limited' | 'unavailable';
 
 export interface XReadResult {
@@ -45,11 +49,13 @@ export interface XAdapter {
   isReady(): Promise<{ ready: boolean; detail: string }>;
   /** read the timeline. `max` is a budget, not a target. */
   read(max: number): Promise<XReadResult>;
+  /** Upload one validated image for attachment to the next public post. */
+  uploadImage(bytes: Uint8Array, mimeType: string): Promise<XMediaUploadResult>;
   /**
    * Publish. The ONLY method that reaches the public account, and the only
    * caller permitted to invoke it is intern.ts, downstream of screen().
    */
-  publish(text: string, inReplyTo?: string): Promise<XPublishResult>;
+  publish(text: string, inReplyTo?: string, mediaIds?: string[]): Promise<XPublishResult>;
 }
 
 const EMPTY_QUOTA: XQuota = { readsRemaining: null, postsRemaining: null, resetAt: null };
@@ -80,6 +86,10 @@ export class NullXAdapter implements XAdapter {
     return { posts: [], quota: EMPTY_QUOTA, availability: 'unavailable' };
   }
 
+  async uploadImage(): Promise<XMediaUploadResult> {
+    throw new Error('NullXAdapter: refusing to upload — no X provider is configured');
+  }
+
   async publish(): Promise<XPublishResult> {
     throw new Error('NullXAdapter: refusing to publish — no X provider is configured');
   }
@@ -91,7 +101,8 @@ export class NullXAdapter implements XAdapter {
  */
 export class RecordingXAdapter implements XAdapter {
   readonly kind = 'recording';
-  readonly published: { text: string; inReplyTo?: string; at: number }[] = [];
+  readonly uploaded: { bytes: number; mimeType: string; mediaId: string }[] = [];
+  readonly published: { text: string; inReplyTo?: string; mediaIds?: string[]; at: number }[] = [];
   private feed: XPost[];
   private readsRemaining: number;
   private postsRemaining: number;
@@ -116,8 +127,14 @@ export class RecordingXAdapter implements XAdapter {
     };
   }
 
-  async publish(text: string, inReplyTo?: string): Promise<XPublishResult> {
-    this.published.push({ text, inReplyTo, at: Date.now() });
+  async uploadImage(bytes: Uint8Array, mimeType: string): Promise<XMediaUploadResult> {
+    const mediaId = `rec_media_${this.uploaded.length + 1}`;
+    this.uploaded.push({ bytes: bytes.byteLength, mimeType, mediaId });
+    return { mediaId };
+  }
+
+  async publish(text: string, inReplyTo?: string, mediaIds?: string[]): Promise<XPublishResult> {
+    this.published.push({ text, inReplyTo, mediaIds, at: Date.now() });
     this.postsRemaining -= 1;
     return {
       publishedId: `rec_${this.published.length}`,

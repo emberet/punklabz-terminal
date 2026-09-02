@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { createHash } from 'node:crypto';
 import { MAJOR_SYMBOLS } from '@punklabz/shared';
 import type { DB } from '../db/db.js';
 import type { WsHub } from '../realtime/wsHub.js';
@@ -208,6 +209,11 @@ export interface InternThreadResult {
   posts: InternThreadPost[];
 }
 
+export interface InternMediaAttachment {
+  bytes: Uint8Array;
+  mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
+}
+
 export type InternDraftGenerator = (systemPrompt: string) => Promise<InternDraftResult>;
 
 async function anthropicDraft(systemPrompt: string): Promise<InternDraftResult> {
@@ -238,6 +244,7 @@ export async function publishInternThread(
   hub: WsHub,
   x: XAdapter,
   drafts: string[],
+  media?: InternMediaAttachment,
 ): Promise<InternThreadResult> {
   const cfg = getInternConfig(db);
   if (cfg.mode !== 'live') throw new Error('Intern must be live before publishing a thread');
@@ -345,6 +352,29 @@ export async function publishInternThread(
     ).lastInsertRowid);
   }))();
 
+  let rootMediaIds: string[] | undefined;
+  if (media) {
+    try {
+      const uploaded = await x.uploadImage(media.bytes, media.mimeType);
+      rootMediaIds = [uploaded.mediaId];
+      appendAudit(db, 'intern', 'intern_media_uploaded', {
+        mediaId: uploaded.mediaId,
+        mimeType: media.mimeType,
+        bytes: media.bytes.byteLength,
+        sha256: createHash('sha256').update(media.bytes).digest('hex'),
+        rootPostId: rowIds[0],
+      });
+    } catch (error) {
+      const placeholders = rowIds.map(() => '?').join(',');
+      db.prepare(
+        `UPDATE intern_posts SET verdict='blocked', publish_state='failed', blocked_rules_json=?
+         WHERE id IN (${placeholders})`,
+      ).run(JSON.stringify(['media_upload_failed']), ...rowIds);
+      haltIntern(db, `media upload failed: ${String(error).slice(0, 100)}`);
+      throw new Error('media upload failed - Intern halted');
+    }
+  }
+
   const published: InternThreadPost[] = [];
   let parentId: string | undefined;
   for (let index = 0; index < rowIds.length; index += 1) {
@@ -355,6 +385,7 @@ export async function publishInternThread(
       inReplyTo: parentId,
       sourceCount: read.posts.length,
       threadPosition: index,
+      mediaIds: index === 0 ? rootMediaIds : undefined,
     });
 
     published.push({ rowId, publishedId, url: xPostUrl(publishedId) });
@@ -381,6 +412,7 @@ interface PublishCandidateInput {
   inReplyTo?: string;
   sourceCount: number;
   threadPosition?: number;
+  mediaIds?: string[];
 }
 
 /** The only function allowed to cross the public X write boundary. */
@@ -401,12 +433,13 @@ async function publishScreenedCandidate(
       sourceCount: input.sourceCount,
       threadPosition: input.threadPosition ?? null,
       inReplyTo: input.inReplyTo ?? null,
+      mediaIds: input.mediaIds ?? [],
     });
   })();
 
   let result: Awaited<ReturnType<XAdapter['publish']>>;
   try {
-    result = await x.publish(input.text, input.inReplyTo);
+    result = await x.publish(input.text, input.inReplyTo, input.mediaIds);
   } catch (error) {
     db.prepare(
       `UPDATE intern_posts

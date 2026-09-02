@@ -36,7 +36,8 @@ function apiRecording(posts: XPost[] = feed()) {
     kind: 'api',
     isReady: () => Promise.resolve({ ready: true, detail: 'authenticated as @PunkLabZRH' }),
     read: (max) => recording.read(max),
-    publish: (text, inReplyTo) => recording.publish(text, inReplyTo),
+    uploadImage: (bytes, mimeType) => recording.uploadImage(bytes, mimeType),
+    publish: (text, inReplyTo, mediaIds) => recording.publish(text, inReplyTo, mediaIds),
   };
   return { adapter, recording };
 }
@@ -295,6 +296,20 @@ describe('operator introduction threads', () => {
       { kind: 'reply', verdict: 'published', publish_state: 'published', published_id: 'rec_3', in_reply_to: 'rec_2' },
     ]);
     expect(quotaState(db).postsUsed).toBe(3);
+  });
+
+  it('uploads an image and attaches it only to the root post', async () => {
+    const { adapter, recording } = apiRecording();
+    await publishInternThread(db, hub, adapter, thread.slice(0, 2), {
+      bytes: new Uint8Array([137, 80, 78, 71]),
+      mimeType: 'image/png',
+    });
+
+    expect(recording.uploaded).toEqual([
+      { bytes: 4, mimeType: 'image/png', mediaId: 'rec_media_1' },
+    ]);
+    expect(recording.published[0].mediaIds).toEqual(['rec_media_1']);
+    expect(recording.published[1].mediaIds).toBeUndefined();
   });
 
   it('screens the entire thread before anything reaches X', async () => {

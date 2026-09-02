@@ -1,5 +1,7 @@
 import { createHmac, randomBytes } from 'node:crypto';
-import type { XAdapter, XPost, XPublishResult, XQuota, XReadResult } from './xAdapter.js';
+import type {
+  XAdapter, XMediaUploadResult, XPost, XPublishResult, XQuota, XReadResult,
+} from './xAdapter.js';
 
 // THE REAL X CLIENT.
 //
@@ -217,12 +219,36 @@ export class ApiXAdapter implements XAdapter {
     }
   }
 
-  async publish(text: string, inReplyTo?: string): Promise<XPublishResult> {
+  async uploadImage(bytes: Uint8Array, mimeType: string): Promise<XMediaUploadResult> {
+    if (this.missing().length) {
+      throw new Error('ApiXAdapter: refusing to upload — credentials incomplete');
+    }
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(mimeType)) {
+      throw new Error(`ApiXAdapter: unsupported image type ${mimeType}`);
+    }
+    if (bytes.byteLength === 0 || bytes.byteLength > 5 * 1024 * 1024) {
+      throw new Error('ApiXAdapter: image must be between 1 byte and 5 MB');
+    }
+
+    const { json } = await this.call('POST', '/2/media/upload', {
+      body: {
+        media: Buffer.from(bytes).toString('base64'),
+        media_category: 'tweet_image',
+        media_type: mimeType,
+      },
+    });
+    const mediaId = json?.data?.id ?? json?.media_id_string;
+    if (!mediaId) throw new Error('X accepted the image but returned no media id');
+    return { mediaId: String(mediaId) };
+  }
+
+  async publish(text: string, inReplyTo?: string, mediaIds?: string[]): Promise<XPublishResult> {
     if (this.missing().length) {
       throw new Error('ApiXAdapter: refusing to publish — credentials incomplete');
     }
     const body: Record<string, unknown> = { text };
     if (inReplyTo) body.reply = { in_reply_to_tweet_id: inReplyTo };
+    if (mediaIds?.length) body.media = { media_ids: mediaIds };
 
     const { json, headers } = await this.call('POST', '/2/tweets', { body });
     const publishedId = json?.data?.id;
