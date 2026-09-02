@@ -146,7 +146,7 @@ export function effectiveCaps(
       dailyUsd: clamp('dailyUsd', ceiling.dailyUsd),
       cumulativeUsd: clamp('cumulativeUsd', ceiling.cumulativeUsd),
       maxOpenNotionalUsd: clamp('maxOpenNotionalUsd', ceiling.cumulativeUsd),
-      maxSlippageBps: Math.min(requested.maxSlippageBps, 200),
+      maxSlippageBps: clamp('maxSlippageBps', 35),
     },
     clampedFields,
   };

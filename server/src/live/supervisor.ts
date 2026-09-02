@@ -18,6 +18,18 @@ import type { CanaryExperimentCoordinator } from './canaryExperiment.js';
 import { signerPolicyFingerprint } from './signing/signer.js';
 import { fullMarketReadiness } from './fullMarketController.js';
 
+export function networkStateLabel(state: {
+  mode: string;
+  halted: boolean;
+  autonomyEnabled: boolean;
+  phase: string;
+}): string {
+  if (state.halted) return 'NETWORK HALTED - OPERATOR REQUIRED';
+  const autonomous = (state.mode === 'canary' || state.mode === 'live')
+    && state.autonomyEnabled && state.phase === 'autonomous_canary';
+  return autonomous ? 'AUTONOMOUS CANARY ONLINE' : 'EXECUTION STANDBY - NOT AUTONOMOUS';
+}
+
 // AUTONOMOUS SUPERVISOR.
 //
 // systemd restarts the process. This supervisor decides whether the process is
@@ -183,11 +195,13 @@ export class AutonomousSupervisor {
     }
 
     const after = getLiveConfig(this.db);
-    lines.push(pad('RISK ENGINE', 'ARMED'));
+    const autonomous = (after.mode === 'canary' || after.mode === 'live')
+      && after.autonomyEnabled && after.phase === 'autonomous_canary';
+    lines.push(pad('RISK ENGINE', after.mode === 'simulation' ? 'SIMULATION' : 'ACTIVE'));
     lines.push(pad('KILL SWITCH', after.halted ? 'ENGAGED' : 'READY'));
     lines.push(pad('MODE', after.mode.toUpperCase()));
     lines.push(pad('CAPITAL STAGE', `$${stageCapUsd(after.capitalStage)}`));
-    lines.push(after.halted ? 'NETWORK HALTED — OPERATOR REQUIRED' : 'AUTONOMOUS NETWORK ONLINE');
+    lines.push(networkStateLabel(after));
 
     for (const line of lines) console.log(line);
 

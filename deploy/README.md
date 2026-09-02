@@ -33,6 +33,7 @@ PAYOUTS_ENABLED=false
 LLM_BUDGET_USD=40
 INTERN_LLM_BUDGET_USD=50
 TRADING_COUNCIL_LLM_BUDGET_USD=50
+AGENT_CHAT_LLM_BUDGET_USD=100
 SIGNER_PROVIDER=privy
 PRIVY_APP_ID=<privy app id>
 PRIVY_WALLET_ID=<dedicated trader wallet id>
@@ -43,16 +44,21 @@ SIGNER_ALLOWED_TARGETS=0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168,0x0Bd7D308f8E1
 SIGNER_MAX_NATIVE_ETH=0
 ZEROX_API_KEY=<0x key>
 ZEROX_SUSTAINED_RPS=0
-ROBINHOOD_TOKEN_INDEXER_URL=https://robinhoodchain.blockscout.com/api/v2
 FULL_MARKET_SCANNER_ENABLED=false
 RPC_ROBINHOOD_PRIMARY=<chain 4663 private RPC>
 RPC_ROBINHOOD_SECONDARY=<independent chain 4663 RPC>
 OPERATOR_ALERT_WEBHOOK_URL=<private incident webhook>
 ROBINHOOD_TRACE_API_URL=https://robinscan.io/api
-# Keep billing disabled for the first deploy. See "Lab membership activation".
+# Keep billing disabled for the first deploy. See "USDG membership activation".
 BILLING_PROVIDER=none
 BILLING_ENFORCED=false
 APP_ORIGIN=https://punklabz.app
+VITE_PRIVY_APP_ID=<public Privy app id; embedded into the web build>
+DELEGATION_PROVIDER=none
+# BILLING_TREASURY_ADDRESS=<explicit public treasury address>
+# PRIVY_USER_BOT_SIGNER_ID=<reviewed user-bot signer quorum id>
+# PRIVY_USER_BOT_POLICY_ID=<reviewed crypto-only user-bot policy id>
+# CHAINALYSIS_API_URL=<Chainalysis KYT API base URL>
 EOF
 chown punklabz:punklabz /opt/punklabz/.env && chmod 600 /opt/punklabz/.env
 ```
@@ -66,6 +72,18 @@ install -m 600 /path/to/privy-authorization-key /etc/punklabz/privy-authorizatio
 install -m 600 /path/to/privy-app-secret /etc/punklabz/privy-app-secret
 ```
 
+Before public live-bot provisioning, install the Chainalysis key as a third
+root-owned credential and add a systemd drop-in. Do this only after the file
+exists; a missing `LoadCredential` source correctly prevents startup:
+
+```bash
+install -m 600 /path/to/chainalysis-api-key /etc/punklabz/chainalysis-api-key
+systemctl edit punklabz
+# [Service]
+# LoadCredential=chainalysis_api_key:/etc/punklabz/chainalysis-api-key
+# Environment=CHAINALYSIS_API_KEY_FILE=%d/chainalysis_api_key
+```
+
 For the Intern, install `x-app-key`, `x-app-secret`, `x-access-token`, and
 `x-access-secret` in the same directory and set `X_PROVIDER=api` plus the exact
 `X_HANDLE` in `.env`. Keep zero-length credential placeholders while the
@@ -74,41 +92,28 @@ provider is disabled so the unit remains installable without X access.
 **Day-one check:** `curl -s https://api.binance.com/api/v3/ping` from the box.
 If it returns HTTP 451 (geoblocked range), set `FEED_MODE=coinbase`.
 
-## Lab membership activation
+## USDG membership activation
 
-Create one active recurring Stripe Price for exactly USD 20 every month. Add a
-Stripe webhook endpoint at `https://punklabz.app/api/billing/webhooks/stripe`
-for these events:
+Set `BILLING_PROVIDER=usdg`, the exact public `BILLING_TREASURY_ADDRESS`, and
+leave `BILLING_ENFORCED=false`. A membership intent accepts exactly 20,000,000
+raw units of canonical USDG from a cryptographically linked wallet to that
+treasury on chain 4663. Access begins only after 12 confirmations and is
+extended 30 days from the later of confirmation or the current paid expiry.
 
-```text
-checkout.session.completed
-customer.subscription.created
-customer.subscription.updated
-customer.subscription.deleted
-customer.subscription.paused
-customer.subscription.resumed
-invoice.paid
-invoice.payment_failed
-invoice.voided
-charge.refunded
-```
+Run a real operator smoke test before enforcing access:
 
-Install `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
-`STRIPE_PRICE_LAB_MONTHLY`, `RESEND_API_KEY`, and `BILLING_EMAIL_FROM` in the
-root-owned production environment. Then deploy in two passes:
+1. Create an intent, transfer exactly 20 USDG, and submit the transaction hash.
+2. Verify sender, recipient, contract, amount, block hash, log index, 12
+   confirmations, unique receipt, subscription, and payment journal.
+3. Renew early and confirm the new period extends the existing expiry.
+4. Exercise the canonical-block audit against a disposable database copy.
+5. Configure `RESEND_API_KEY` and a verified `BILLING_EMAIL_FROM`, then confirm
+   the five-day reminder is sent once.
+6. Only then set `BILLING_ENFORCED=true` and test paid, expired, and 48-hour
+   read/chat grace behavior.
 
-1. Set `BILLING_PROVIDER=stripe` and leave `BILLING_ENFORCED=false`. Complete a
-   real low-risk operator Checkout, verify the webhook journal, subscription,
-   invoice record, portal, and reminder outbox, then cancel the subscription and
-   refund it in Stripe.
-2. Back up the database, confirm every intended operator has an entitlement,
-   set `BILLING_ENFORCED=true`, deploy, and smoke-test synthesis, backtest and
-   deploy with both subscribed and unsubscribed accounts.
-
-The service refuses partial Stripe configuration and verifies the configured
-Price is active, recurring monthly, USD-denominated, and exactly 2000 cents
-before creating Checkout. Do not enable creator cash payouts with this rail;
-Black Market clone transfers remain demo credits.
+There is no automatic renewal or treasury signer. Paper credits, simulated
+returns, creator credits, and Stripe return URLs cannot create membership.
 
 ## 3. systemd (once)
 
@@ -137,7 +142,7 @@ Never rsyncs `data/` or `.env`. The remote build compiles shared+server+web and 
 Deploys refuse a dirty checkout, use `npm ci`, stamp the full git SHA and artifact checksum,
 back up SQLite, and apply migrations to a disposable backup copy before restarting production.
 
-## Mainnet arming
+## Crypto-only mainnet arming
 
 Migrations `016_mainnet_safety.sql` and `017_mainnet_experiment.sql` return any
 old real-money state to halted shadow at stage `$0`. The immediate experiment
@@ -148,38 +153,32 @@ then uses the wallet-authenticated Control Room to:
 3. Transfer exactly `5 USDG` and `0.005 ETH`, wait for 12 confirmations, and post both custody sides idempotently.
 4. Reconcile Manager and Trader balances, then arm `canary` stage 1 by typing `ARM ROBINHOOD 4663 $5`.
 5. Run the durable `$0.50` round-trip probe. Its sell quantity comes from the confirmed buy receipt and it must leave zero WETH after reconciliation.
-6. Enable autonomous canary only after a fresh safety gate; Manager allocations are `0.75 USDG` each for the three approved house bots.
+6. Enable autonomous canary only after a fresh safety gate. The deterministic
+   Manager retains 30% USDG and may increase any bot by at most 10% of
+   authorized capital per six-hour cycle.
 7. Wait for 10 reconciled autonomous fills at each later stage before promotion.
 
 Do not switch to `live` until stage 4 is fully funded and has 10 clean, non-forced fills.
 
-## Full-market canary activation
+## User live-bot activation
 
-The full-market release deploys halted. Keep `FULL_MARKET_SCANNER_ENABLED=false`
-until a measured 0x entitlement can complete the exact directed-pair universe
-inside 14 minutes. Scanner enablement only schedules sweeps; it does not arm
-the signer or clear the kill switch.
+User bots stay at tier 0 until house evidence reaches 25 clean fills across 14
+live days. Before the first tier-1 wallet:
 
-1. Capture and review a fresh universe snapshot while chain, registry, token
-   bytecode, decimals, multipliers, corporate actions and reference prices are healthy.
-2. Generate the snapshot policy bundle. Install its target file as a root-owned
-   credential, set `SIGNER_ALLOWED_TARGETS_FILE` and its emitted
-   `SIGNER_ALLOWED_TARGETS_HASH`, then manually create and attach the exact
-   Privy policies. Record the observed IDs through the authenticated admin API.
-3. Record the operator's signed stock-token jurisdiction attestation. This is
-   an operational gate, not legal advice or a substitute for counsel.
-4. Set the measured `ZEROX_SUSTAINED_RPS`, enable the scanner, and require one
-   complete non-overlapping sweep. Any 429, timeout, stale route or incomplete
-   cardinality makes the sweep unusable for execution.
-5. Reconcile after the sweep and verify zero unresolved transactions, a clean
-   WETH/USDG proof round trip, fresh prices, a matching policy hash and stage 1.
-6. Reauthenticate the operator wallet and enter `ENABLE AUTONOMOUS CANARY $5`.
-   This one-time action captures the reconciled USDG balance as the authorization
-   ceiling. A later deposit cannot increase it.
+1. Enable Privy email/wallet login, additional embedded wallets, required signed
+   requests, session signers, and policy enforcement.
+2. Manually review the user-bot policy. It must allow only canonical WETH,
+   canonical USDG, the approved 0x target/selectors, chain 4663, bounded amounts,
+   and zero native value. Install only its exact signer and policy IDs.
+3. Set `DELEGATION_PROVIDER=privy`, install Chainalysis, and verify provider
+   read-back before displaying wallet provisioning.
+4. Each bot receives a new Privy wallet. Its owner funds USDG and at least
+   0.005 ETH gas, imports finalized funding evidence, reconciles, and explicitly
+   activates it. Drift blocks only that bot and cannot halt house custody.
 
-Never place the generated policy JSON in git if it includes deployment-specific
-policy IDs. Keep `BILLING_PROVIDER=none` and `BILLING_ENFORCED=false`; billing is
-independent of the Trader signer.
+Do not set `FULL_MARKET_SCANNER_ENABLED=true`. The executable registry contains
+only WETH and USDG; Stock Tokens and arbitrary contracts are intentionally
+blocked.
 
 ## Smoke test after deploy
 

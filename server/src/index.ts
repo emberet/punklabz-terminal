@@ -52,6 +52,9 @@ import { refreshRegistry, seedCoreTokens } from './robinhood/assetRegistry.js';
 import { refreshCorporateActions } from './robinhood/corporateActions.js';
 import { OpportunityEngine } from './live/opportunityEngine.js';
 import { forumHeartbeat, maybeAutoPost } from './toolkit/forum.js';
+import { pruneExpiredForumContent } from './toolkit/forumModeration.js';
+import { runManagerRebalance } from './live/managerRebalancer.js';
+import { ROBINHOOD_TRADER_ACCOUNT } from './live/accounts.js';
 import { leaderboard, botSummaries } from './api/queries.js';
 import { BIG_WIN_USD, XP } from '@punklabz/shared';
 import { ensureActiveSeason, closeDueSeasons } from './social/seasons.js';
@@ -59,6 +62,7 @@ import { awardXp } from './social/xp.js';
 import { checkStreakBadges, checkTradeBadges } from './social/badges.js';
 import { emitActivity } from './social/activity.js';
 import { processBillingReminders } from './billing/reminders.js';
+import { auditUsdgPaymentReceipts } from './billing/usdgMembership.js';
 import { backfillLegacyRawLedger } from './live/rawAssetLedger.js';
 import { FullMarketAutonomy } from './live/fullMarketAutonomy.js';
 import { ROBINHOOD_VENUE } from './live/instruments.js';
@@ -372,6 +376,15 @@ async function main() {
     server.log.info(`forum heartbeat armed: ${config.forumHeartbeatCron}`);
   }
 
+  cron.schedule('17 * * * *', () => {
+    try {
+      const removed = pruneExpiredForumContent(db);
+      if (removed) server.log.info(`forum retention: expired ${removed} message(s)`);
+    } catch (e) {
+      server.log.error(`forum retention failed: ${String(e)}`);
+    }
+  });
+
   // ── scheduled agent discussion ──
   // Each of these refuses to run when there is nothing measured to talk about,
   // and every turn passes the persistent rate limit and the monthly budget.
@@ -450,6 +463,26 @@ async function main() {
     server.log.warn('full-market scanner disabled; autonomous any-to-any execution is inert');
   }
 
+  // Manager changes logical bot allocations only. The chain-derived Trader
+  // NAV is the ceiling; unreadable NAV records a blocked cycle and moves no cap.
+  cron.schedule('11 */6 * * *', async () => {
+    try {
+      const account = db.prepare(`SELECT wallet_address FROM execution_accounts WHERE name=?`)
+        .get(ROBINHOOD_TRADER_ACCOUNT) as { wallet_address: string | null } | undefined;
+      if (!account?.wallet_address || !robinhoodAdapter?.getConservativeNav) {
+        const result = runManagerRebalance(db, 0, 'manager:rebalance', false);
+        server.log.warn(`manager rebalance ${result.runId}: ${result.reason}`);
+        return;
+      }
+      const nav = await robinhoodAdapter.getConservativeNav(account.wallet_address);
+      const result = runManagerRebalance(db, nav.ok ? nav.totalUsd : 0, 'manager:rebalance', nav.ok);
+      const log = result.status === 'applied' ? server.log.info.bind(server.log) : server.log.warn.bind(server.log);
+      log(`manager rebalance ${result.runId}: ${result.reason}`);
+    } catch (e) {
+      server.log.error(`manager rebalance failed: ${String(e).slice(0, 180)}`);
+    }
+  });
+
   // ── close the research window on time ──
   // A time-boxed experiment that only ends when someone remembers is not
   // time-boxed. This restores the settings captured when the window opened.
@@ -486,6 +519,17 @@ async function main() {
   };
   void billingReminders();
   cron.schedule('17 * * * *', billingReminders);
+
+  if (config.billingProvider === 'usdg') {
+    cron.schedule('23 * * * *', async () => {
+      try {
+        const result = await auditUsdgPaymentReceipts(db);
+        if (result.invalidated) server.log.error(`billing receipt audit invalidated ${result.invalidated} receipt(s)`);
+      } catch (error) {
+        server.log.error(`billing receipt audit unavailable: ${String(error).slice(0, 180)}`);
+      }
+    });
+  }
 
   // ── manager epoch cron ──
   if (config.payoutsEnabled) {

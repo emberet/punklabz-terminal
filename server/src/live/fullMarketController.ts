@@ -46,7 +46,8 @@ export async function fullMarketReadiness(db: DB, signer: TradingSigner): Promis
     if (staleCaps.length) blockers.push(`${staleCaps.length} signer amount cap(s) are unsafe: ${staleCaps.slice(0, 3)
       .map((gate) => gate.reason).join('; ')}`);
   }
-  if (!account.walletAddress || !currentJurisdictionAttestation(db, account.walletAddress)) {
+  if (cfg.executable_scope !== 'CRYPTO_CORE'
+    && (!account.walletAddress || !currentJurisdictionAttestation(db, account.walletAddress))) {
     blockers.push('signed jurisdiction attestation is absent');
   }
   const unresolved = (db.prepare(

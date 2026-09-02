@@ -8,6 +8,7 @@ import {
 import { awardDailyLogin, xpProfile } from '../../social/xp.js';
 import { readPortfolio } from '../../chain/balances.js';
 import { config } from '../../config.js';
+import { bindPrivyIdentity, verifyPrivyIdentityToken } from '../../auth/privyIdentity.js';
 
 const COOKIE = 'plz_session';
 
@@ -32,6 +33,36 @@ export function registerAuthRoutes(server: FastifyInstance, app: AppContext) {
     path: '/',
     maxAge: 30 * 24 * 3600,
   };
+
+  server.post('/api/auth/privy', {
+    config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    if (request.headers['x-requested-with'] !== 'punklabz') {
+      return reply.code(403).send({ error: 'CSRF protection header missing' });
+    }
+    const origin = request.headers.origin as string | undefined;
+    try {
+      if (!origin || !config.appOrigin || new URL(origin).origin !== new URL(config.appOrigin).origin) {
+        return reply.code(403).send({ error: 'request origin does not match the configured app' });
+      }
+    } catch {
+      return reply.code(403).send({ error: 'invalid request origin' });
+    }
+    const parsed = z.object({ identityToken: z.string().min(20).max(20_000) }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Privy identity token required' });
+    try {
+      const identity = await verifyPrivyIdentityToken(parsed.data.identityToken);
+      const current = currentUser(app, request);
+      const linked = bindPrivyIdentity(app.db, identity, current?.id);
+      const previousToken = request.cookies?.[COOKIE];
+      if (previousToken) destroySession(app.db, previousToken);
+      const token = createSession(app.db, linked.userId, 'privy');
+      reply.setCookie(COOKIE, token, cookieOpts);
+      return { ok: true, created: linked.created };
+    } catch (error) {
+      return reply.code(401).send({ error: String(error instanceof Error ? error.message : error) });
+    }
+  });
 
   server.post('/api/auth/register', {
     config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
@@ -150,6 +181,7 @@ export function registerAuthRoutes(server: FastifyInstance, app: AppContext) {
         ...xpProfile(app.db, user.id),
         hasEmail: !!user.email,
         hasWallet: !!user.walletAddress,
+        hasPrivy: !!app.db.prepare(`SELECT 1 FROM privy_identities WHERE user_id=?`).get(user.id),
       },
       // shown so an operator can see WHICH wallet grants clearance without
       // guessing why the Control Room is missing

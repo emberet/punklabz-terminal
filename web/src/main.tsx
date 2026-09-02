@@ -21,6 +21,8 @@ import { Profile } from './pages/Profile';
 import { Delegation } from './pages/Delegation';
 import { Intern } from './pages/Intern';
 import { Billing } from './pages/Billing';
+import { PrivyProvider } from '@privy-io/react-auth';
+import { defineChain } from 'viem';
 
 const router = createBrowserRouter([
   {
@@ -52,12 +54,36 @@ const router = createBrowserRouter([
   },
 ]);
 
+const app = (
+  <FxProvider>
+    <AuthProvider>
+      <RouterProvider router={router} />
+    </AuthProvider>
+  </FxProvider>
+);
+
+const robinhoodChain = defineChain({
+  id: 4663,
+  name: 'Robinhood Chain',
+  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  rpcUrls: { default: { http: ['https://rpc.mainnet.chain.robinhood.com'] } },
+  blockExplorers: { default: { name: 'Robinhood Explorer', url: 'https://robinhoodchain.blockscout.com' } },
+});
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <FxProvider>
-      <AuthProvider>
-        <RouterProvider router={router} />
-      </AuthProvider>
-    </FxProvider>
+    {import.meta.env.VITE_PRIVY_APP_ID ? (
+      <PrivyProvider
+        appId={import.meta.env.VITE_PRIVY_APP_ID}
+        config={{
+          loginMethods: ['email', 'wallet'],
+          supportedChains: [robinhoodChain],
+          defaultChain: robinhoodChain,
+          embeddedWallets: { ethereum: { createOnLogin: 'all-users' } },
+        }}
+      >
+        {app}
+      </PrivyProvider>
+    ) : app}
   </React.StrictMode>,
 );

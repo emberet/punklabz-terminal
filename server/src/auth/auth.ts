@@ -5,6 +5,7 @@ import type { DB } from '../db/db.js';
 import { config } from '../config.js';
 import { seedUser } from '../billing/ledger.js';
 import { appendAudit } from '../audit/auditLog.js';
+import { recordWalletLink } from '../billing/usdgMembership.js';
 
 const SESSION_TTL_MS = 30 * 24 * 3_600_000;
 const NONCE_TTL_MS = 5 * 60_000;
@@ -59,7 +60,7 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
-export function createSession(db: DB, userId: number, authMethod: 'email' | 'wallet' = 'email'): string {
+export function createSession(db: DB, userId: number, authMethod: 'email' | 'wallet' | 'privy' = 'email'): string {
   const token = randomBytes(32).toString('base64url');
   const now = Date.now();
   db.prepare('INSERT INTO sessions (token_hash, user_id, created_at, expires_at, auth_method) VALUES (?, ?, ?, ?, ?)')
@@ -220,6 +221,20 @@ function mergeUserInto(db: DB, sourceUserId: number, targetUserId: number, reaso
   if (liveGrantConflict) {
     throw new Error('accounts have conflicting live delegation grants; automatic merge refused');
   }
+  const providerIdentityConflict = db.prepare(
+    `SELECT 1 WHERE EXISTS (SELECT 1 FROM privy_identities WHERE user_id=?)
+       AND EXISTS (SELECT 1 FROM privy_identities WHERE user_id=?)`,
+  ).get(sourceUserId, targetUserId);
+  if (providerIdentityConflict) {
+    throw new Error('both accounts have Privy identities; automatic merge refused');
+  }
+  const billingCustomerConflict = db.prepare(
+    `SELECT 1 WHERE EXISTS (SELECT 1 FROM billing_customers WHERE user_id=?)
+       AND EXISTS (SELECT 1 FROM billing_customers WHERE user_id=?)`,
+  ).get(sourceUserId, targetUserId);
+  if (billingCustomerConflict) {
+    throw new Error('both accounts have billing provider identities; automatic merge refused');
+  }
 
   const sourceAccount = `user:${sourceUserId}`;
   const targetAccount = `user:${targetUserId}`;
@@ -242,6 +257,18 @@ function mergeUserInto(db: DB, sourceUserId: number, targetUserId: number, reaso
     db.prepare('UPDATE bots SET owner_user_id=? WHERE owner_user_id=?').run(targetUserId, sourceUserId);
     db.prepare('UPDATE builder_sessions SET user_id=? WHERE user_id=?').run(targetUserId, sourceUserId);
     db.prepare('UPDATE delegation_grants SET user_id=? WHERE user_id=?').run(targetUserId, sourceUserId);
+    db.prepare('UPDATE user_wallet_links SET user_id=? WHERE user_id=?').run(targetUserId, sourceUserId);
+    db.prepare('UPDATE usdg_payment_intents SET user_id=? WHERE user_id=?').run(targetUserId, sourceUserId);
+    db.prepare('UPDATE wallet_screening_results SET user_id=? WHERE user_id=?').run(targetUserId, sourceUserId);
+    db.prepare('UPDATE bot_live_wallets SET user_id=? WHERE user_id=?').run(targetUserId, sourceUserId);
+    db.prepare('UPDATE privy_identities SET user_id=? WHERE user_id=?').run(targetUserId, sourceUserId);
+    db.prepare('UPDATE billing_customers SET user_id=? WHERE user_id=?').run(targetUserId, sourceUserId);
+    db.prepare('UPDATE subscriptions SET user_id=? WHERE user_id=?').run(targetUserId, sourceUserId);
+    db.prepare('UPDATE billing_payments SET user_id=? WHERE user_id=?').run(targetUserId, sourceUserId);
+    db.prepare('UPDATE billing_notifications SET user_id=? WHERE user_id=?').run(targetUserId, sourceUserId);
+    db.prepare(`UPDATE forum_posts SET author_id=? WHERE author_kind='human' AND author_id=?`)
+      .run(targetUserId, sourceUserId);
+    db.prepare('UPDATE forum_moderation_events SET user_id=? WHERE user_id=?').run(targetUserId, sourceUserId);
     db.prepare('UPDATE activity_events SET actor_user_id=? WHERE actor_user_id=?').run(targetUserId, sourceUserId);
 
     db.prepare(
@@ -303,6 +330,7 @@ export async function verifyWallet(db: DB, walletAddress: string, signature: str
     | undefined;
   if (existing) {
     syncAdminMirror(db, existing.id, address);
+    recordWalletLink(db, existing.id, address);
     return existing.id;
   }
 
@@ -312,6 +340,7 @@ export async function verifyWallet(db: DB, walletAddress: string, signature: str
       .run(address, `${address.slice(0, 6)}…${address.slice(-4)}`, isAdminWallet(address) ? 1 : 0, Date.now());
     const userId = Number(info.lastInsertRowid);
     seedUser(db, userId);
+    recordWalletLink(db, userId, address);
     return userId;
   });
   return tx();
@@ -356,6 +385,7 @@ export async function linkWallet(
   }
 
   db.prepare('UPDATE users SET wallet_address = ? WHERE id = ?').run(address, userId);
+  recordWalletLink(db, userId, address);
   syncAdminMirror(db, userId, address);
   return { address, userId, merged };
 }
@@ -368,7 +398,17 @@ export function unlinkWallet(db: DB, userId: number): void {
   if (!row?.email || !row.password_hash) {
     throw new Error('add an email and password first — otherwise this would lock you out of the account');
   }
-  db.prepare('UPDATE users SET wallet_address = NULL, is_admin = 0 WHERE id = ?').run(userId);
+  const wallet = db.prepare(`SELECT wallet_address address FROM users WHERE id=?`).get(userId) as
+    { address: string | null } | undefined;
+  db.transaction(() => {
+    db.prepare('UPDATE users SET wallet_address = NULL, is_admin = 0 WHERE id = ?').run(userId);
+    if (wallet?.address) {
+      db.prepare(
+        `UPDATE user_wallet_links SET revoked_at=?
+         WHERE user_id=? AND chain_id=4663 AND lower(address)=lower(?) AND revoked_at IS NULL`,
+      ).run(Date.now(), userId, wallet.address);
+    }
+  })();
 }
 
 /** Add email/password to a wallet-first account, so it has a second way in. */

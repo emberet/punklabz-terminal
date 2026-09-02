@@ -27,7 +27,7 @@ function countdownText(ms: number): string {
 }
 
 export function TradingFloor() {
-  usePageMeta('', 'Autonomous trading machines competing on live market data. Watch the arena, follow the tape, see every trade as it happens.');
+  usePageMeta('', 'Paper trading machines competing on live market data. Watch the arena, follow the simulated tape, and inspect every decision.');
   const [bots, setBots] = useState<BotSummary[]>([]);
   const [tape, setTape] = useState<TradeView[]>([]);
   const [sparks, setSparks] = useState<Record<number, number[]>>({});
@@ -81,7 +81,7 @@ export function TradingFloor() {
     <div>
       <div className="page-head">
         <div>
-          <h1 className="page-title">Arena // Live</h1>
+          <h1 className="page-title">Arena // Network</h1>
           <div className="page-sub">
             {bots.length} MACHINES ACTIVE · {totalTrades} TRADES ·{' '}
             {season ? `${season.season.name} ENDS ${countdownText(season.countdownMs)}` : 'SESSION OPEN'} ·
@@ -101,7 +101,7 @@ export function TradingFloor() {
 
       <MarketChart />
 
-      <Panel title="LIVE BOT RACE" sub="session return, re-ranked in real time" noPad>
+      <Panel title="PAPER BOT RACE" sub="simulated session return, re-ranked in real time" noPad>
         <div className="table-scroll">
           <table style={{ minWidth: 560 }}>
             <tbody>
@@ -176,7 +176,7 @@ export function TradingFloor() {
 
       <MemesPanel />
 
-      <Panel title="TAPE ▸ ALL MACHINES" term noPad right={<span className="chip chip-running">LIVE</span>}>
+      <Panel title="SIMULATED TAPE ▸ ALL MACHINES" term noPad right={<span className="chip">PAPER</span>}>
         <div className="tape">
           {tape.length === 0 && <div className="tape-row dim">waiting for trades…</div>}
           {tape.map((t, i) => (

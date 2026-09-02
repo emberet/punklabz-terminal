@@ -243,6 +243,43 @@ export interface ZeroXAdapterOptions {
   probeImpl?: typeof probeEndpoints;
 }
 
+interface AlchemyTokenBalance {
+  contractAddress?: unknown;
+  tokenBalance?: unknown;
+  error?: unknown;
+}
+
+/** Parse one authenticated Alchemy Token API page without trusting its shape. */
+export function parseAlchemyTokenBalances(body: unknown): {
+  nonzeroContracts: string[];
+  pageKey: string | null;
+} {
+  const response = body as any;
+  if (response?.error) throw new Error('Alchemy token-balance request returned an RPC error');
+  const balances = response?.result?.tokenBalances;
+  if (!Array.isArray(balances)) throw new Error('Alchemy token-balance response is malformed');
+  const nonzeroContracts: string[] = [];
+  for (const entry of balances as AlchemyTokenBalance[]) {
+    if (entry.error !== undefined && entry.error !== null) {
+      throw new Error('Alchemy could not resolve one or more token balances');
+    }
+    if (typeof entry.contractAddress !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(entry.contractAddress)) {
+      throw new Error('Alchemy returned an invalid token contract');
+    }
+    if (typeof entry.tokenBalance !== 'string') throw new Error('Alchemy returned a missing token balance');
+    let raw: bigint;
+    try { raw = BigInt(entry.tokenBalance); }
+    catch { throw new Error('Alchemy returned a non-integer token balance'); }
+    if (raw < 0n) throw new Error('Alchemy returned a negative token balance');
+    if (raw > 0n) nonzeroContracts.push(entry.contractAddress.toLowerCase());
+  }
+  const rawPageKey = response.result.pageKey;
+  if (rawPageKey !== undefined && (typeof rawPageKey !== 'string' || rawPageKey.length > 500)) {
+    throw new Error('Alchemy returned an invalid token-balance page key');
+  }
+  return { nonzeroContracts, pageKey: rawPageKey ?? null };
+}
+
 interface IndexedInternalTransfer {
   index?: unknown;
   txHash?: unknown;
@@ -286,21 +323,80 @@ export function parseIndexedEthFunding(
 export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
   readonly venue = 'evm:robinhood';
   private readonly chainId: number;
+  private readonly rpcUrl: string;
   private readonly client;
   private readonly coordinator: TransactionCoordinator | null;
 
   constructor(private opts: ZeroXAdapterOptions) {
     this.chainId = opts.chainId ?? ROBINHOOD_MAINNET_CHAIN_ID;
     const chain = rhChainDef(this.chainId);
+    this.rpcUrl = opts.rpcUrl ?? process.env.RPC_ROBINHOOD_PRIMARY ?? chain.rpcUrls.default.http[0];
     this.client = createPublicClient({
       chain,
-      transport: http(opts.rpcUrl ?? process.env.RPC_ROBINHOOD_PRIMARY ?? chain.rpcUrls.default.http[0]),
+      transport: http(this.rpcUrl),
     });
     this.coordinator = opts.db ? new TransactionCoordinator(opts.db, opts.signer, this.client) : null;
   }
 
   private get fetch(): typeof fetch {
     return this.opts.fetchImpl ?? fetch;
+  }
+
+  /**
+   * Discover every non-zero ERC-20 held by the wallet. Multicall proves known
+   * balances; this independent indexed view proves there is not an unknown
+   * asset hiding outside the approved registry.
+   */
+  private async nonzeroTokenContracts(address: string): Promise<string[]> {
+    let host = '';
+    try { host = new URL(this.rpcUrl).hostname.toLowerCase(); } catch { /* handled below */ }
+    if (host.endsWith('.alchemy.com')) {
+      const contracts = new Set<string>();
+      let pageKey: string | null = null;
+      const seen = new Set<string>();
+      for (let page = 0; page < 100; page++) {
+        const options: Record<string, string> = { maxCount: '0x64' };
+        if (pageKey) options.pageKey = pageKey;
+        const response = await this.fetch(this.rpcUrl, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: page + 1, method: 'alchemy_getTokenBalances',
+            params: [getAddress(address), 'erc20', options],
+          }),
+          signal: AbortSignal.timeout(12_000),
+        });
+        if (!response.ok) throw new Error(`authenticated token-balance provider unavailable (${response.status})`);
+        const parsed = parseAlchemyTokenBalances(await response.json());
+        parsed.nonzeroContracts.forEach((contract) => contracts.add(contract));
+        if (!parsed.pageKey) return [...contracts];
+        if (seen.has(parsed.pageKey)) throw new Error('token-balance provider repeated a page key');
+        seen.add(parsed.pageKey);
+        pageKey = parsed.pageKey;
+      }
+      throw new Error('token-balance provider exceeded the pagination safety limit');
+    }
+
+    const configuredIndexer = process.env.ROBINHOOD_TOKEN_INDEXER_URL?.replace(/\/$/, '');
+    if (!configuredIndexer) {
+      throw new Error('no authenticated wallet token-balance provider is configured');
+    }
+    const response = await this.fetch(
+      `${configuredIndexer}/addresses/${encodeURIComponent(address)}/token-balances`,
+      { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(12_000) },
+    );
+    if (!response.ok) throw new Error(`token-balance indexer unavailable (${response.status})`);
+    const indexed = await response.json();
+    if (!Array.isArray(indexed)) throw new Error('token-balance indexer returned an invalid response');
+    return indexed.flatMap((item: any) => {
+      if (item?.token?.type !== 'ERC-20') return [];
+      let raw: bigint;
+      try { raw = BigInt(String(item?.value ?? '')); }
+      catch { throw new Error('token-balance indexer returned a malformed balance'); }
+      const contract = String(item?.token?.address_hash ?? '');
+      if (!/^0x[0-9a-fA-F]{40}$/.test(contract)) throw new Error('token-balance indexer returned an invalid contract');
+      return raw === 0n ? [] : [contract.toLowerCase()];
+    });
   }
 
   private async runtimeSafety(signerAddress: string, ethUsd: number | undefined): Promise<string | null> {
@@ -1108,11 +1204,18 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
 
   async getFundingTransfers(txHash: string, walletAddress: string): Promise<FundingTransfer[]> {
     const hash = txHash as Hex;
-    const [tx, receipt] = await Promise.all([
+    const [tx, receipt, head] = await Promise.all([
       this.client.getTransaction({ hash }),
       this.client.getTransactionReceipt({ hash }),
+      this.client.getBlockNumber(),
     ]);
     if (receipt.status !== 'success') throw new Error('funding transaction reverted');
+    const confirmations = Number(head - receipt.blockNumber + 1n);
+    if (confirmations < 12) throw new Error(`funding transaction has ${confirmations}/12 confirmations`);
+    const canonical = await this.client.getBlock({ blockNumber: receipt.blockNumber });
+    if (canonical.hash?.toLowerCase() !== receipt.blockHash.toLowerCase()) {
+      throw new Error('funding receipt is not on the canonical block');
+    }
     const wallet = walletAddress.toLowerCase();
     const spec = resolveLiveInstrument('ETHUSDT').spec;
     const snapshotTokens = this.opts.db?.prepare(
@@ -1211,21 +1314,10 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
           decimals: token.decimals, contractAddress: token.address.toLowerCase() });
       }
       if (snapshotTokens?.length) {
-        const indexerBase = (process.env.ROBINHOOD_TOKEN_INDEXER_URL
-          ?? 'https://robinhoodchain.blockscout.com/api/v2').replace(/\/$/, '');
-        const response = await this.fetch(
-          `${indexerBase}/addresses/${encodeURIComponent(address)}/token-balances`,
-          { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(12_000) },
-        );
-        if (!response.ok) throw new Error(`token-balance indexer unavailable (${response.status})`);
-        const indexed = await response.json();
-        if (!Array.isArray(indexed)) throw new Error('token-balance indexer returned an invalid response');
         const allowed = new Set(tokens.map((token) => token.address.toLowerCase()));
-        const unknown = indexed.filter((item: any) => item?.token?.type === 'ERC-20'
-          && BigInt(String(item?.value ?? '0')) !== 0n
-          && !allowed.has(String(item?.token?.address_hash ?? '').toLowerCase()));
+        const unknown = (await this.nonzeroTokenContracts(address)).filter((contract) => !allowed.has(contract));
         if (unknown.length) {
-          const contracts = unknown.slice(0, 5).map((item: any) => item?.token?.address_hash).join(', ');
+          const contracts = unknown.slice(0, 5).join(', ');
           throw new Error(`wallet contains ${unknown.length} unknown nonzero ERC-20 asset(s): ${contracts}`);
         }
       }

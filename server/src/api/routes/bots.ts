@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { MAX_BOTS_PER_USER, QUANT_INITIAL_BALANCE_USD, XP } from '@punklabz/shared';
+import { QUANT_INITIAL_BALANCE_USD, XP } from '@punklabz/shared';
 import { awardXp } from '../../social/xp.js';
 import { awardBadge, checkCloneBadges } from '../../social/badges.js';
 import { emitActivity } from '../../social/activity.js';
@@ -17,11 +17,44 @@ import { toMicro, fromMicro } from '../../money.js';
 import { getOpenPositions } from '../../engine/accounting.js';
 import { subscriptionAccess } from '../../billing/subscriptions.js';
 import { config } from '../../config.js';
+import { takeRateLimit } from '../../research/budget.js';
+
+function validSameOrigin(request: any): boolean {
+  if (request.headers['x-requested-with'] !== 'punklabz') return false;
+  const origin = request.headers.origin as string | undefined;
+  if (!origin || !config.appOrigin) return false;
+  try {
+    return new URL(origin).origin === new URL(config.appOrigin).origin;
+  } catch {
+    return false;
+  }
+}
 
 export function registerBotRoutes(server: FastifyInstance, app: AppContext) {
   const markOf = (s: string) => app.executor.getMark(s);
 
   server.get('/api/bots', async () => ({ bots: botSummaries(app.db, markOf) }));
+
+  server.get('/api/my/bots', async (request, reply) => {
+    const user = requireUser(app, request, reply);
+    if (!user) return;
+    const q = z.object({
+      page: z.coerce.number().int().min(1).default(1),
+      limit: z.coerce.number().int().min(1).max(100).default(25),
+    }).parse(request.query);
+    const total = (app.db.prepare(`SELECT COUNT(*) n FROM bots WHERE owner_user_id = ?`).get(user.id) as { n: number }).n;
+    const rows = app.db.prepare(
+      `SELECT id FROM bots WHERE owner_user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`,
+    ).all(user.id, q.limit, (q.page - 1) * q.limit) as { id: number }[];
+    const wanted = new Set(rows.map((row) => row.id));
+    return {
+      bots: botSummaries(app.db, markOf).filter((bot) => wanted.has(bot.id)),
+      page: q.page,
+      limit: q.limit,
+      total,
+      pages: Math.ceil(total / q.limit),
+    };
+  });
 
   server.get('/api/bots/:id', async (request, reply) => {
     const { id } = z.object({ id: z.coerce.number() }).parse(request.params);
@@ -102,9 +135,12 @@ export function registerBotRoutes(server: FastifyInstance, app: AppContext) {
 
   // Deploy is included in the paid Lab membership. Until billing enforcement
   // is enabled, the legacy 20-credit sandbox fee remains for the demo economy.
-  server.post('/api/bots', async (request, reply) => {
+  server.post('/api/bots', {
+    config: { rateLimit: { max: 12, timeWindow: '1 hour' } },
+  }, async (request, reply) => {
     const user = requireUser(app, request, reply);
     if (!user) return;
+    if (!validSameOrigin(request)) return reply.code(403).send({ error: 'same-origin CSRF validation failed' });
     const access = subscriptionAccess(app.db, user.id, config.billingEnforced);
     if (!access.allowed) {
       return reply.code(402).send({ error: access.reason, code: 'subscription_required' });
@@ -114,11 +150,10 @@ export function registerBotRoutes(server: FastifyInstance, app: AppContext) {
     if (!result.ok || !result.config) {
       return reply.code(400).send({ error: 'invalid config', details: result.errors });
     }
-    const count = app.db
-      .prepare(`SELECT COUNT(*) AS n FROM bots WHERE owner_user_id = ?`)
-      .get(user.id) as { n: number };
-    if (count.n >= MAX_BOTS_PER_USER)
-      return reply.code(400).send({ error: `bot limit reached (${MAX_BOTS_PER_USER})` });
+    const createQuota = takeRateLimit(app.db, `paper-bot-create:${user.id}`, {
+      cooldownMs: 5_000, maxInWindow: 30, windowMs: 86_400_000,
+    });
+    if (!createQuota.allowed) return reply.code(429).send({ error: createQuota.reason });
 
     try {
       const botId = app.db.transaction(() => {
@@ -154,9 +189,14 @@ export function registerBotRoutes(server: FastifyInstance, app: AppContext) {
 
   // Clone fees remain entirely inside the demo ledger. Real creator payments
   // require a separately reviewed marketplace payout rail.
-  server.post('/api/bots/:id/clone', async (request, reply) => {
+  server.post('/api/bots/:id/clone', {
+    config: { rateLimit: { max: 12, timeWindow: '1 hour' } },
+  }, async (request, reply) => {
     const user = requireUser(app, request, reply);
     if (!user) return;
+    if (!validSameOrigin(request)) return reply.code(403).send({ error: 'same-origin CSRF validation failed' });
+    const access = subscriptionAccess(app.db, user.id, config.billingEnforced);
+    if (!access.allowed) return reply.code(402).send({ error: access.reason, code: 'subscription_required' });
     const { id } = z.object({ id: z.coerce.number() }).parse(request.params);
     const source = app.db
       .prepare(`SELECT id, owner_user_id, name, kind, strategy_type, config_json, is_public FROM bots WHERE id = ?`)
@@ -167,11 +207,10 @@ export function registerBotRoutes(server: FastifyInstance, app: AppContext) {
     if (!source.is_public) return reply.code(403).send({ error: 'bot is private' });
     if (source.owner_user_id === user.id)
       return reply.code(400).send({ error: 'cannot clone your own bot' });
-    const count = app.db
-      .prepare(`SELECT COUNT(*) AS n FROM bots WHERE owner_user_id = ?`)
-      .get(user.id) as { n: number };
-    if (count.n >= MAX_BOTS_PER_USER)
-      return reply.code(400).send({ error: `bot limit reached (${MAX_BOTS_PER_USER})` });
+    const createQuota = takeRateLimit(app.db, `paper-bot-create:${user.id}`, {
+      cooldownMs: 5_000, maxInWindow: 30, windowMs: 86_400_000,
+    });
+    if (!createQuota.allowed) return reply.code(429).send({ error: createQuota.reason });
 
     try {
       const botId = app.db.transaction(() => {
@@ -218,6 +257,27 @@ export function registerBotRoutes(server: FastifyInstance, app: AppContext) {
     const bot = app.db.prepare('SELECT id FROM bots WHERE id = ?').get(id);
     if (!bot) return reply.code(404).send({ error: 'bot not found' });
     return botChat({ db: app.db, candles: app.candles, markOf }, id, body.messages);
+  });
+
+  server.post('/api/bots/:id/forum-opt-in', {
+    config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const user = requireUser(app, request, reply);
+    if (!user) return;
+    if (!validSameOrigin(request)) return reply.code(403).send({ error: 'same-origin CSRF validation failed' });
+    const { id } = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
+    const { enabled } = z.object({ enabled: z.boolean() }).parse(request.body);
+    const bot = app.db.prepare(`SELECT owner_user_id, kind FROM bots WHERE id = ?`).get(id) as any;
+    if (!bot) return reply.code(404).send({ error: 'bot not found' });
+    if (bot.kind !== 'quant' || (bot.owner_user_id !== user.id && !user.isAdmin)) {
+      return reply.code(403).send({ error: 'only the owner can change public-room participation' });
+    }
+    if (enabled) {
+      const access = subscriptionAccess(app.db, user.id, config.billingEnforced);
+      if (!access.allowed) return reply.code(402).send({ error: access.reason, code: 'subscription_required' });
+    }
+    app.db.prepare(`UPDATE bots SET public_chat_opt_in = ? WHERE id = ?`).run(enabled ? 1 : 0, id);
+    return { ok: true, botId: id, publicChatOptIn: enabled };
   });
 
   // playground: empirical RR probability from this bot's market history

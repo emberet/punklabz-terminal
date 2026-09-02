@@ -12,6 +12,9 @@ import { runDelegationPreflight } from '../preflight.js';
 import { delegationCeiling, effectiveCaps, grantHeadroomUsd, grantSpend } from './delegationPolicy.js';
 import type { DelegationProvider } from './provider.js';
 import { revocationCache } from './revocationCache.js';
+import { ROBINHOOD_MAINNET_CHAIN_ID, USDG, WETH_ROBINHOOD } from '@punklabz/shared';
+import { custodyHoldings } from '../accounts.js';
+import { ROBINHOOD_VENUE } from '../instruments.js';
 
 const CONSENT_HASH = createHash('sha256').update(DELEGATION_CONSENT_TEXT).digest('hex');
 
@@ -32,6 +35,7 @@ export interface CreateGrantArgs {
   userId: number;
   botId: number;
   providerUserId: string;
+  providerWalletId?: string;
   walletAddress: string;
   chainId: number;
   requested: DelegationCaps;
@@ -41,6 +45,24 @@ export interface CreateGrantArgs {
 }
 
 export function createGrant(db: DB, args: CreateGrantArgs): { grantId: number; clampedFields: string[] } {
+  if (args.chainId !== ROBINHOOD_MAINNET_CHAIN_ID) {
+    throw new Error('delegation is crypto-only on Robinhood Chain 4663');
+  }
+  const expected = new Map([
+    [WETH_ROBINHOOD.address.toLowerCase(), { symbol: 'WETH', decimals: WETH_ROBINHOOD.decimals, role: 'base' }],
+    [USDG.address.toLowerCase(), { symbol: 'USDG', decimals: USDG.decimals, role: 'quote' }],
+  ]);
+  if (args.allowedTokens.length !== expected.size) throw new Error('launch grants require exactly canonical WETH and USDG');
+  const seen = new Set<string>();
+  for (const token of args.allowedTokens) {
+    const address = token.address.toLowerCase();
+    if (seen.has(address)) throw new Error('grant token list contains a duplicate contract');
+    seen.add(address);
+    const canonical = expected.get(address);
+    if (!canonical || token.symbol !== canonical.symbol || token.decimals !== canonical.decimals || token.role !== canonical.role) {
+      throw new Error('grant token metadata does not match the canonical crypto-only registry');
+    }
+  }
   const ceiling = delegationCeiling(db);
 
   const existing = db
@@ -60,16 +82,16 @@ export function createGrant(db: DB, args: CreateGrantArgs): { grantId: number; c
     const info = db
       .prepare(
         `INSERT INTO delegation_grants
-           (user_id, bot_id, provider, provider_user_id, wallet_address, chain_id,
+           (user_id, bot_id, provider, provider_user_id, provider_wallet_id, wallet_address, chain_id,
             per_trade_cap_micro, daily_cap_micro, cumulative_cap_micro,
             max_open_notional_micro, max_slippage_bps,
             ceiling_tier, ceiling_per_trade_micro, ceiling_cumulative_micro, ceiling_evidence_json,
             expires_at, status, consent_text_hash, consent_signature, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
       )
       .run(
         args.userId, args.botId, providerKind(),
-        args.providerUserId, args.walletAddress, args.chainId,
+        args.providerUserId, args.providerWalletId ?? null, args.walletAddress.toLowerCase(), args.chainId,
         toMicro(caps.perTradeUsd), toMicro(caps.dailyUsd), toMicro(caps.cumulativeUsd),
         toMicro(caps.maxOpenNotionalUsd), caps.maxSlippageBps,
         ceiling.tier, toMicro(ceiling.perTradeUsd), toMicro(ceiling.cumulativeUsd),
@@ -83,6 +105,21 @@ export function createGrant(db: DB, args: CreateGrantArgs): { grantId: number; c
     );
     for (const t of args.allowedTokens) {
       stmt.run(id, args.chainId, t.address.toLowerCase(), t.symbol, t.decimals, t.role);
+    }
+    if (providerKind() === 'privy') {
+      const account = db.prepare(
+        `INSERT INTO execution_accounts
+           (name,mode,venue,wallet_address,currency,funded_usd,active,created_at,
+            chain_id,settlement_asset,role,delegation_grant_id)
+         VALUES (?, 'canary', ?, ?, 'USDG', 0, 0, ?, 4663, 'USDG', 'trader', ?)`,
+      ).run(`USER_BOT_${args.botId}`, ROBINHOOD_VENUE, args.walletAddress.toLowerCase(), now, id);
+      db.prepare(
+        `INSERT INTO bot_live_wallets
+           (bot_id,user_id,execution_account_id,provider,provider_user_id,wallet_id,wallet_address,
+            chain_id,state,created_at,updated_at)
+         VALUES (?,?,?,'privy',?,?,?,?, 'provisioning',?,?)`,
+      ).run(args.botId, args.userId, Number(account.lastInsertRowid), args.providerUserId, args.providerWalletId ?? null,
+        args.walletAddress.toLowerCase(), args.chainId, now, now);
     }
     return id;
   })();
@@ -121,12 +158,29 @@ export async function activateGrant(
 
   const binding = await provider.verifySessionSigner({
     providerUserId: grant.provider_user_id,
+    providerWalletId: grant.provider_wallet_id,
     walletAddress: grant.wallet_address,
     chainId: grant.chain_id,
     sessionSignerId,
   });
   if (binding.walletAddress.toLowerCase() !== String(grant.wallet_address).toLowerCase()) {
     throw new Error('session signer does not bind the wallet named in this grant');
+  }
+
+  const botWallet = db.prepare(
+    `SELECT execution_account_id FROM bot_live_wallets WHERE bot_id=? AND user_id=?`,
+  ).get(grant.bot_id, grant.user_id) as { execution_account_id: number | null } | undefined;
+  if (!botWallet?.execution_account_id) throw new Error('isolated bot execution account is missing');
+  const holdings = custodyHoldings(db, botWallet.execution_account_id);
+  if ((holdings.get('USDG') ?? 0) <= 0) throw new Error('fund the isolated bot wallet with USDG before activation');
+  if ((holdings.get('ETH') ?? 0) < 0.005) throw new Error('bot wallet needs at least 0.005 ETH reserved for gas');
+  const reconciliation = db.prepare(
+    `SELECT status,completed_at FROM reconciliation_runs
+     WHERE execution_account_id=? ORDER BY id DESC LIMIT 1`,
+  ).get(botWallet.execution_account_id) as { status: string; completed_at: number | null } | undefined;
+  if (reconciliation?.status !== 'clean' || !reconciliation.completed_at
+    || Date.now() - reconciliation.completed_at > 10 * 60_000) {
+    throw new Error('a clean bot-wallet reconciliation from the last 10 minutes is required');
   }
 
   const tokens = db
@@ -141,9 +195,20 @@ export async function activateGrant(
     expiresAt: grant.expires_at,
   });
 
-  db.prepare(
-    `UPDATE delegation_grants SET status = 'active', session_signer_id = ?, policy_id = ?, updated_at = ? WHERE id = ?`,
-  ).run(binding.sessionSignerId, policyId, Date.now(), grantId);
+  db.transaction(() => {
+    const now = Date.now();
+    db.prepare(
+      `UPDATE delegation_grants SET status = 'active', session_signer_id = ?, policy_id = ?, updated_at = ? WHERE id = ?`,
+    ).run(binding.sessionSignerId, policyId, now, grantId);
+    const account = db.prepare(`SELECT id FROM execution_accounts WHERE delegation_grant_id=?`)
+      .get(grantId) as { id: number } | undefined;
+    if (!account) throw new Error('isolated bot execution account disappeared during activation');
+    db.prepare(`UPDATE execution_accounts SET active=1 WHERE id=?`).run(account.id);
+    db.prepare(
+      `UPDATE bot_live_wallets SET execution_account_id=?,session_signer_id=?,policy_id=?,state='active',
+         screening_status='clear',updated_at=? WHERE bot_id=?`,
+    ).run(account.id, binding.sessionSignerId, policyId, now, grant.bot_id);
+  })();
   revocationCache.restore(grantId);
   event(db, grantId, 'activated', actor, { sessionSignerId: binding.sessionSignerId, policyId });
 }
@@ -173,6 +238,9 @@ export async function revokeGrant(
       db.prepare(
         `UPDATE delegation_grants SET status = 'revoked', revoked_at = ?, revoked_by = ?, revoke_reason = ?, updated_at = ? WHERE id = ?`,
       ).run(Date.now(), actor, reason, Date.now(), grantId);
+      db.prepare(`UPDATE bot_live_wallets SET state='revoked',updated_at=? WHERE bot_id=?`)
+        .run(Date.now(), grant.bot_id);
+      db.prepare(`UPDATE execution_accounts SET active=0 WHERE delegation_grant_id=?`).run(grantId);
     }
     const info = db
       .prepare(
@@ -230,13 +298,43 @@ export async function revokeGrant(
 }
 
 export function setGrantPaused(db: DB, grantId: number, paused: boolean, actor: string): void {
-  const grant = db.prepare(`SELECT status FROM delegation_grants WHERE id = ?`).get(grantId) as any;
+  const grant = db.prepare(
+    `SELECT status,bot_id,provider,session_signer_id,expires_at
+     FROM delegation_grants WHERE id = ?`,
+  ).get(grantId) as any;
   if (!grant) throw new Error('grant not found');
   if (grant.status === 'revoked' || grant.status === 'expired') {
     throw new Error(`grant is ${grant.status} and cannot be resumed`);
   }
-  db.prepare(`UPDATE delegation_grants SET status = ?, updated_at = ? WHERE id = ?`)
-    .run(paused ? 'paused' : 'active', Date.now(), grantId);
+  if (!paused) {
+    if (grant.status !== 'paused') throw new Error(`grant is ${grant.status}, not paused`);
+    if (grant.expires_at <= Date.now()) throw new Error('grant has expired and cannot be resumed');
+    if (grant.provider === 'privy') {
+      if (!grant.session_signer_id) throw new Error('session signer is not bound');
+      const account = db.prepare(
+        `SELECT id FROM execution_accounts WHERE delegation_grant_id=?`,
+      ).get(grantId) as { id: number } | undefined;
+      if (!account) throw new Error('isolated bot execution account is missing');
+      const reconciliation = db.prepare(
+        `SELECT status,completed_at FROM reconciliation_runs
+         WHERE execution_account_id=? ORDER BY id DESC LIMIT 1`,
+      ).get(account.id) as { status: string; completed_at: number | null } | undefined;
+      if (reconciliation?.status !== 'clean' || !reconciliation.completed_at
+        || Date.now() - reconciliation.completed_at > 10 * 60_000) {
+        throw new Error('a clean bot-wallet reconciliation from the last 10 minutes is required to resume');
+      }
+    }
+  }
+  db.transaction(() => {
+    const now = Date.now();
+    db.prepare(`UPDATE delegation_grants SET status = ?, updated_at = ? WHERE id = ?`)
+      .run(paused ? 'paused' : 'active', now, grantId);
+    db.prepare(`UPDATE bot_live_wallets SET state=?,updated_at=? WHERE bot_id=?`)
+      .run(paused ? 'paused' : 'active', now, grant.bot_id);
+    if (!paused && grant.provider === 'privy') {
+      db.prepare(`UPDATE execution_accounts SET active=1 WHERE delegation_grant_id=?`).run(grantId);
+    }
+  })();
   if (paused) revocationCache.revoke(grantId);
   else revocationCache.restore(grantId);
   event(db, grantId, paused ? 'paused' : 'resumed', actor, {});
@@ -248,8 +346,13 @@ export function expireDueGrants(db: DB): number {
     .prepare(`SELECT id FROM delegation_grants WHERE status IN ('pending','active','paused') AND expires_at <= ?`)
     .all(Date.now()) as { id: number }[];
   for (const g of due) {
-    db.prepare(`UPDATE delegation_grants SET status = 'expired', updated_at = ? WHERE id = ?`)
-      .run(Date.now(), g.id);
+    db.transaction(() => {
+      db.prepare(`UPDATE delegation_grants SET status = 'expired', updated_at = ? WHERE id = ?`)
+        .run(Date.now(), g.id);
+      db.prepare(`UPDATE bot_live_wallets SET state='paused',updated_at=?
+                  WHERE execution_account_id=(SELECT id FROM execution_accounts WHERE delegation_grant_id=?)`)
+        .run(Date.now(), g.id);
+    })();
     revocationCache.revoke(g.id);
     event(db, g.id, 'expired', 'system', {});
   }

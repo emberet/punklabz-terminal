@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Panel } from '../components/Panel';
@@ -7,6 +7,7 @@ import { DecryptText } from '../components/motion/DecryptText';
 import { useAuth } from '../lib/auth';
 import { type ConnectorKind, hasWallet, walletSignIn } from '../lib/wallet';
 import { usePageMeta } from '../lib/pageMeta';
+import { useIdentityToken, usePrivy } from '@privy-io/react-auth';
 
 interface NetStats {
   machinesOnline: number;
@@ -19,10 +20,8 @@ export function Login() {
   usePageMeta('Access', 'Sign in with a wallet or an email to build machines and enter the arena.');
   const navigate = useNavigate();
   const { refresh } = useAuth();
-  const [mode, setMode] = useState<'login' | 'register'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [displayName, setDisplayName] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [stats, setStats] = useState<NetStats | null>(null);
@@ -69,11 +68,7 @@ export function Login() {
     setBusy(true);
     setErr('');
     try {
-      if (mode === 'register') {
-        await api.post('/api/auth/register', { email, password, displayName });
-      } else {
-        await api.post('/api/auth/login', { email, password });
-      }
+      await api.post('/api/auth/login', { email, password });
       await done();
     } catch (e: any) {
       setErr(e.message);
@@ -131,6 +126,9 @@ export function Login() {
 
         <Panel title="ACCESS" noPad>
           <div className="login-cols">
+            {import.meta.env.VITE_PRIVY_APP_ID && (
+              <PrivyAccess onDone={done} onError={setErr} />
+            )}
             <div className="login-mosaic" style={{ alignItems: 'center', justifyContent: 'center', padding: 8 }}>
               <AsciiEntity width={24} height={16} fontSize={9} />
             </div>
@@ -157,10 +155,7 @@ export function Login() {
               </p>
             </div>
             <div className="login-col">
-              <div className="phos">{mode === 'login' ? 'CREDENTIALS' : 'NEW OPERATOR'}</div>
-              {mode === 'register' && (
-                <input placeholder="operator handle" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
-              )}
+              <div className="phos">LEGACY CREDENTIALS</div>
               <input placeholder="email" value={email} onChange={(e) => setEmail(e.target.value)} />
               <input
                 placeholder="password"
@@ -170,15 +165,9 @@ export function Login() {
                 onKeyDown={(e) => e.key === 'Enter' && submitEmail()}
               />
               <button onClick={submitEmail} disabled={busy}>
-                {mode === 'login' ? '[ Connect ]' : '[ Initialize operator ]'}
+                [ Connect existing account ]
               </button>
-              <button
-                type="button"
-                className="linkish dim"
-                onClick={() => setMode(mode === 'login' ? 'register' : 'login')}
-              >
-                {mode === 'login' ? 'no account? initialize →' : '← back'}
-              </button>
+              <span className="dim">New accounts initialize through Privy.</span>
             </div>
           </div>
           {err && <div className="panel-body error-text">{err}</div>}
@@ -187,10 +176,40 @@ export function Login() {
             <span><b>{stats?.tradesToday ?? '—'}</b> TRADES TODAY</span>
             <span><b>{stats?.operators ?? '—'}</b> OPERATORS</span>
             {stats?.season && <span><b>{stats.season.name}</b> RUNNING</span>}
-            <span className="amber">SIMULATION — NO REAL FUNDS</span>
+            <span className="amber">PAPER LAB + GATED MAINNET</span>
           </div>
         </Panel>
       </div>
+    </div>
+  );
+}
+
+function PrivyAccess({ onDone, onError }: { onDone: () => Promise<void>; onError: (message: string) => void }) {
+  const { ready, authenticated, login } = usePrivy();
+  const { identityToken } = useIdentityToken();
+  const [syncing, setSyncing] = useState(false);
+  const processed = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!authenticated || !identityToken || processed.current === identityToken) return;
+    processed.current = identityToken;
+    setSyncing(true);
+    api.post('/api/auth/privy', { identityToken })
+      .then(() => onDone())
+      .catch((error) => {
+        processed.current = null;
+        onError(error.message);
+      })
+      .finally(() => setSyncing(false));
+  }, [authenticated, identityToken]);
+
+  return (
+    <div className="login-col" style={{ gridColumn: '1 / -1', borderBottom: '1px solid var(--border)' }}>
+      <div className="phos">PRIVY IDENTITY + EMBEDDED WALLET</div>
+      <p className="dim">New operators enter here. Email and wallet can be linked to the same identity; keys stay inside Privy.</p>
+      <button className="primary" disabled={!ready || syncing} onClick={() => login()}>
+        {syncing || (authenticated && !identityToken) ? '[ verifying identity… ]' : '[ Enter with Privy ]'}
+      </button>
     </div>
   );
 }

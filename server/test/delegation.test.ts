@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openTestDb, type DB } from '../src/db/db.js';
-import { CEILING_TIERS, type DelegationCaps } from '@punklabz/shared';
+import { CEILING_TIERS, ROBINHOOD_MAINNET_CHAIN_ID, USDG, WETH_ROBINHOOD, type DelegationCaps } from '@punklabz/shared';
 import {
   checkTokens, delegationCeiling, earnedTier, effectiveCaps, evaluateDelegation,
   grantHeadroomUsd, grantSpend, releaseSpend, reserveSpend, settleSpend,
@@ -77,14 +77,14 @@ function makeGrant(db: DB, caps: Partial<DelegationCaps> = {}, botOffset = 0) {
     userId, botId,
     providerUserId: 'privy:user_123',
     walletAddress: '0xAbC0000000000000000000000000000000000001',
-    chainId: 8453,
+    chainId: ROBINHOOD_MAINNET_CHAIN_ID,
     requested: {
       perTradeUsd: 5, dailyUsd: 10, cumulativeUsd: 25,
       maxOpenNotionalUsd: 25, maxSlippageBps: 50, ...caps,
     },
     allowedTokens: [
-      { address: '0xWETH', symbol: 'WETH', decimals: 18, role: 'base' },
-      { address: '0xUSDC', symbol: 'USDC', decimals: 6, role: 'quote' },
+      { address: WETH_ROBINHOOD.address, symbol: 'WETH', decimals: 18, role: 'base' },
+      { address: USDG.address, symbol: 'USDG', decimals: 6, role: 'quote' },
     ],
     expiresAt: Date.now() + 30 * 86_400_000,
   });
@@ -99,11 +99,11 @@ function activateDirectly(db: DB, grantId: number) {
 }
 
 const SPEC: LiveInstrumentSpec = {
-  id: 'CRYPTO_SPOT://base/WETH-USDC',
-  venue: 'evm:base',
-  chainId: 8453,
-  base: { chainId: 8453, address: '0xWETH', symbol: 'WETH', decimals: 18 },
-  quote: { chainId: 8453, address: '0xUSDC', symbol: 'USDC', decimals: 6 },
+  id: 'CRYPTO_SPOT://robinhood/WETH-USDG',
+  venue: 'evm:robinhood',
+  chainId: ROBINHOOD_MAINNET_CHAIN_ID,
+  base: { chainId: ROBINHOOD_MAINNET_CHAIN_ID, address: WETH_ROBINHOOD.address, symbol: 'WETH', decimals: 18 },
+  quote: { chainId: ROBINHOOD_MAINNET_CHAIN_ID, address: USDG.address, symbol: 'USDG', decimals: 6 },
   spender: '0xRouter',
   minNotionalUsd: 2,
 };
@@ -165,7 +165,8 @@ describe('cap clamping', () => {
     );
     expect(caps.perTradeUsd).toBe(5);
     expect(caps.cumulativeUsd).toBe(25);
-    expect(caps.maxSlippageBps).toBe(200);
+    expect(caps.maxSlippageBps).toBe(35);
+    expect(clampedFields).toContain('maxSlippageBps');
     expect(clampedFields).toContain('perTradeUsd');
   });
 
@@ -224,8 +225,7 @@ describe('grant lifecycle', () => {
     expect(byName.delegation_grant).toBe(true);
     expect(byName.delegation_per_trade).toBe(true);
     expect(byName.delegation_signer).toBe(true);
-    // the instrument is still unmapped in this build, so routing stays shut
-    expect(byName.delegation_token).toBe(false);
+    expect(byName.delegation_token).toBe(true);
   });
 
   it('a size over the per-trade cap is refused with the numbers in the reason', () => {
@@ -425,37 +425,37 @@ describe('the usage ledger', () => {
 
 describe('token whitelisting', () => {
   const allowed = [
-    { token_address: '0xweth', role: 'base' },
-    { token_address: '0xusdc', role: 'quote' },
+    { token_address: WETH_ROBINHOOD.address.toLowerCase(), role: 'base' },
+    { token_address: USDG.address.toLowerCase(), role: 'quote' },
   ];
 
   it('accepts a pair whose both legs are whitelisted, case-insensitively', () => {
-    const checks = checkTokens(SPEC, allowed, 8453);
+    const checks = checkTokens(SPEC, allowed, ROBINHOOD_MAINNET_CHAIN_ID);
     expect(checks.every((c) => c.pass)).toBe(true);
   });
 
   it('refuses when only the base is whitelisted — the quote is what gets spent', () => {
-    const c = checkTokens(SPEC, [allowed[0]], 8453).find((x) => x.name === 'delegation_token')!;
+    const c = checkTokens(SPEC, [allowed[0]], ROBINHOOD_MAINNET_CHAIN_ID).find((x) => x.name === 'delegation_token')!;
     expect(c.pass).toBe(false);
-    expect(c.detail).toMatch(/USDC/);
+    expect(c.detail).toMatch(/USDG/);
   });
 
   it('refuses a token whitelisted in the wrong role', () => {
     const swapped = [
-      { token_address: '0xweth', role: 'quote' },
-      { token_address: '0xusdc', role: 'base' },
+      { token_address: WETH_ROBINHOOD.address.toLowerCase(), role: 'quote' },
+      { token_address: USDG.address.toLowerCase(), role: 'base' },
     ];
-    expect(checkTokens(SPEC, swapped, 8453).find((x) => x.name === 'delegation_token')!.pass).toBe(false);
+    expect(checkTokens(SPEC, swapped, ROBINHOOD_MAINNET_CHAIN_ID).find((x) => x.name === 'delegation_token')!.pass).toBe(false);
   });
 
   it('refuses a right-looking pair on the wrong chain', () => {
     const c = checkTokens(SPEC, allowed, 1).find((x) => x.name === 'delegation_chain')!;
     expect(c.pass).toBe(false);
-    expect(c.detail).toMatch(/chain 8453.*grant is 1/);
+    expect(c.detail).toMatch(/chain 4663.*grant is 1/);
   });
 
   it('an empty whitelist can buy nothing', () => {
-    expect(checkTokens(SPEC, [], 8453).find((x) => x.name === 'delegation_token')!.pass).toBe(false);
+    expect(checkTokens(SPEC, [], ROBINHOOD_MAINNET_CHAIN_ID).find((x) => x.name === 'delegation_token')!.pass).toBe(false);
   });
 });
 

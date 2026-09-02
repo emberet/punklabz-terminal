@@ -55,7 +55,7 @@ echo ">> remote build + restart"
 ssh "$HOST" "set -e
   cd $DEST
   npm ci
-  npm run build
+  VITE_PRIVY_APP_ID=\$(sed -n 's/^VITE_PRIVY_APP_ID=//p' .env | tail -n 1) npm run build
   mkdir -p backups data
   if [ -f data/punklabz.db ]; then
     BACKUP=backups/punklabz-\$(date -u +%Y%m%dT%H%M%SZ).db

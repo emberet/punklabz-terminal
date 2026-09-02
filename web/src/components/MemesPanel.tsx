@@ -51,7 +51,7 @@ export function MemesPanel() {
   }, []);
 
   return (
-    <Panel title="MEMES ▸ ALL CHAINS" term noPad right={<span className="chip chip-running">LIVE</span>}>
+    <Panel title="MEMES ▸ ALL CHAINS" term noPad right={<span className="chip chip-running">LIVE DATA</span>}>
       <div className="table-scroll">
         <table style={{ minWidth: 640 }}>
           <thead>

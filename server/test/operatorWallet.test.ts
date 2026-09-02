@@ -165,6 +165,18 @@ describe('linking accounts both ways', () => {
       `INSERT INTO xp_events (user_id, type, amount, ref_id, ts)
        VALUES (?, 'trade', 7, 42, ?)`,
     ).run(walletUser, Date.now());
+    const subscriptionId = Number(db.prepare(
+      `INSERT INTO subscriptions
+       (user_id,provider,product_code,provider_subscription_id,status,current_period_start,
+        current_period_end,cancel_at_period_end,provider_event_created_at,created_at,updated_at)
+       VALUES (?,'robinhood_usdg','lab_monthly','merge-payment','active',?,?,1,?,?,?)`,
+    ).run(walletUser, Date.now(), Date.now() + 86_400_000, Date.now(), Date.now(), Date.now()).lastInsertRowid);
+    db.prepare(
+      `INSERT INTO billing_payments
+       (user_id,subscription_id,provider,provider_payment_id,status,currency,amount_micro,
+        refunded_micro,provider_event_id,provider_event_created_at,occurred_at,created_at,updated_at)
+       VALUES (?,?,'robinhood_usdg','merge-payment','paid','USDG',20000000,0,'merge-payment',?,?,?,?)`,
+    ).run(walletUser, subscriptionId, Date.now(), Date.now(), Date.now(), Date.now());
     const emailUser = await registerEmail(db, 'other@punklabz.app', 'correct-horse', 'other');
     const targetBalance = balanceMicro(db, `user:${emailUser}`);
 
@@ -178,6 +190,10 @@ describe('linking accounts both ways', () => {
     expect(userFromSession(db, walletSession)!.id).toBe(emailUser);
     expect(db.prepare('SELECT count(*) n FROM xp_events WHERE user_id=?').get(emailUser))
       .toMatchObject({ n: 1 });
+    expect(db.prepare('SELECT user_id FROM subscriptions WHERE id=?').get(subscriptionId))
+      .toMatchObject({ user_id: emailUser });
+    expect(db.prepare('SELECT user_id FROM billing_payments WHERE subscription_id=?').get(subscriptionId))
+      .toMatchObject({ user_id: emailUser });
     // Duplicate identity creation must not award a second signup credit.
     expect(balanceMicro(db, `user:${emailUser}`)).toBe(targetBalance);
   });

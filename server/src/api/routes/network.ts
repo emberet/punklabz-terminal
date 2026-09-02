@@ -8,8 +8,24 @@ import { getOpenPositions } from '../../engine/accounting.js';
 import { demoWindow, forumRoster, humanPost, recentPosts } from '../../toolkit/forum.js';
 import { backtestLoad } from '../../backtest/backtester.js';
 import { classifyRegime, REGIME_AFFINITY } from '../../analysis/regime.js';
+import { config } from '../../config.js';
+import { subscriptionGraceAccess } from '../../billing/subscriptions.js';
+import { moderateHumanForumPost, recordModeration } from '../../toolkit/forumModeration.js';
+import { takeRateLimit } from '../../research/budget.js';
 
 const MAJORS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'];
+const MEMBER_CHAT_GRACE_MS = 48 * 3_600_000;
+
+function validSameOrigin(request: any): boolean {
+  if (request.headers['x-requested-with'] !== 'punklabz') return false;
+  const origin = request.headers.origin as string | undefined;
+  if (!origin || !config.appOrigin) return false;
+  try {
+    return new URL(origin).origin === new URL(config.appOrigin).origin;
+  } catch {
+    return false;
+  }
+}
 
 export function registerNetworkRoutes(server: FastifyInstance, app: AppContext) {
   // topbar / boot page stats
@@ -126,8 +142,13 @@ export function registerNetworkRoutes(server: FastifyInstance, app: AppContext) 
   server.get('/api/forum', async (request) => {
     const q = z.object({ limit: z.coerce.number().min(1).max(120).default(60) }).parse(request.query);
     const window = demoWindow(app.db);
+    const viewer = currentUser(app, request);
+    const writeAccess = viewer
+      ? subscriptionGraceAccess(app.db, viewer.id, config.billingEnforced, MEMBER_CHAT_GRACE_MS)
+      : { allowed: false, reason: 'connect an account to write' };
     return {
       posts: recentPosts(app.db, q.limit),
+      writeAccess: { allowed: writeAccess.allowed, reason: writeAccess.reason },
       // the demo window, so the room can say how long it has left rather than
       // going quiet without explanation
       demo: {
@@ -149,7 +170,25 @@ export function registerNetworkRoutes(server: FastifyInstance, app: AppContext) 
   }, async (request, reply) => {
     const user = requireUser(app, request, reply);
     if (!user) return;
+    if (!validSameOrigin(request)) {
+      return reply.code(403).send({ error: 'same-origin CSRF validation failed' });
+    }
+    const access = subscriptionGraceAccess(app.db, user.id, config.billingEnforced, MEMBER_CHAT_GRACE_MS);
+    if (!access.allowed) {
+      return reply.code(402).send({ error: access.reason, code: 'membership_required' });
+    }
     const body = z.object({ body: z.string().min(1).max(600) }).parse(request.body);
+    const quota = takeRateLimit(app.db, `forum:human:${user.id}`, {
+      cooldownMs: 2_000, maxInWindow: 120, windowMs: 86_400_000,
+    });
+    if (!quota.allowed) return reply.code(429).send({ error: quota.reason });
+    const moderation = moderateHumanForumPost(body.body);
+    if (!moderation.accepted) {
+      recordModeration(app.db, {
+        userId: user.id, hash: moderation.hash, verdict: 'rejected', rules: moderation.rules,
+      });
+      return reply.code(422).send({ error: 'message blocked by room safety filter', rules: moderation.rules });
+    }
     return humanPost(
       app.db, app.hub, app.candles, (s) => app.executor.getMark(s),
       { id: user.id, displayName: user.displayName }, body.body,

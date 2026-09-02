@@ -20,10 +20,10 @@ function emailCopy(row: NotificationRow): { subject: string; text: string } {
   }
   const renewal = new Date(row.period_end).toISOString().slice(0, 10);
   return {
-    subject: 'PunkLabz Lab renews in 5 days',
+    subject: 'PunkLabz Lab access ends in 5 days',
     text:
-      `Your $20/month PunkLabz Lab membership is scheduled to renew on ${renewal}. ` +
-      `Manage it at ${config.appOrigin}/billing.`,
+      `Your PunkLabz Lab membership period ends on ${renewal}. ` +
+      `Send the next exact 20 USDG payment from ${config.appOrigin}/billing to extend access.`,
   };
 }
 
@@ -67,7 +67,7 @@ export async function processBillingReminders(db: DB): Promise<{
        SELECT 1 FROM subscriptions s
        WHERE s.id=billing_notifications.subscription_id
          AND s.status IN ('active','trialing')
-         AND s.cancel_at_period_end=0
+         AND (s.cancel_at_period_end=0 OR s.provider='robinhood_usdg')
          AND s.current_period_end=billing_notifications.period_end
      )`,
   ).run(now);
@@ -81,7 +81,7 @@ export async function processBillingReminders(db: DB): Promise<{
            SELECT 1 FROM subscriptions s
            WHERE s.id=n.subscription_id
              AND s.status IN ('active','trialing')
-             AND s.cancel_at_period_end=0
+             AND (s.cancel_at_period_end=0 OR s.provider='robinhood_usdg')
              AND s.current_period_end=n.period_end
          )
        )

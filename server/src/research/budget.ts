@@ -27,24 +27,29 @@ export function costUsd(tokensIn: number, tokensOut: number): number {
 }
 
 const month = () => new Date().toISOString().slice(0, 7);
-export type BudgetScope = 'shared' | 'intern' | 'trading_council';
+export type BudgetScope = 'shared' | 'intern' | 'trading_council' | 'agent_chat';
 
 export function monthlySpendUsd(db: DB, scope: BudgetScope = 'shared'): number {
   const row = (scope === 'intern'
     ? db.prepare(`SELECT COALESCE(SUM(cost_micro), 0) c FROM llm_budget WHERE month = ? AND caller = 'intern'`).get(month())
     : scope === 'trading_council'
       ? db.prepare(`SELECT COALESCE(SUM(cost_micro), 0) c FROM llm_budget WHERE month = ? AND caller = 'trading_council'`).get(month())
-      : db.prepare(`SELECT COALESCE(SUM(cost_micro), 0) c FROM llm_budget WHERE month = ? AND caller NOT IN ('intern','trading_council')`).get(month())) as { c: number };
+      : scope === 'agent_chat'
+        ? db.prepare(`SELECT COALESCE(SUM(cost_micro), 0) c FROM llm_budget WHERE month = ? AND caller = 'agent_chat'`).get(month())
+        : db.prepare(`SELECT COALESCE(SUM(cost_micro), 0) c FROM llm_budget WHERE month = ? AND caller NOT IN ('intern','trading_council','agent_chat')`).get(month())) as { c: number };
   return row.c / 1_000_000;
 }
 
 function scopeFor(caller: string): BudgetScope {
-  return caller === 'intern' ? 'intern' : caller === 'trading_council' ? 'trading_council' : 'shared';
+  return caller === 'intern' ? 'intern'
+    : caller === 'trading_council' ? 'trading_council'
+      : caller === 'agent_chat' ? 'agent_chat' : 'shared';
 }
 
 function capFor(scope: BudgetScope): number {
   if (scope === 'intern') return config.internLlmBudgetUsd;
   if (scope === 'trading_council') return config.tradingCouncilLlmBudgetUsd;
+  if (scope === 'agent_chat') return config.agentChatLlmBudgetUsd;
   return config.llmBudgetUsd;
 }
 
@@ -158,7 +163,9 @@ export function budgetView(db: DB, scope: BudgetScope = 'shared'): BudgetView {
     ? db.prepare(`SELECT * FROM llm_budget WHERE month = ? AND caller = 'intern' ORDER BY cost_micro DESC`).all(month())
     : scope === 'trading_council'
       ? db.prepare(`SELECT * FROM llm_budget WHERE month = ? AND caller = 'trading_council' ORDER BY cost_micro DESC`).all(month())
-      : db.prepare(`SELECT * FROM llm_budget WHERE month = ? AND caller NOT IN ('intern','trading_council') ORDER BY cost_micro DESC`).all(month())) as any[];
+      : scope === 'agent_chat'
+        ? db.prepare(`SELECT * FROM llm_budget WHERE month = ? AND caller = 'agent_chat' ORDER BY cost_micro DESC`).all(month())
+        : db.prepare(`SELECT * FROM llm_budget WHERE month = ? AND caller NOT IN ('intern','trading_council','agent_chat') ORDER BY cost_micro DESC`).all(month())) as any[];
   return {
     month: month(),
     capUsd: capFor(scope),

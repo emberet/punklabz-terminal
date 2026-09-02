@@ -721,6 +721,12 @@ export function registerLiveRoutes(server: FastifyInstance, app: AppContext) {
          FROM manager_capital_allocations m JOIN bots b ON b.id=m.bot_id
          WHERE m.execution_account_id=? ORDER BY b.name`,
       ).all(accountForMode(app.db, 'canary', ROBINHOOD_VENUE).id),
+      managerRuns: app.db.prepare(
+        `SELECT id,status,reason,authorized_capital_micro authorizedCapitalMicro,
+                reconciled_nav_micro reconciledNavMicro,reserve_micro reserveMicro,
+                allocatable_micro allocatableMicro,started_at startedAt,completed_at completedAt
+         FROM manager_rebalance_runs ORDER BY id DESC LIMIT 10`,
+      ).all(),
       bots: app.db.prepare(
         `SELECT id, name, status FROM bots WHERE status IN ('running','paused') ORDER BY name`,
       ).all(),

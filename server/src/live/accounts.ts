@@ -18,6 +18,7 @@ export interface ExecutionAccount {
   chainId: number | null;
   settlementAsset: string | null;
   role: 'book' | 'manager_operating' | 'trader';
+  delegationGrantId: number | null;
 }
 
 export const ROBINHOOD_TRADER_ACCOUNT = 'ROBINHOOD_TRADER_01';
@@ -36,6 +37,7 @@ function row(r: any): ExecutionAccount {
     chainId: r.chain_id ?? null,
     settlementAsset: r.settlement_asset ?? null,
     role: r.role ?? (r.venue === 'evm:robinhood' ? 'trader' : 'book'),
+    delegationGrantId: r.delegation_grant_id ?? null,
   };
 }
 

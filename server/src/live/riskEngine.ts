@@ -26,6 +26,7 @@ export function getLiveConfig(db: DB): {
   limits: RiskLimits;
   phase: LiveExecutionPhase;
   autonomyEnabled: boolean;
+  authorizedCapitalUsdg: number | null;
 } {
   let row = db.prepare(`SELECT * FROM live_config WHERE id = 1`).get() as any;
   if (!row) {
@@ -42,6 +43,8 @@ export function getLiveConfig(db: DB): {
     limits: { ...DEFAULT_LIMITS, ...JSON.parse(row.limits_json) },
     phase: (row.execution_phase ?? row.mode) as LiveExecutionPhase,
     autonomyEnabled: row.autonomy_enabled === 1,
+    authorizedCapitalUsdg: row.authorized_capital_usdg === null || row.authorized_capital_usdg === undefined
+      ? null : Number(row.authorized_capital_usdg),
   };
 }
 

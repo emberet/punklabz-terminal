@@ -3,6 +3,8 @@ import { Panel } from '../components/Panel';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { usePageMeta } from '../lib/pageMeta';
+import { useCreateWallet, usePrivy, useSigners } from '@privy-io/react-auth';
+import { type BotSummary, ROBINHOOD_MAINNET_CHAIN_ID, USDG, WETH_ROBINHOOD } from '@punklabz/shared';
 
 interface Caps {
   perTradeUsd: number;
@@ -33,6 +35,7 @@ interface CeilingView {
 
 interface Grant {
   id: number;
+  botId: number;
   botName: string | null;
   walletAddress: string;
   chainId: number;
@@ -50,6 +53,17 @@ interface Grant {
 
 interface PreflightCheck { name: string; pass: boolean; detail: string; blocking: boolean }
 
+interface BotWallet {
+  botId: number;
+  botName: string;
+  walletAddress: string;
+  chainId: number;
+  state: string;
+  screeningStatus: string;
+  reconciledHoldings: Record<string, number>;
+  reconciliation: null | { status: string; completedAt: number | null; detail: string };
+}
+
 const usd = (n: number) => `$${n.toFixed(2)}`;
 const shortAddr = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
@@ -63,13 +77,15 @@ export function Delegation() {
   const { user } = useAuth();
   const [view, setView] = useState<CeilingView | null>(null);
   const [grants, setGrants] = useState<Grant[]>([]);
+  const [wallets, setWallets] = useState<BotWallet[]>([]);
   const [preflight, setPreflight] = useState<PreflightCheck[] | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [fundingHashes, setFundingHashes] = useState<Record<number, string>>({});
 
   const [caps, setCaps] = useState<Caps>({
     perTradeUsd: 5, dailyUsd: 10, cumulativeUsd: 25,
-    maxOpenNotionalUsd: 25, maxSlippageBps: 50,
+    maxOpenNotionalUsd: 25, maxSlippageBps: 35,
   });
   const [applied, setApplied] = useState<{ applied: Caps; clampedFields: string[] } | null>(null);
 
@@ -77,6 +93,7 @@ export function Delegation() {
     api.get<CeilingView>('/api/delegation/ceiling').then(setView).catch(() => {});
     if (user) {
       api.get<{ grants: Grant[] }>('/api/delegation/grants').then((r) => setGrants(r.grants)).catch(() => {});
+      api.get<{ wallets: BotWallet[] }>('/api/delegation/bot-wallets').then((r) => setWallets(r.wallets)).catch(() => {});
       api.get<{ checks: PreflightCheck[] }>('/api/delegation/preflight')
         .then((r) => setPreflight(r.checks)).catch(() => {});
     }
@@ -122,6 +139,54 @@ export function Delegation() {
       load();
     } catch (e) {
       setNotice(String(e instanceof Error ? e.message : e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const grantAction = async (id: number, action: 'reconcile' | 'withdrawal-check') => {
+    setBusy(id);
+    setNotice(null);
+    try {
+      const result = await api.post<any>(`/api/delegation/grants/${id}/${action}`);
+      setNotice(action === 'withdrawal-check'
+        ? `${result.detail}. Wallet ${shortAddr(result.walletAddress)} is clean for an in-kind withdrawal.`
+        : `Reconciliation ${result.reconciliation.status}: ${result.reconciliation.detail}`);
+      load();
+    } catch (error) {
+      setNotice(String(error instanceof Error ? error.message : error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const importFunding = async (id: number) => {
+    const txHash = fundingHashes[id]?.trim();
+    if (!txHash) return;
+    setBusy(id);
+    setNotice(null);
+    try {
+      const result = await api.post<any>(`/api/delegation/grants/${id}/funding/import`, { txHash });
+      setNotice(`Funding verified and reconciled: ${JSON.stringify(result.holdings)}`);
+      setFundingHashes((current) => ({ ...current, [id]: '' }));
+      load();
+    } catch (error) {
+      setNotice(String(error instanceof Error ? error.message : error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const activate = async (id: number) => {
+    setBusy(id);
+    setNotice(null);
+    try {
+      const cfg = await api.post<{ signer: { signerId: string } }>('/api/delegation/provisioning-config');
+      await api.post(`/api/delegation/grants/${id}/activate`, { sessionSignerId: cfg.signer.signerId });
+      setNotice('Bot wallet screened, policy verified, and live delegation activated.');
+      load();
+    } catch (error) {
+      setNotice(String(error instanceof Error ? error.message : error));
     } finally {
       setBusy(null);
     }
@@ -324,6 +389,17 @@ export function Delegation() {
         </div>
       </Panel>
 
+      {user && import.meta.env.VITE_PRIVY_APP_ID && (
+        <PrivyBotProvisioner
+          open={view.open}
+          linked={!!user.hasPrivy}
+          caps={applied?.applied ?? caps}
+          consentText={view.consentText}
+          onNotice={setNotice}
+          onComplete={load}
+        />
+      )}
+
       <Panel
         title="YOUR GRANTS"
         sub={grants.length ? `${grants.length} on record` : 'none yet'}
@@ -339,6 +415,19 @@ export function Delegation() {
         )}
         {grants.map((g) => (
           <div className="panel-body" key={g.id} style={{ borderTop: '1px solid var(--border)' }}>
+            {(() => {
+              const wallet = wallets.find((item) => item.botId === g.botId);
+              return wallet ? (
+                <div className="row" style={{ gap: 12, flexWrap: 'wrap', marginBottom: 6 }}>
+                  <span className="soft">wallet {wallet.state.toUpperCase()}</span>
+                  <span className="soft">USDG {Number(wallet.reconciledHoldings.USDG ?? 0).toFixed(6)}</span>
+                  <span className="soft">ETH {Number(wallet.reconciledHoldings.ETH ?? 0).toFixed(6)}</span>
+                  <span className={wallet.reconciliation?.status === 'clean' ? 'phos' : 'soft'}>
+                    RECON {wallet.reconciliation?.status?.toUpperCase() ?? 'NONE'}
+                  </span>
+                </div>
+              ) : null;
+            })()}
             <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
               <span className="phos">{g.botName ?? `machine #${g.id}`}</span>
               <span className="soft">{shortAddr(g.walletAddress)}</span>
@@ -354,6 +443,22 @@ export function Delegation() {
             </div>
             {g.revokeReason && <div className="soft" style={{ marginTop: 4 }}>{g.revokeReason}</div>}
             <div className="row" style={{ gap: 10, marginTop: 8 }}>
+              {g.status === 'pending' && (
+                <>
+                  <input
+                    aria-label="Funding transaction hash"
+                    placeholder="0x funding transaction"
+                    value={fundingHashes[g.id] ?? ''}
+                    onChange={(event) => setFundingHashes((current) => ({ ...current, [g.id]: event.target.value }))}
+                    style={{ minWidth: 250 }}
+                  />
+                  <button disabled={busy === g.id || !fundingHashes[g.id]} onClick={() => void importFunding(g.id)}>
+                    IMPORT FUNDING
+                  </button>
+                  <button disabled={busy === g.id} onClick={() => void grantAction(g.id, 'reconcile')}>RECONCILE</button>
+                  <button className="primary" disabled={busy === g.id} onClick={() => void activate(g.id)}>ACTIVATE</button>
+                </>
+              )}
               {(g.status === 'active' || g.status === 'paused') && (
                 <button disabled={busy === g.id} onClick={() => void setPaused(g.id, g.status === 'active')}>
                   {g.status === 'active' ? 'PAUSE' : 'RESUME'}
@@ -362,6 +467,11 @@ export function Delegation() {
               {g.status !== 'revoked' && g.status !== 'expired' && (
                 <button className="danger" disabled={busy === g.id} onClick={() => void revoke(g.id)}>
                   REVOKE NOW
+                </button>
+              )}
+              {['paused', 'revoked', 'expired'].includes(g.status) && (
+                <button disabled={busy === g.id} onClick={() => void grantAction(g.id, 'withdrawal-check')}>
+                  WITHDRAWAL CHECK
                 </button>
               )}
             </div>
@@ -373,5 +483,125 @@ export function Delegation() {
         </div>
       </Panel>
     </div>
+  );
+}
+
+function PrivyBotProvisioner({
+  open, linked, caps, consentText, onNotice, onComplete,
+}: {
+  open: boolean;
+  linked: boolean;
+  caps: Caps;
+  consentText: string;
+  onNotice: (message: string | null) => void;
+  onComplete: () => void;
+}) {
+  const { ready, authenticated, user } = usePrivy();
+  const { createWallet } = useCreateWallet();
+  const { addSigners, removeSigners } = useSigners();
+  const [bots, setBots] = useState<BotSummary[]>([]);
+  const [walletBotIds, setWalletBotIds] = useState<Set<number>>(new Set());
+  const [botId, setBotId] = useState<number | ''>('');
+  const [consent, setConsent] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open || !linked || !authenticated) return;
+    void Promise.all([
+      api.get<{ bots: BotSummary[] }>('/api/my/bots?limit=100'),
+      api.get<{ wallets: BotWallet[] }>('/api/delegation/bot-wallets'),
+    ]).then(([owned, walletRows]) => {
+      setBots(owned.bots);
+      setWalletBotIds(new Set(walletRows.wallets.map((wallet) => wallet.botId)));
+      const next = owned.bots.find((bot) => !walletRows.wallets.some((wallet) => wallet.botId === bot.id));
+      setBotId(next?.id ?? '');
+    }).catch((error) => onNotice(error.message));
+  }, [open, linked, authenticated]);
+
+  const provision = async () => {
+    if (!user || !botId || !consent) return;
+    setBusy(true);
+    onNotice(null);
+    let createdAddress: string | null = null;
+    let signerAttached = false;
+    try {
+      const cfg = await api.post<{ signer: { signerId: string; policyId: string } }>(
+        '/api/delegation/provisioning-config',
+      );
+      const hasEmbedded = user.linkedAccounts.some((account) => account.type === 'wallet'
+        && (account.walletClientType === 'privy' || account.walletClientType === 'privy-v2'));
+      const wallet = await createWallet(hasEmbedded ? { createAdditional: true } : undefined);
+      createdAddress = wallet.address;
+      const created = await api.post<{ grant: Grant }>('/api/delegation/grants', {
+        botId,
+        providerUserId: user.id,
+        walletAddress: wallet.address,
+        chainId: ROBINHOOD_MAINNET_CHAIN_ID,
+        caps,
+        allowedTokens: [
+          { address: WETH_ROBINHOOD.address, symbol: 'WETH', decimals: WETH_ROBINHOOD.decimals, role: 'base' },
+          { address: USDG.address, symbol: 'USDG', decimals: USDG.decimals, role: 'quote' },
+        ],
+        durationDays: 30,
+        consentAccepted: true,
+      });
+      const attached = await addSigners({
+        address: wallet.address,
+        signers: [{ signerId: cfg.signer.signerId, policyIds: [cfg.signer.policyId] }],
+      });
+      signerAttached = true;
+      const providerWallet = attached.user.linkedAccounts.find((account) => account.type === 'wallet'
+        && account.address.toLowerCase() === wallet.address.toLowerCase());
+      const providerWalletId = providerWallet && 'id' in providerWallet && typeof providerWallet.id === 'string'
+        ? providerWallet.id : null;
+      if (!providerWalletId) throw new Error('Privy did not return the delegated wallet ID');
+      await api.post(`/api/delegation/grants/${created.grant.id}/provider-wallet`, {
+        providerWalletId,
+        sessionSignerId: cfg.signer.signerId,
+      });
+      onNotice(`Isolated wallet ${shortAddr(wallet.address)} is recorded. Fund it with USDG and at least 0.005 ETH.`);
+      setConsent(false);
+      onComplete();
+    } catch (error) {
+      if (signerAttached && createdAddress) {
+        await removeSigners({ address: createdAddress }).catch(() => undefined);
+      }
+      onNotice(String(error instanceof Error ? error.message : error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const availableBots = bots.filter((bot) => !walletBotIds.has(bot.id));
+  return (
+    <Panel title="PROVISION LIVE BOT" sub="one isolated Privy wallet per machine" noPad>
+      <div className="panel-body">
+        {!open ? (
+          <div className="red">LOCKED AT DELEGATION TIER 0</div>
+        ) : !linked ? (
+          <div className="red">LINK PRIVY IDENTITY BEFORE PROVISIONING</div>
+        ) : !ready || !authenticated ? (
+          <div className="soft">REAUTHENTICATE WITH PRIVY TO CREATE A BOT WALLET</div>
+        ) : (
+          <>
+            <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+              <select value={botId} onChange={(event) => setBotId(Number(event.target.value) || '')} disabled={busy}>
+                <option value="">select paper machine</option>
+                {availableBots.map((bot) => <option key={bot.id} value={bot.id}>{bot.name}</option>)}
+              </select>
+              <span className="soft">WETH / USDG · CHAIN 4663 · NO LEVERAGE</span>
+            </div>
+            <label className="row" style={{ gap: 8, marginTop: 10, alignItems: 'flex-start' }}>
+              <input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />
+              <span className="soft">I ACCEPT THE DELEGATION CONSENT SHOWN ABOVE.</span>
+            </label>
+            <button className="primary" style={{ marginTop: 10 }} disabled={busy || !botId || !consent} onClick={() => void provision()}>
+              {busy ? 'PROVISIONING…' : 'CREATE ISOLATED BOT WALLET'}
+            </button>
+            <span className="dim" style={{ marginLeft: 10 }}>{consentText.split('\n')[0]}</span>
+          </>
+        )}
+      </div>
+    </Panel>
   );
 }

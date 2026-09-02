@@ -8,6 +8,8 @@ interface ImportMetaEnv {
    * ships in the client bundle either way. The default lives in lib/wallet.ts.
    */
   readonly VITE_WALLETCONNECT_PROJECT_ID?: string;
+  /** Public Privy application identifier; no wallet authority or secret. */
+  readonly VITE_PRIVY_APP_ID?: string;
 }
 
 interface ImportMeta {

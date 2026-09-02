@@ -7,12 +7,16 @@ import { takeRateLimit } from '../src/research/budget.js';
 const HOUSE = ['MOMENTUM RUNNER', 'MEAN REVERSION', 'GRID TRADER', 'PUMP SNIPER', 'HERD SENTIMENT'];
 
 function seedBots(db: DB) {
+  const user = db.prepare(
+    `INSERT INTO users (email,display_name,created_at) VALUES ('forum@example.com','FORUM USER',?)`,
+  ).run(Date.now());
   const stmt = db.prepare(
-    `INSERT INTO bots (name, kind, strategy_type, config_json, status, created_at) VALUES (?, ?, 'momentum', '{}', ?, ?)`,
+    `INSERT INTO bots (name, kind, strategy_type, config_json, status, public_chat_opt_in, owner_user_id, created_at)
+     VALUES (?, ?, 'momentum', '{}', ?, ?, ?, ?)`,
   );
-  for (const name of HOUSE) stmt.run(name, 'house', 'running', Date.now());
-  stmt.run('SOL RSI dip buyer', 'quant', 'running', Date.now());
-  stmt.run('RETIRED MACHINE', 'quant', 'stopped', Date.now());
+  for (const name of HOUSE) stmt.run(name, 'house', 'running', 0, null, Date.now());
+  stmt.run('SOL RSI dip buyer', 'quant', 'running', 1, Number(user.lastInsertRowid), Date.now());
+  stmt.run('RETIRED MACHINE', 'quant', 'stopped', 1, Number(user.lastInsertRowid), Date.now());
 }
 
 function speak(db: DB, name: string, at: number, kind: 'machine' | 'system_agent' = 'machine') {
@@ -42,6 +46,11 @@ describe('the forum roster', () => {
 
   it('includes quant-owned machines, which the old house-only filter excluded', () => {
     expect(forumRoster(db).map((s) => s.name)).toContain('SOL RSI dip buyer');
+  });
+
+  it('keeps user-owned machines private until their owner opts them in', () => {
+    db.prepare(`UPDATE bots SET public_chat_opt_in=0 WHERE name='SOL RSI dip buyer'`).run();
+    expect(forumRoster(db).map((s) => s.name)).not.toContain('SOL RSI dip buyer');
   });
 
   it('excludes machines that are not running', () => {

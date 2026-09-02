@@ -7,6 +7,7 @@ import { appendAudit } from '../audit/auditLog.js';
 import { settleConfirmedOrder } from './settlement.js';
 import { rawHoldings } from './rawAssetLedger.js';
 import { activeUniverse, universeAssets } from '../robinhood/universe.js';
+import { revocationCache } from './delegation/revocationCache.js';
 
 // RECONCILIATION.
 //
@@ -19,6 +20,31 @@ import { activeUniverse, universeAssets } from '../robinhood/universe.js';
 // reasons to halt and have a human look.
 
 const DRIFT_TOLERANCE = 1e-6;
+
+function containFailure(db: DB, account: ReturnType<typeof getAccount>, detail: string): 'bot' | 'house' {
+  if (account?.delegationGrantId) {
+    const grantId = account.delegationGrantId;
+    db.transaction(() => {
+      db.prepare(
+        `UPDATE delegation_grants
+         SET status=CASE WHEN status='active' THEN 'paused' ELSE status END,updated_at=?
+         WHERE id=? AND status IN ('pending','active','paused')`,
+      ).run(Date.now(), grantId);
+      db.prepare(
+        `UPDATE bot_live_wallets SET state='blocked',updated_at=?
+         WHERE execution_account_id=?`,
+      ).run(Date.now(), account.id);
+      db.prepare(`UPDATE execution_accounts SET active=0 WHERE id=?`).run(account.id);
+      appendAudit(db, 'reconciler', 'delegated_account_blocked', {
+        accountId: account.id, grantId, detail,
+      });
+    })();
+    revocationCache.revoke(grantId);
+    return 'bot';
+  }
+  haltNetwork(db, detail, 'reconciler');
+  return 'house';
+}
 
 export interface ReconcilePass {
   runId: number | null;
@@ -65,11 +91,13 @@ export async function reconcileAccount(
   ).run(accountId, startedAt);
   const runId = Number(runInfo.lastInsertRowid);
   if (typeof adapter.reconcile !== 'function') {
+    const detail = `${adapter.venue} cannot report venue state — cannot verify what we believe`;
     db.prepare(`UPDATE reconciliation_runs SET status='failed', completed_at=?, detail=? WHERE id=?`)
-      .run(Date.now(), `${adapter.venue} cannot report venue state`, runId);
+      .run(Date.now(), detail, runId);
+    containFailure(db, account, `reconciliation failure on ${account.name}: ${detail}`);
     return {
       runId, accountId, accountName: account.name, ok: false, drifts: [],
-      detail: `${adapter.venue} cannot report venue state — cannot verify what we believe`,
+      detail,
     };
   }
 
@@ -81,14 +109,14 @@ export async function reconcileAccount(
     const detail = `venue state unreadable: ${String(error).slice(0, 160)}`;
     db.prepare(`UPDATE reconciliation_runs SET status='failed', completed_at=?, detail=? WHERE id=?`)
       .run(Date.now(), detail, runId);
-    haltNetwork(db, `reconciliation failure on ${account.name}: ${detail}`, 'reconciler');
+    containFailure(db, account, `reconciliation failure on ${account.name}: ${detail}`);
     appendAudit(db, 'reconciler', 'reconciliation_failure', { accountId, detail });
     return { runId, accountId, accountName: account.name, ok: false, detail, drifts: [] };
   }
   if (!truth.ok) {
     db.prepare(`UPDATE reconciliation_runs SET status='failed', completed_at=?, detail=? WHERE id=?`)
       .run(Date.now(), truth.detail, runId);
-    haltNetwork(db, `reconciliation failure on ${account.name}: ${truth.detail}`, 'reconciler');
+    containFailure(db, account, `reconciliation failure on ${account.name}: ${truth.detail}`);
     appendAudit(db, 'reconciler', 'reconciliation_failure', { accountId, detail: truth.detail });
     return { runId, accountId, accountName: account.name, ok: false, detail: truth.detail, drifts: [] };
   }
@@ -137,8 +165,8 @@ export async function reconcileAccount(
   if (!ok) {
     const summary = drifts.map((d) => `${d.asset} drift ${d.drift.toFixed(8)}`).join(', ');
     appendAudit(db, 'reconciler', 'reconciliation_failure', { accountId, drifts });
-    haltNetwork(db, `reconciliation failure on ${account.name}: ${summary}`, 'reconciler');
-    hub?.publish('live', { event: 'reconciliation_failure', accountId, drifts });
+    const scope = containFailure(db, account, `reconciliation failure on ${account.name}: ${summary}`);
+    hub?.publish('live', { event: 'reconciliation_failure', accountId, drifts, scope });
     db.prepare(`UPDATE reconciliation_runs SET status='failed', completed_at=?, detail=? WHERE id=?`)
       .run(ts, summary, runId);
   } else {
@@ -164,6 +192,17 @@ export async function reconcileAccount(
                AND t.confirmations >= 12
            )`,
       ).run(runId, accountId, ts);
+      if (account.delegationGrantId) {
+        db.prepare(
+          `UPDATE bot_live_wallets
+           SET state=CASE
+             WHEN (SELECT status FROM delegation_grants WHERE id=?)='pending' THEN 'ready'
+             WHEN (SELECT status FROM delegation_grants WHERE id=?)='paused' THEN 'paused'
+             ELSE state END,
+             updated_at=?
+           WHERE execution_account_id=?`,
+        ).run(account.delegationGrantId, account.delegationGrantId, ts, accountId);
+      }
     })();
   }
   return {
@@ -276,7 +315,7 @@ export async function reconcileAll(
             (execution_account_id, started_at, completed_at, status, detail, actor)
            VALUES (?, ?, ?, 'failed', ?, 'reconciler')`,
         ).run(account.id, now, now, pass.detail);
-        haltNetwork(db, pass.detail, 'reconciler');
+        containFailure(db, account, pass.detail);
         appendAudit(db, 'reconciler', 'adapter_missing', { accountId: account.id, venue: account.venue });
       }
       continue;

@@ -1,4 +1,5 @@
 import { api } from './api';
+import { USDG } from '@punklabz/shared';
 import {
   selectWalletConnectAccount,
   type WalletConnectSession,
@@ -105,7 +106,10 @@ async function walletConnectProvider(): Promise<WalletConnectProvider> {
     projectId: WALLETCONNECT_PROJECT_ID,
     chains: [],
     optionalChains: [1, ROBINHOOD_CHAIN_ID, 8453, 42161],
-    optionalMethods: ['personal_sign', 'eth_accounts', 'eth_requestAccounts'],
+    optionalMethods: [
+      'personal_sign', 'eth_accounts', 'eth_requestAccounts', 'eth_sendTransaction',
+      'wallet_switchEthereumChain', 'wallet_addEthereumChain',
+    ],
     optionalEvents: ['accountsChanged', 'chainChanged', 'disconnect'],
     rpcMap: { 1: 'https://eth.llamarpc.com', [ROBINHOOD_CHAIN_ID]: ROBINHOOD_RPC },
     showQrModal: true,
@@ -335,6 +339,51 @@ export async function switchToRobinhoodChain(): Promise<boolean> {
       return false;
     }
   }
+}
+
+function uint256Hex(value: bigint): string {
+  if (value < 0n) throw new WalletError('token amount cannot be negative');
+  return value.toString(16).padStart(64, '0');
+}
+
+/** Request one exact USDG transfer. The server still verifies the finalized receipt. */
+export async function sendUsdgTransfer(args: {
+  payerAddress: string;
+  recipientAddress: string;
+  rawAmount: string;
+}): Promise<string> {
+  const provider = getProvider();
+  if (!provider) throw new WalletError('connect the linked payer wallet before paying');
+  const account = await currentAccount();
+  if (!account) throw new WalletError('wallet returned no active account');
+  if (account.toLowerCase() !== args.payerAddress.toLowerCase()) {
+    throw new WalletError('active wallet does not match the selected linked payer wallet');
+  }
+  if (!/^0x[0-9a-fA-F]{40}$/.test(args.recipientAddress)) {
+    throw new WalletError('membership treasury address is invalid');
+  }
+  let raw: bigint;
+  try { raw = BigInt(args.rawAmount); } catch { throw new WalletError('membership amount is invalid'); }
+  if (raw !== 20_000_000n) throw new WalletError('membership request is not exactly 20 USDG');
+  if (!(await switchToRobinhoodChain())) {
+    throw new WalletError('switch the wallet to Robinhood Chain and reconnect if WalletConnect did not approve chain 4663');
+  }
+  const chainId = await currentChainId();
+  if (chainId !== ROBINHOOD_CHAIN_ID) throw new WalletError(`wallet is on chain ${chainId ?? 'unknown'}, not Robinhood Chain 4663`);
+  const data = `0xa9059cbb${args.recipientAddress.toLowerCase().slice(2).padStart(64, '0')}${uint256Hex(raw)}`;
+  const hash = await provider.request({
+    method: 'eth_sendTransaction',
+    params: [{
+      from: account,
+      to: USDG.address,
+      data,
+      value: '0x0',
+    }],
+  });
+  if (typeof hash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(hash)) {
+    throw new WalletError('wallet did not return a valid transaction hash');
+  }
+  return hash.toLowerCase();
 }
 
 /**

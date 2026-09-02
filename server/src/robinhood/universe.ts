@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { getAddress } from 'viem';
-import { ROBINHOOD_MAINNET_CHAIN_ID, USDG, type RhAssetClass } from '@punklabz/shared';
+import {
+  ROBINHOOD_MAINNET_CHAIN_ID, USDG, WETH_ROBINHOOD, type RhAssetClass,
+} from '@punklabz/shared';
 import type { DB } from '../db/db.js';
 import { corporateActionState } from './corporateActions.js';
 import { lastReferenceQuote, referencePriceGate } from './referencePrice.js';
@@ -72,17 +74,19 @@ export function createUniverseSnapshot(db: DB, actor: string): UniverseSnapshot 
      FROM rh_assets
      WHERE chain_id=? AND verified_onchain=1 AND tradable=1
        AND status='ASSET_STATUS_ACTIVE'
+       AND asset_class IN ('CRYPTO','STABLECOIN')
+       AND lower(contract_address) IN (lower(?), lower(?))
      ORDER BY lower(contract_address)`,
-  ).all(ROBINHOOD_MAINNET_CHAIN_ID) as any[];
+  ).all(ROBINHOOD_MAINNET_CHAIN_ID, WETH_ROBINHOOD.address, USDG.address) as any[];
   const assets: UniverseAsset[] = rows.map((r) => ({
     symbol: String(r.symbol).toUpperCase(), contractAddress: getAddress(r.contract_address).toLowerCase(),
     decimals: Number(r.decimals), assetClass: r.asset_class, multiplier: String(r.multiplier),
     tradingCapabilities: JSON.parse(r.capabilities), registryVerifiedAt: Number(r.last_verified_at),
     policyReferencePriceUsd: null, policyRawCap: null,
   }));
-  if (assets.length < 2) throw new Error('verified universe needs at least two active assets');
-  if (!assets.some((a) => a.contractAddress === USDG.address.toLowerCase())) {
-    throw new Error('verified universe does not contain the USDG settlement contract');
+  const required = new Set([USDG.address.toLowerCase(), WETH_ROBINHOOD.address.toLowerCase()]);
+  if (assets.length !== required.size || assets.some((asset) => !required.has(asset.contractAddress))) {
+    throw new Error('crypto-core universe requires exactly the canonical WETH and USDG contracts');
   }
   const symbols = new Set<string>();
   for (const asset of assets) {

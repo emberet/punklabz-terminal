@@ -9,6 +9,7 @@ export interface Me {
   isAdmin: boolean;
   hasEmail?: boolean;
   hasWallet?: boolean;
+  hasPrivy?: boolean;
 }
 
 interface AuthState {

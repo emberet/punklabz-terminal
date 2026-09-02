@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import { requireUser } from './auth.js';
 import { config } from '../../config.js';
@@ -10,6 +11,9 @@ import {
   applyStripeEvent, constructStripeEvent, createBillingPortal, createLabCheckout,
 } from '../../billing/stripeProvider.js';
 import { appendAudit } from '../../audit/auditLog.js';
+import {
+  confirmUsdgPayment, createUsdgPaymentIntent, getUsdgPaymentIntent, linkedWalletAddresses,
+} from '../../billing/usdgMembership.js';
 
 function requireBillingUser(app: AppContext, request: any, reply: any) {
   const user = requireUser(app, request, reply);
@@ -51,6 +55,8 @@ export function registerBillingRoutes(server: FastifyInstance, app: AppContext) 
         config.stripeSecretKey && config.stripeWebhookSecret &&
         config.stripeLabMonthlyPriceId && config.appOrigin
       ),
+      usdgPaymentAvailable: config.billingProvider === 'usdg' && !!config.billingTreasuryAddress,
+      linkedPayerWallets: linkedWalletAddresses(app.db, user.id),
       access: { allowed: access.allowed, reason: access.reason },
       subscription: access.subscription ? {
         status: access.subscription.status,
@@ -62,6 +68,48 @@ export function registerBillingRoutes(server: FastifyInstance, app: AppContext) 
       demoCreditsSeparate: true,
       creatorPaymentsLive: false,
     };
+  });
+
+  server.post('/api/billing/usdg/intents', {
+    config: { rateLimit: { max: 5, timeWindow: '5 minutes' } },
+  }, async (request, reply) => {
+    const user = requireBillingUser(app, request, reply);
+    if (!user) return;
+    const body = z.object({ payerAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/) }).safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: 'a linked EVM payer wallet is required' });
+    try {
+      return { intent: createUsdgPaymentIntent(app.db, user.id, body.data.payerAddress) };
+    } catch (error) {
+      return reply.code(409).send({ error: String(error instanceof Error ? error.message : error) });
+    }
+  });
+
+  server.get('/api/billing/usdg/intents/:id', async (request, reply) => {
+    const user = requireUser(app, request, reply);
+    if (!user) return;
+    const id = z.string().uuid().safeParse((request.params as any)?.id);
+    if (!id.success) return reply.code(400).send({ error: 'invalid payment intent' });
+    const intent = getUsdgPaymentIntent(app.db, user.id, id.data);
+    if (!intent) return reply.code(404).send({ error: 'payment intent not found' });
+    return { intent };
+  });
+
+  server.post('/api/billing/usdg/confirm', {
+    config: { rateLimit: { max: 12, timeWindow: '5 minutes' } },
+  }, async (request, reply) => {
+    const user = requireBillingUser(app, request, reply);
+    if (!user) return;
+    const body = z.object({
+      intentId: z.string().uuid(),
+      txHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+    }).safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: 'valid intentId and transaction hash are required' });
+    try {
+      return await confirmUsdgPayment(app.db, user.id, body.data.intentId, body.data.txHash);
+    } catch (error) {
+      const message = String(error instanceof Error ? error.message : error);
+      return reply.code(/not found/.test(message) ? 404 : 409).send({ error: message });
+    }
   });
 
   server.post('/api/billing/checkout', {

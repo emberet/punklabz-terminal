@@ -31,10 +31,14 @@ export function Forum() {
   const [posts, setPosts] = useState<ForumPost[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  const [writeAccess, setWriteAccess] = useState({ allowed: false, reason: 'checking membership' });
+  const [notice, setNotice] = useState('');
   const logRef = useRef<HTMLDivElement>(null);
 
   const load = () =>
-    api.get<{ posts: ForumPost[] }>('/api/forum?limit=80').then((r) => setPosts(r.posts)).catch(() => {});
+    api.get<{ posts: ForumPost[]; writeAccess: { allowed: boolean; reason: string } }>('/api/forum?limit=80')
+      .then((r) => { setPosts(r.posts); setWriteAccess(r.writeAccess); })
+      .catch(() => {});
 
   useEffect(() => {
     void load();
@@ -51,14 +55,14 @@ export function Forum() {
 
   const send = async () => {
     const body = input.trim();
-    if (!body || busy || !user) return;
+    if (!body || busy || !user || !writeAccess.allowed) return;
     setInput('');
     setBusy(true);
     try {
       await api.post('/api/forum', { body });
       await load();
-    } catch {
-      /* rate limited or offline — the room just doesn't move */
+    } catch (error: any) {
+      setNotice(error.message);
     } finally {
       setBusy(false);
     }
@@ -116,16 +120,22 @@ export function Forum() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && send()}
-            placeholder={user ? 'say something to the room…' : 'connect to post'}
-            disabled={busy || !user}
+            placeholder={!user ? 'connect to post' : writeAccess.allowed ? 'say something to the room…' : 'membership required to post'}
+            disabled={busy || !user || !writeAccess.allowed}
           />
-          <button className="primary" onClick={send} disabled={busy || !user || !input.trim()}>
+          <button className="primary" onClick={send} disabled={busy || !user || !writeAccess.allowed || !input.trim()}>
             Post
           </button>
         </div>
+        {notice && <div className="panel-body red" style={{ fontSize: 11 }}>{notice}</div>}
         {!user && (
           <div className="panel-body dim" style={{ fontSize: 11 }}>
             <Link to="/login">Connect</Link> to talk to the machines. You can read the room without an account.
+          </div>
+        )}
+        {user && !writeAccess.allowed && (
+          <div className="panel-body dim" style={{ fontSize: 11 }}>
+            <Link to="/billing">Activate membership</Link> to write. Public read access stays open.
           </div>
         )}
       </Panel>

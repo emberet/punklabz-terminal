@@ -90,6 +90,24 @@ export function subscriptionAccess(
   return { allowed: true, reason: 'active Lab membership', subscription };
 }
 
+/** Expired members may read/write the room briefly; trading and building stay closed. */
+export function subscriptionGraceAccess(
+  db: DB,
+  userId: number,
+  enforced: boolean,
+  graceMs: number,
+  now = Date.now(),
+): { allowed: boolean; reason: string; subscription: SubscriptionRecord | null } {
+  const strict = subscriptionAccess(db, userId, enforced, now);
+  if (strict.allowed || !enforced) return strict;
+  const subscription = strict.subscription;
+  if (subscription && ['active', 'trialing', 'granted'].includes(subscription.status)
+    && subscription.currentPeriodEnd <= now && subscription.currentPeriodEnd + graceMs > now) {
+    return { allowed: true, reason: 'membership read/chat grace period', subscription };
+  }
+  return strict;
+}
+
 export function bindBillingCustomer(
   db: DB,
   userId: number,
@@ -238,7 +256,7 @@ export function queueRenewalReminders(db: DB, now = Date.now()): number {
      FROM subscriptions s JOIN users u ON u.id=s.user_id
      WHERE s.product_code=?
        AND s.status IN ('active','trialing')
-       AND s.cancel_at_period_end=0
+       AND (s.cancel_at_period_end=0 OR s.provider='robinhood_usdg')
        AND s.current_period_end>? AND s.current_period_end<=?`,
   ).all(LAB_PRODUCT_CODE, now, now + RENEWAL_REMINDER_LEAD_MS) as {
     subscription_id: number;

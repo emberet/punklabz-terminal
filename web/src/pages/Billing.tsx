@@ -4,6 +4,7 @@ import { Panel } from '../components/Panel';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { usePageMeta } from '../lib/pageMeta';
+import { sendUsdgTransfer } from '../lib/wallet';
 
 export interface SubscriptionView {
   product: string;
@@ -11,8 +12,10 @@ export interface SubscriptionView {
   priceUsd: number;
   interval: string;
   enforced: boolean;
-  provider: 'none' | 'stripe';
+  provider: 'none' | 'stripe' | 'usdg';
   checkoutAvailable: boolean;
+  usdgPaymentAvailable: boolean;
+  linkedPayerWallets: string[];
   access: { allowed: boolean; reason: string };
   subscription: null | {
     status: string;
@@ -25,6 +28,21 @@ export interface SubscriptionView {
   creatorPaymentsLive: boolean;
 }
 
+interface UsdgIntent {
+  id: string;
+  chainId: number;
+  tokenAddress: string;
+  payerAddress: string;
+  recipientAddress: string;
+  rawAmount: string;
+  status: string;
+  txHash: string | null;
+  expiresAt: number;
+  error: string | null;
+}
+
+const PENDING_MEMBERSHIP_KEY = 'punklabz.usdg-membership';
+
 export function Billing() {
   usePageMeta('Access', 'Manage PunkLabz Lab membership and inspect the billing boundary.');
   const { user } = useAuth();
@@ -32,14 +50,26 @@ export function Billing() {
   const [status, setStatus] = useState<SubscriptionView | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
+  const [payer, setPayer] = useState('');
+  const [pending, setPending] = useState<{ intent: UsdgIntent; txHash: string } | null>(null);
 
   const load = () => {
     if (!user) return;
     void api.get<SubscriptionView>('/api/billing/subscription')
-      .then(setStatus)
+      .then((next) => {
+        setStatus(next);
+        setPayer((current) => current || next.linkedPayerWallets?.[0] || '');
+      })
       .catch((error) => setNotice(error.message));
   };
   useEffect(load, [user?.id]);
+  useEffect(() => {
+    if (!user) return;
+    try {
+      const stored = localStorage.getItem(`${PENDING_MEMBERSHIP_KEY}:${user.id}`);
+      if (stored) setPending(JSON.parse(stored));
+    } catch { /* a private browser may deny storage */ }
+  }, [user?.id]);
 
   const openHosted = async (endpoint: '/api/billing/checkout' | '/api/billing/portal') => {
     setBusy(true);
@@ -47,6 +77,52 @@ export function Billing() {
     try {
       const { url } = await api.post<{ url: string }>(endpoint);
       window.location.assign(url);
+    } catch (error: any) {
+      setNotice(error.message);
+      setBusy(false);
+    }
+  };
+
+  const confirmPending = async (value = pending) => {
+    if (!value) return;
+    setBusy(true);
+    setNotice('');
+    try {
+      const result = await api.post<{ intent: UsdgIntent; confirmations: number; periodEnd?: number }>(
+        '/api/billing/usdg/confirm', { intentId: value.intent.id, txHash: value.txHash },
+      );
+      if (result.intent.status === 'confirmed') {
+        setPending(null);
+        try { localStorage.removeItem(`${PENDING_MEMBERSHIP_KEY}:${user?.id}`); } catch { /* ignored */ }
+        setNotice('20 USDG finalized on Robinhood Chain. Membership is active.');
+        load();
+      } else {
+        const next = { intent: result.intent, txHash: value.txHash };
+        setPending(next);
+        setNotice(`Onchain payment found. Waiting for finality: ${result.confirmations}/12 confirmations.`);
+      }
+    } catch (error: any) {
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const payUsdg = async () => {
+    if (!payer) return;
+    setBusy(true);
+    setNotice('');
+    try {
+      const created = await api.post<{ intent: UsdgIntent }>('/api/billing/usdg/intents', { payerAddress: payer });
+      const txHash = await sendUsdgTransfer({
+        payerAddress: created.intent.payerAddress,
+        recipientAddress: created.intent.recipientAddress,
+        rawAmount: created.intent.rawAmount,
+      });
+      const next = { intent: created.intent, txHash };
+      setPending(next);
+      try { localStorage.setItem(`${PENDING_MEMBERSHIP_KEY}:${user?.id}`, JSON.stringify(next)); } catch { /* ignored */ }
+      await confirmPending(next);
     } catch (error: any) {
       setNotice(error.message);
       setBusy(false);
@@ -102,7 +178,7 @@ export function Billing() {
           <div><div className="stat-label">RENEWS / ENDS</div><div>{periodEnd ?? '—'}</div></div>
           <div><div className="stat-label">PROVIDER</div><div>{status?.provider?.toUpperCase() ?? '—'}</div></div>
         </div>
-        <p>AI strategy synthesis, historical backtests, mutation tools, and deployment of up to five arena machines.</p>
+        <p>AI strategy synthesis, historical backtests, mutation tools, and unlimited paper-machine creation with fair-use rate limits.</p>
         <p style={{ marginTop: 10 }} className="soft">
           Membership pays for product access. It never becomes USDG trading capital, wallet balance, paper P&amp;L, or a Manager allocation.
         </p>
@@ -117,19 +193,45 @@ export function Billing() {
           </div>
         )}
         <div className="row" style={{ marginTop: 16, gap: 8, flexWrap: 'wrap' }}>
-          {status?.subscription ? (
+          {status?.provider === 'usdg' && status.usdgPaymentAvailable && (
+            <>
+              <select value={payer} onChange={(event) => setPayer(event.target.value)} disabled={busy}>
+                {status.linkedPayerWallets.map((address) => (
+                  <option key={address} value={address}>{address.slice(0, 8)}...{address.slice(-6)}</option>
+                ))}
+              </select>
+              {!pending ? (
+                <button className="primary" disabled={busy || !payer} onClick={() => void payUsdg()}>
+                  {status.subscription ? 'RENEW 20 USDG' : 'PAY 20 USDG'}
+                </button>
+              ) : (
+                <button className="primary" disabled={busy} onClick={() => void confirmPending()}>
+                  CHECK 12-BLOCK FINALITY
+                </button>
+              )}
+            </>
+          )}
+          {status?.provider !== 'usdg' && status?.subscription ? (
             <button className="primary" disabled={busy || !status.checkoutAvailable} onClick={() => openHosted('/api/billing/portal')}>
               MANAGE BILLING
             </button>
-          ) : (
+          ) : status?.provider !== 'usdg' ? (
             <button className="primary" disabled={busy || !status?.checkoutAvailable} onClick={() => openHosted('/api/billing/checkout')}>
               JOIN LAB // $20 MONTHLY
             </button>
-          )}
+          ) : null}
           <button onClick={load} disabled={busy}>REFRESH STATUS</button>
-          {!status?.checkoutAvailable && <span className="dim">hosted checkout is not configured</span>}
+          {status?.provider === 'usdg' && !status.linkedPayerWallets.length && (
+            <span className="dim">link a wallet to this account before paying</span>
+          )}
+          {status?.provider !== 'usdg' && !status?.checkoutAvailable && <span className="dim">hosted checkout is not configured</span>}
         </div>
-        {status?.subscription?.cancelAtPeriodEnd && (
+        {status?.provider === 'usdg' && status?.subscription && (
+          <div className="amber" style={{ marginTop: 12 }}>
+            NO AUTO-RENEWAL — send the next 20 USDG before {periodEnd} to extend another 30 days.
+          </div>
+        )}
+        {status?.provider !== 'usdg' && status?.subscription?.cancelAtPeriodEnd && (
           <div className="amber" style={{ marginTop: 12 }}>Cancellation is scheduled; access remains open through {periodEnd}.</div>
         )}
       </Panel>
