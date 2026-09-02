@@ -113,7 +113,10 @@ export function GlobalProcess() {
     return { ...model, count: rows.length, avgConfidence, avgEdge };
   });
   const maxModelCount = Math.max(1, ...modelStats.map((model) => model.count));
-  const edgeRange = Math.max(25, Math.min(400, ...opps.map((opportunity) => Math.abs(opportunity.edge.netEdgeBps))));
+  const edgeRange = Math.max(
+    25,
+    Math.min(1_000, Math.max(0, ...opps.map((opportunity) => Math.abs(opportunity.edge.netEdgeBps)))),
+  );
   const edgeX = (confidence: number) => EDGE_PAD_X + (Math.max(0, Math.min(100, confidence)) / 100) * (EDGE_W - EDGE_PAD_X * 2);
   const edgeY = (edgeBps: number) => {
     const clipped = Math.max(-edgeRange, Math.min(edgeRange, edgeBps));
