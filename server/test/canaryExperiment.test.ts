@@ -73,10 +73,18 @@ describe('canary experiment exit recovery', () => {
        VALUES (?,?,?,?,'failed',?,'original-round-trip','sell was risk_rejected: min_size',
          'operator:test',1,1)`,
     ).run(account.id, botId, WALLET.toLowerCase(), signerPolicyFingerprint(signer), buyOrderId);
+    db.prepare(
+      `INSERT INTO live_orders
+        (intent_id,execution_account_id,bot_id,instrument_id,venue,side,requested_notional_micro,
+         approved_notional_micro,mode,state,reject_reason,operator_test,experiment_run_id,created_at,updated_at)
+       VALUES ('original-rejected-sell',?,?,'CRYPTO_SPOT://robinhood/WETH-USDG','evm:robinhood','sell',
+         499125,0,'canary','risk_rejected','min_size',1,1,1,1)`,
+    ).run(account.id, botId);
 
     const forceTrade = vi.fn(async (params: any) => {
       expect(params.side).toBe('sell');
       expect(params.exactSellQuantity).toBeCloseTo(0.000207949868288714, 18);
+      expect(params.idempotencyKey).toBe('original-round-trip:sell:recovery:v1');
       const sell = db.prepare(
         `INSERT INTO live_orders
           (intent_id,execution_account_id,bot_id,instrument_id,venue,side,requested_notional_micro,

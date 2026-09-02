@@ -267,6 +267,12 @@ export class CanaryExperimentCoordinator {
         return;
       }
       const receivedQty = Number(formatUnits(receivedRaw, WETH_ROBINHOOD.decimals));
+      const priorMinSizeRejection = this.db.prepare(
+        `SELECT id FROM live_orders
+         WHERE experiment_run_id=? AND side='sell' AND state='risk_rejected'
+           AND reject_reason='min_size' AND tx_ref IS NULL
+         ORDER BY id DESC LIMIT 1`,
+      ).get(row.id);
       const result = await this.liveNetwork.forceTrade({
         botId: row.sponsor_bot_id,
         symbol: 'ETHUSDT',
@@ -274,7 +280,7 @@ export class CanaryExperimentCoordinator {
         notionalUsd: 0.5,
         exactSellQuantity: receivedQty,
         actor: row.actor,
-        idempotencyKey: `${row.idempotency_key}:sell`,
+        idempotencyKey: `${row.idempotency_key}:sell${priorMinSizeRejection ? ':recovery:v1' : ''}`,
         experimentRunId: row.id,
       });
       if (!result.orderId || !['pending', 'filled'].includes(result.state)) {
