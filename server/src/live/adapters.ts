@@ -1,6 +1,7 @@
 import type { Instrument, SwapIntent, VenueHealth } from '@punklabz/shared';
 import type { TradingSigner } from './signing/signer.js';
 import type { DB } from '../db/db.js';
+import { config } from '../config.js';
 import { ROBINHOOD_VENUE } from './instruments.js';
 import { ZeroXRobinhoodAdapter } from './adapters/zeroXRobinhood.js';
 
@@ -246,7 +247,7 @@ export function buildAdapters(
   // execution_adapter preflight check honest: the router finds *an* adapter for
   // this venue either way, so it never falls through to shadow, and a missing
   // credential produces a refusal rather than a silent simulation.
-  const zeroXKey = process.env.ZEROX_API_KEY ?? '';
+  const zeroXKey = config.zeroXApiKey;
   if (zeroXKey && signer) {
     adapters.set(ROBINHOOD_VENUE, new ZeroXRobinhoodAdapter({
       apiKey: zeroXKey,

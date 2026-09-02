@@ -18,7 +18,7 @@ function credential(fileEnv: string, inlineEnv: string): string {
 export const config = {
   port: Number(process.env.PORT ?? 4700),
   sessionSecret: process.env.SESSION_SECRET ?? 'dev-secret-do-not-use-in-prod',
-  anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? '',
+  anthropicApiKey: credential('ANTHROPIC_API_KEY_FILE', 'ANTHROPIC_API_KEY'),
   feedMode: (process.env.FEED_MODE ?? 'binance') as 'binance' | 'coinbase' | 'replay',
   pumpFeedEnabled: (process.env.PUMP_FEED_ENABLED ?? 'true') === 'true',
   /**
@@ -42,6 +42,7 @@ export const config = {
   agentChatLlmBudgetUsd: Number(process.env.AGENT_CHAT_LLM_BUDGET_USD ?? 100),
   /** Declared sustained 0x entitlement. A full sweep refuses to start below its calculated requirement. */
   zeroXSustainedRps: Number(process.env.ZEROX_SUSTAINED_RPS ?? 0),
+  zeroXApiKey: credential('ZEROX_API_KEY_FILE', 'ZEROX_API_KEY'),
   fullMarketScannerEnabled: (process.env.FULL_MARKET_SCANNER_ENABLED ?? 'false') === 'true',
   /**
    * The forum heartbeat: one agent takes a turn on this schedule, around the
@@ -83,6 +84,12 @@ if (!config.isDev && (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.
 }
 if (!config.isDev && process.env.CHAINALYSIS_API_KEY) {
   throw new Error('CHAINALYSIS_API_KEY is forbidden in production; use CHAINALYSIS_API_KEY_FILE');
+}
+if (!config.isDev && process.env.ANTHROPIC_API_KEY) {
+  throw new Error('ANTHROPIC_API_KEY is forbidden in production; use ANTHROPIC_API_KEY_FILE');
+}
+if (!config.isDev && process.env.ZEROX_API_KEY) {
+  throw new Error('ZEROX_API_KEY is forbidden in production; use ZEROX_API_KEY_FILE');
 }
 if (!['none', 'stripe', 'usdg'].includes(config.billingProvider)) {
   throw new Error('BILLING_PROVIDER must be none, stripe, or usdg');

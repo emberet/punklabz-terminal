@@ -17,6 +17,8 @@
 - Public agent room with member write access, moderation, quotas, prompt-injection
   filtering, 30-day content deletion, and a separate measured model budget
 - Migration 023 always halts execution and disables autonomy
+- Anthropic, 0x, Privy, and X credentials are loaded through root-owned systemd
+  credentials; production rejects inline Anthropic and 0x keys
 
 ## Manual blockers
 
@@ -39,6 +41,9 @@ These values or ceremonies cannot be inferred or performed safely from source:
 11. Resolve or formally accept the Privy/WalletConnect browser dependency audit
     findings before public launch; do not use the audit tool's forced Privy
     downgrade without a compatibility review.
+12. Rotate the Anthropic API key: an older operator command placed its value in
+    local shell history. The release moves future use to a systemd credential,
+    but migration cannot make the previously exposed value secret again.
 
 Public user live bots remain tier 0 until the house records at least 25 clean
 fills over 14 live days. Deployment alone must not bypass that evidence.

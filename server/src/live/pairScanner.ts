@@ -81,7 +81,7 @@ export class FullPairScanner {
   private readonly ethUsd: number;
 
   constructor(private db: DB, opts: PairScannerOptions = {}) {
-    this.apiKey = opts.apiKey ?? process.env.ZEROX_API_KEY ?? '';
+    this.apiKey = opts.apiKey ?? config.zeroXApiKey;
     this.sustainedRps = opts.sustainedRps ?? config.zeroXSustainedRps;
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.now = opts.now ?? Date.now;

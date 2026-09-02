@@ -16,6 +16,10 @@ LoadCredential=privy_authorization_key:/etc/punklabz/privy-authorization-key
 LoadCredential=privy_app_secret:/etc/punklabz/privy-app-secret
 Environment=PRIVY_AUTHORIZATION_KEY_FILE=%d/privy_authorization_key
 Environment=PRIVY_APP_SECRET_FILE=%d/privy_app_secret
+LoadCredential=anthropic_api_key:/etc/punklabz/anthropic-api-key
+LoadCredential=zerox_api_key:/etc/punklabz/zerox-api-key
+Environment=ANTHROPIC_API_KEY_FILE=%d/anthropic_api_key
+Environment=ZEROX_API_KEY_FILE=%d/zerox_api_key
 LoadCredential=x_app_key:/etc/punklabz/x-app-key
 LoadCredential=x_app_secret:/etc/punklabz/x-app-secret
 LoadCredential=x_access_token:/etc/punklabz/x-access-token

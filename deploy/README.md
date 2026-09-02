@@ -22,7 +22,6 @@ cat > /opt/punklabz/.env <<'EOF'
 PORT=4700
 NODE_ENV=production
 SESSION_SECRET=<openssl rand -base64 32>
-ANTHROPIC_API_KEY=<real key — builder agent + manager narration>
 FEED_MODE=binance
 PUMP_FEED_ENABLED=true
 ADMIN_WALLET=<human operator wallet; never the trading wallet>
@@ -42,7 +41,6 @@ PRIVY_POLICY_IDS=<reviewed policy ids, comma-separated>
 TRADING_WALLET_ADDRESS=<dedicated trader wallet public address>
 SIGNER_ALLOWED_TARGETS=0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168,0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73,0x0000000000001fF3684f28c67538d4D072C22734
 SIGNER_MAX_NATIVE_ETH=0
-ZEROX_API_KEY=<0x key>
 ZEROX_SUSTAINED_RPS=0
 FULL_MARKET_SCANNER_ENABLED=false
 RPC_ROBINHOOD_PRIMARY=<chain 4663 private RPC>
@@ -70,7 +68,12 @@ not in `.env`. The Privy app secret is a separate credential:
 install -d -m 700 /etc/punklabz
 install -m 600 /path/to/privy-authorization-key /etc/punklabz/privy-authorization-key
 install -m 600 /path/to/privy-app-secret /etc/punklabz/privy-app-secret
+install -m 600 /path/to/anthropic-api-key /etc/punklabz/anthropic-api-key
+install -m 600 /path/to/zerox-api-key /etc/punklabz/zerox-api-key
 ```
+
+Production rejects inline `ANTHROPIC_API_KEY` and `ZEROX_API_KEY` values. The
+service loads both from the root-owned systemd credentials above.
 
 Before public live-bot provisioning, install the Chainalysis key as a third
 root-owned credential and add a systemd drop-in. Do this only after the file
