@@ -280,6 +280,17 @@ export function parseAlchemyTokenBalances(body: unknown): {
   return { nonzeroContracts, pageKey: rawPageKey ?? null };
 }
 
+export function alchemyTokenBalanceRequest(address: string, pageKey: string | null, id: number) {
+  const options: { maxCount: number; pageKey?: string } = { maxCount: 100 };
+  if (pageKey) options.pageKey = pageKey;
+  return {
+    jsonrpc: '2.0' as const,
+    id,
+    method: 'alchemy_getTokenBalances',
+    params: [getAddress(address), 'erc20', options],
+  };
+}
+
 interface IndexedInternalTransfer {
   index?: unknown;
   txHash?: unknown;
@@ -355,15 +366,10 @@ export class ZeroXRobinhoodAdapter implements ExecutionAdapter {
       let pageKey: string | null = null;
       const seen = new Set<string>();
       for (let page = 0; page < 100; page++) {
-        const options: Record<string, string> = { maxCount: '0x64' };
-        if (pageKey) options.pageKey = pageKey;
         const response = await this.fetch(this.rpcUrl, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0', id: page + 1, method: 'alchemy_getTokenBalances',
-            params: [getAddress(address), 'erc20', options],
-          }),
+          body: JSON.stringify(alchemyTokenBalanceRequest(address, pageKey, page + 1)),
           signal: AbortSignal.timeout(12_000),
         });
         if (!response.ok) throw new Error(`authenticated token-balance provider unavailable (${response.status})`);

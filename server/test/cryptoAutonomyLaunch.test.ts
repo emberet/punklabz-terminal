@@ -6,7 +6,7 @@ import { openTestDb, type DB } from '../src/db/db.js';
 import { toMicro } from '../src/money.js';
 import { exactUsdgTransfer, auditUsdgPaymentReceipts, recordWalletLink } from '../src/billing/usdgMembership.js';
 import { upsertSubscription } from '../src/billing/subscriptions.js';
-import { parseAlchemyTokenBalances } from '../src/live/adapters/zeroXRobinhood.js';
+import { alchemyTokenBalanceRequest, parseAlchemyTokenBalances } from '../src/live/adapters/zeroXRobinhood.js';
 import { config } from '../src/config.js';
 import { screenWallet } from '../src/compliance/chainalysis.js';
 import {
@@ -215,6 +215,14 @@ describe('member execution-detail privacy', () => {
 });
 
 describe('fail-closed wallet discovery and screening', () => {
+  it('encodes Alchemy maxCount as an integer and carries pagination forward', () => {
+    const first = alchemyTokenBalanceRequest(WALLET, null, 1);
+    const next = alchemyTokenBalanceRequest(WALLET, 'page-token', 2);
+    expect(first.params[2]).toEqual({ maxCount: 100 });
+    expect(next.params[2]).toEqual({ maxCount: 100, pageKey: 'page-token' });
+    expect(typeof (first.params[2] as { maxCount: unknown }).maxCount).toBe('number');
+  });
+
   it('parses paginated Alchemy balances without treating malformed data as empty', () => {
     expect(parseAlchemyTokenBalances({ result: { tokenBalances: [
       { contractAddress: USDG.address, tokenBalance: '0x0' },
