@@ -220,6 +220,9 @@ export function LiveNetworkPanel() {
   const sponsor = capital.bots.find((bot) => bot.name === 'MOMENTUM RUNNER');
   const managerAccount = capital.accounts.find((account) => account.role === 'manager_operating' && account.active);
   const traderAccount = capital.accounts.find((account) => account.name === 'ROBINHOOD_TRADER_01' && account.active);
+  const managerWalletInSession = !!managerAccount?.walletAddress && privyWallets.some(
+    (wallet) => wallet.address.toLowerCase() === managerAccount.walletAddress!.toLowerCase(),
+  );
 
   const fundReplacementTrader = async () => {
     setBusy(true);
@@ -508,6 +511,19 @@ export function LiveNetworkPanel() {
                     SIGN EXACT 0.005 ETH GAS
                   </button>
                 </>
+              )}
+              {traderAccount?.walletAddress && managerAccount?.walletAddress && !managerWalletInSession && (
+                <div className="banner warn" style={{ width: '100%', textAlign: 'left' }}>
+                  <b>MANAGER CUSTODY NOT AVAILABLE IN THIS SESSION</b>
+                  <div style={{ marginTop: 6 }}>
+                    PunkLabz knows the Manager address, but this browser session cannot sign from it. For the
+                    experiment path, send exactly <b>5 USDG</b> and <b>0.005 ETH</b> on Robinhood Chain 4663
+                    directly to the Trader, then import each transaction hash.
+                  </div>
+                  <div className="mono" style={{ marginTop: 6, wordBreak: 'break-all' }}>
+                    TRADER {traderAccount.walletAddress}
+                  </div>
+                </div>
               )}
               <span className="dim" style={{ fontSize: 10 }}>
                 Manager owner signs this one exact transfer; Trader authority begins only after receipt import and reconciliation. Canary/live opens only after recovery, reconciliation, and preflight. Composite score gate {status.limits?.confidenceThreshold ?? 90}/100; this is not a win probability.
