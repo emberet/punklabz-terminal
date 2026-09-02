@@ -3,6 +3,7 @@ import type { WsHub } from '../realtime/wsHub.js';
 import { appendAudit } from '../audit/auditLog.js';
 import { alertOperator } from '../ops/alerts.js';
 import type { ExecutionAdapter } from './adapters.js';
+import { rawHoldings } from './rawAssetLedger.js';
 import {
   accountForMode, custodyHoldings, setBotAllocation,
 } from './accounts.js';
@@ -11,6 +12,8 @@ import { reconcileAccount } from './reconciler.js';
 import { getLiveConfig, haltNetwork, stageCapUsd } from './riskEngine.js';
 import type { TradingSigner } from './signing/signer.js';
 import { signerPolicyFingerprint } from './signing/signer.js';
+import { WETH_ROBINHOOD } from '@punklabz/shared';
+import { formatUnits } from 'viem';
 
 export interface CanaryExperimentView {
   id: number;
@@ -88,6 +91,52 @@ export class CanaryExperimentCoordinator {
     if (!account.walletAddress || account.walletAddress.toLowerCase() !== wallet.toLowerCase()) {
       throw new Error('Trader account and signer wallet do not match');
     }
+
+    const recoverable = this.db.prepare(
+      `SELECT r.* FROM canary_experiment_runs r
+       JOIN live_orders b ON b.id=r.buy_order_id
+       WHERE r.state='failed' AND r.execution_account_id=? AND r.sponsor_bot_id=?
+         AND lower(r.wallet_address)=lower(?) AND r.policy_fingerprint=?
+         AND r.sell_order_id IS NULL AND r.failure_reason='sell was risk_rejected: min_size'
+         AND b.state='filled' AND b.operator_test=1
+       ORDER BY r.id DESC LIMIT 1`,
+    ).get(account.id, sponsorBotId, wallet, policy) as any;
+    if (recoverable) {
+      const unresolvedTransactions = (this.db.prepare(
+        `SELECT COUNT(*) n FROM execution_transactions
+         WHERE state IN ('prepared','signed','broadcast','unknown')`,
+      ).get() as { n: number }).n;
+      const unresolvedOrders = (this.db.prepare(
+        `SELECT COUNT(*) n FROM live_orders
+         WHERE state IN ('risk_approved','submitting','submitted','pending','open','partial','reconciling')`,
+      ).get() as { n: number }).n;
+      const receivedRows = this.db.prepare(
+        `SELECT raw_delta FROM execution_asset_ledger
+         WHERE execution_account_id=? AND order_id=? AND lower(contract_address)=lower(?)
+           AND event_type='fill' AND raw_delta IS NOT NULL`,
+      ).all(account.id, recoverable.buy_order_id, WETH_ROBINHOOD.address) as { raw_delta: string }[];
+      const receivedRaw = receivedRows.reduce((sum, entry) => {
+        const delta = BigInt(entry.raw_delta);
+        return delta > 0n ? sum + delta : sum;
+      }, 0n);
+      const heldRaw = rawHoldings(this.db, account.id).get(WETH_ROBINHOOD.address.toLowerCase()) ?? 0n;
+      if (unresolvedTransactions || unresolvedOrders || receivedRaw <= 0n || heldRaw !== receivedRaw) {
+        throw new Error('stranded probe exit recovery requires no unresolved work and an exact receipt-derived WETH holding');
+      }
+      this.db.prepare(
+        `UPDATE canary_experiment_runs
+         SET state='buy_confirmed', failure_reason=NULL, updated_at=? WHERE id=? AND state='failed'`,
+      ).run(Date.now(), recoverable.id);
+      appendAudit(this.db, actor, 'live_canary_experiment_exit_recovery', {
+        experimentRunId: recoverable.id,
+        buyOrderId: recoverable.buy_order_id,
+        receivedRaw: receivedRaw.toString(),
+        requestIdempotencyKey: idempotencyKey,
+      });
+      await this.advance();
+      return this.byId(recoverable.id)!;
+    }
+
     const capital = Math.min(stageCapUsd(cfg.capitalStage), custodyHoldings(this.db, account.id).get('USDG') ?? 0);
     setBotAllocation(this.db, account.id, sponsorBotId, 0.5, actor, capital);
 
@@ -176,20 +225,26 @@ export class CanaryExperimentCoordinator {
     }
 
     if (row.state === 'buy_confirmed') {
-      const received = this.db.prepare(
-        `SELECT COALESCE(SUM(CAST(qty_delta AS REAL)),0) qty
-         FROM execution_asset_ledger WHERE order_id=? AND asset='WETH' AND event_type='fill' AND qty_delta > 0`,
-      ).get(row.buy_order_id) as { qty: number };
-      if (!(received.qty > 0)) {
+      const receivedRows = this.db.prepare(
+        `SELECT raw_delta FROM execution_asset_ledger
+         WHERE execution_account_id=? AND order_id=? AND lower(contract_address)=lower(?)
+           AND event_type='fill' AND raw_delta IS NOT NULL`,
+      ).all(row.execution_account_id, row.buy_order_id, WETH_ROBINHOOD.address) as { raw_delta: string }[];
+      const receivedRaw = receivedRows.reduce((sum, entry) => {
+        const delta = BigInt(entry.raw_delta);
+        return delta > 0n ? sum + delta : sum;
+      }, 0n);
+      if (receivedRaw <= 0n) {
         this.fail(row, 'confirmed buy receipt contains no positive WETH delta');
         return;
       }
+      const receivedQty = Number(formatUnits(receivedRaw, WETH_ROBINHOOD.decimals));
       const result = await this.liveNetwork.forceTrade({
         botId: row.sponsor_bot_id,
         symbol: 'ETHUSDT',
         side: 'sell',
         notionalUsd: 0.5,
-        exactSellQuantity: received.qty,
+        exactSellQuantity: receivedQty,
         actor: row.actor,
         idempotencyKey: `${row.idempotency_key}:sell`,
         experimentRunId: row.id,

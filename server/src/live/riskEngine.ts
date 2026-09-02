@@ -388,7 +388,9 @@ export function evaluateIntent(
     pass('max_trade', `$${size.toFixed(2)} within $${maxPerTrade.toFixed(2)} ceiling`);
   }
 
-  if (size < MIN_TRADE_USD)
+  if (exactFullExit && size > 0)
+    pass('min_size', `exact full-lot exit $${size.toFixed(4)} may close below the $${MIN_TRADE_USD.toFixed(2)} entry floor`);
+  else if (size < MIN_TRADE_USD)
     fail('min_size', `size $${size.toFixed(2)} below the $${MIN_TRADE_USD.toFixed(2)} floor — not worth fees`);
   else pass('min_size', `size $${size.toFixed(2)}`);
 

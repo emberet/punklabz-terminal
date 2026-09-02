@@ -290,10 +290,10 @@ export class LiveNetwork {
         return;
       }
       const tolerance = Math.max(1e-12, lot.qty * 1e-9);
-      if (context.exactSellQuantity! > lot.qty + tolerance) {
+      if (Math.abs(context.exactSellQuantity! - lot.qty) > tolerance) {
         this.recordUnroutable(
           trade, cfg.mode,
-          `exact sell quantity ${context.exactSellQuantity} exceeds ledger lot ${lot.qty}`,
+          `exact sell quantity ${context.exactSellQuantity} does not match full ledger lot ${lot.qty}`,
           forcedBy, context,
         );
         return;

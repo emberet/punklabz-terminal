@@ -117,6 +117,32 @@ describe('risk engine', () => {
     expect(halted.checks.find((c) => c.name === 'kill_switch')?.pass).toBe(false);
   });
 
+  it('permits only an exact full-lot exit below the entry-size floor', () => {
+    setLiveMode(db, 'shadow', 'test');
+    setTestStage(db, 1);
+    const exit = intent({ side: 'sell', notionalUsd: 0.499125, confidence: 1 });
+    const edge = {
+      grossEdgeBps: 0, feeBps: 10, slippageBps: 10, bufferBps: 10, netEdgeBps: -30, edgeModel: 'test',
+    };
+
+    const exact = evaluateIntent(db, exit, edge, undefined, undefined, {
+      isExit: true, exactFullExit: true,
+    });
+    expect(exact.approved).toBe(true);
+    expect(exact.checks.find((c) => c.name === 'min_size')).toMatchObject({ pass: true });
+
+    const ordinary = evaluateIntent(db, { ...exit, intentId: `${exit.intentId}-ordinary` }, edge,
+      undefined, undefined, { isExit: true });
+    expect(ordinary.approved).toBe(false);
+    expect(ordinary.checks.find((c) => c.name === 'min_size')).toMatchObject({ pass: false });
+
+    haltNetwork(db, 'operator halt', 'test');
+    const halted = evaluateIntent(db, { ...exit, intentId: `${exit.intentId}-halted-exact` }, edge,
+      undefined, undefined, { isExit: true, exactFullExit: true });
+    expect(halted.approved).toBe(false);
+    expect(halted.checks.find((c) => c.name === 'kill_switch')).toMatchObject({ pass: false });
+  });
+
   it('daily-loss breach rejects new entries', () => {
     setLiveMode(db, 'shadow', 'test');
     setTestStage(db, 1);
