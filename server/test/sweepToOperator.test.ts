@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   USDG_ADDRESS, WETH_ADDRESS, buildWithdrawalPolicy,
 } from '../src/live/signing/provisionPrivy.js';
-import { renderSweep, type SweepReport } from '../src/ops/sweepToOperator.js';
+import { nativeSweepAmount, renderSweep, type SweepReport } from '../src/ops/sweepToOperator.js';
 
 // THE WITHDRAWAL POLICY.
 //
@@ -124,5 +124,47 @@ describe('the printed plan', () => {
       steps: [], policyRestored: true,
     };
     expect(renderSweep(report)).toContain('policy restored: true');
+  });
+});
+
+describe('the native sweep arithmetic', () => {
+  // Robinhood Chain is an Arbitrum Orbit L2: intrinsic gas for a plain transfer
+  // is 21257, not the 21000 this file originally assumed. Being 257 short is
+  // rejected as "intrinsic gas too low" — and it was discovered only after the
+  // token leg had been signed and mined. Gas is now estimated from the chain;
+  // these tests pin the arithmetic that spends it.
+  const GWEI = 1_000_000_000n;
+
+  it('subtracts BOTH the token gas and the native gas from the balance', () => {
+    const balance = 10_000_000_000_000_000n; // 0.01 ETH
+    const out = nativeSweepAmount(balance, 60_608n, 21_257n, GWEI)!;
+    expect(out).toBe(balance - (60_608n + 21_257n) * GWEI);
+  });
+
+  it('returns null rather than a negative amount when gas exceeds the balance', () => {
+    // a wallet that cannot afford to empty itself must say so, not emit a
+    // transaction with an unrepresentable negative value
+    expect(nativeSweepAmount(1_000n, 60_608n, 21_257n, GWEI)).toBeNull();
+  });
+
+  it('returns null at exact break-even, leaving no zero-value transaction', () => {
+    const gas = (60_608n + 21_257n) * GWEI;
+    expect(nativeSweepAmount(gas, 60_608n, 21_257n, GWEI)).toBeNull();
+  });
+
+  it('reserves nothing for tokens when there are none to move', () => {
+    const balance = 10_000_000_000_000_000n;
+    expect(nativeSweepAmount(balance, 0n, 21_257n, GWEI)).toBe(balance - 21_257n * GWEI);
+  });
+
+  it('would have refused the transaction that actually failed', () => {
+    // the real numbers: 0.006932463558580000 ETH, and a limit of 21000 that the
+    // chain rejected. With the true 21257 the amount is simply smaller — the
+    // point is that the figure comes from the chain, not from this file.
+    const balance = 6_932_463_558_580_000n;
+    const atTrueGas = nativeSweepAmount(balance, 0n, 21_257n, 557_500_000n)!;
+    const atAssumedGas = nativeSweepAmount(balance, 0n, 21_000n, 557_500_000n)!;
+    expect(atTrueGas).toBeLessThan(atAssumedGas);
+    expect(atAssumedGas - atTrueGas).toBe(257n * 557_500_000n);
   });
 });

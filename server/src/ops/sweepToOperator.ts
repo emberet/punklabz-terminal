@@ -45,9 +45,35 @@ const BALANCE_OF = [{
   type: 'function',
 }] as const;
 
-/** Native transfers are exactly this; ERC-20 needs headroom for cold storage writes. */
-const NATIVE_GAS = 21_000n;
-const ERC20_GAS = 90_000n;
+// NEVER HARDCODE INTRINSIC GAS.
+//
+// A native transfer is 21000 gas on Ethereum, and this file said so. Robinhood
+// Chain is an Arbitrum Orbit L2, where intrinsic gas also carries an L1 data
+// component: the real figure is 21257, and a 21000 limit is rejected as
+// "intrinsic gas too low" — after the token leg has already been signed and
+// mined, which is the worst possible moment to discover it.
+//
+// So every limit is estimated against the chain, with headroom. These are only
+// the floors used when an estimate cannot be obtained.
+const NATIVE_GAS_FLOOR = 21_000n;
+const ERC20_GAS_FLOOR = 90_000n;
+/** estimates are exact for simple transfers; the margin covers block-to-block drift */
+const GAS_MARGIN_PCT = 25n;
+
+const withMargin = (gas: bigint) => (gas * (100n + GAS_MARGIN_PCT)) / 100n;
+
+/**
+ * What is left after paying for every transfer, or null if the wallet cannot
+ * even afford to empty itself. Extracted so the arithmetic is testable without
+ * a chain — this is where the 21000 assumption did its damage.
+ */
+export function nativeSweepAmount(
+  balanceWei: bigint, tokenGasUnits: bigint, nativeGasUnits: bigint, maxFeePerGas: bigint,
+): bigint | null {
+  const cost = (tokenGasUnits + nativeGasUnits) * maxFeePerGas;
+  const remainder = balanceWei - cost;
+  return remainder > 0n ? remainder : null;
+}
 
 export interface SweepStep {
   what: string;
@@ -98,31 +124,41 @@ export async function sweepWalletToOperator(opts: {
   const maxFeePerGas = fees.maxFeePerGas ?? 1_000_000_000n;
   const maxPriorityFeePerGas = fees.maxPriorityFeePerGas ?? 0n;
 
-  // Reserve gas for the token transfers, then sweep whatever native remains.
-  // A negative remainder means the wallet cannot even pay to empty itself.
-  const tokenTransfers = (usdg > 0n ? 1n : 0n) + (weth > 0n ? 1n : 0n);
-  const reserved = tokenTransfers * ERC20_GAS * maxFeePerGas;
-  const nativeSweep = native - reserved - NATIVE_GAS * maxFeePerGas;
+  const estimate = async (tx: { to: Address; value: bigint; data: Hex }, floor: bigint) => {
+    try {
+      return withMargin(await client.estimateGas({ account: self, ...tx }));
+    } catch {
+      // A failed estimate is not a reason to stop — it is a reason to use a
+      // generous floor and let the chain reject it if that is still wrong.
+      return withMargin(floor);
+    }
+  };
 
   const steps: SweepStep[] = [];
-  if (usdg > 0n) {
-    steps.push({
-      what: `USDG ${(Number(usdg) / 1e6).toFixed(6)}`,
-      to: getAddress(USDG_ADDRESS), value: 0n, gas: ERC20_GAS,
-      data: encodeFunctionData({ abi: ERC20_TRANSFER, functionName: 'transfer', args: [destination, usdg] }),
+  let tokenGas = 0n;
+  for (const [symbol, token, amount, decimals] of [
+    ['USDG', USDG_ADDRESS, usdg, 6],
+    ['WETH', WETH_ADDRESS, weth, 18],
+  ] as const) {
+    if (amount <= 0n) continue;
+    const data = encodeFunctionData({
+      abi: ERC20_TRANSFER, functionName: 'transfer', args: [destination, amount],
     });
+    const to = getAddress(token) as Address;
+    const gas = await estimate({ to, value: 0n, data }, ERC20_GAS_FLOOR);
+    tokenGas += gas;
+    steps.push({ what: `${symbol} ${(Number(amount) / 10 ** decimals).toFixed(decimals)}`, to, value: 0n, gas, data });
   }
-  if (weth > 0n) {
+
+  // Estimate the native leg against a nominal value: a plain transfer costs the
+  // same regardless of amount, so this avoids the circularity of needing the
+  // amount to compute the gas that determines the amount.
+  const nativeGas = await estimate({ to: destination as Address, value: 1n, data: '0x' }, NATIVE_GAS_FLOOR);
+  const nativeSweep = nativeSweepAmount(native, tokenGas, nativeGas, maxFeePerGas);
+  if (nativeSweep !== null) {
     steps.push({
-      what: `WETH ${(Number(weth) / 1e18).toFixed(18)}`,
-      to: getAddress(WETH_ADDRESS), value: 0n, gas: ERC20_GAS,
-      data: encodeFunctionData({ abi: ERC20_TRANSFER, functionName: 'transfer', args: [destination, weth] }),
-    });
-  }
-  if (nativeSweep > 0n) {
-    steps.push({
-      what: `ETH ${(Number(nativeSweep) / 1e18).toFixed(18)} (balance minus gas)`,
-      to: destination, value: nativeSweep, gas: NATIVE_GAS, data: '0x',
+      what: `ETH ${(Number(nativeSweep) / 1e18).toFixed(18)} (balance minus ${nativeGas} gas)`,
+      to: destination, value: nativeSweep, gas: nativeGas, data: '0x',
     });
   }
 
@@ -139,7 +175,7 @@ export async function sweepWalletToOperator(opts: {
         opts.ctx, destination,
         // cap at the exact balances just read — the policy can never authorise
         // more than the wallet actually holds
-        { usdgBaseUnits: usdg, wethWei: weth, nativeWei: nativeSweep > 0n ? nativeSweep : 0n },
+        { usdgBaseUnits: usdg, wethWei: weth, nativeWei: nativeSweep ?? 0n },
         opts.runId,
       );
       previousPolicyIds = prepared.previousPolicyIds;
