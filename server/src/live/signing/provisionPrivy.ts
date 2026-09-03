@@ -248,6 +248,74 @@ const ERC20_TRANSFER_ABI = [{
   type: 'function',
 }];
 
+/**
+ * A temporary policy that permits withdrawing to ONE address and nothing else.
+ *
+ * The standing policy is a default-deny allowlist whose only ALLOW rules are
+ * `approve` to the 0x AllowanceHolder and swaps through it. That is correct for
+ * a trading wallet and it is also why funds cannot simply be sent home: a plain
+ * ERC-20 transfer matches no rule, so the enclave refuses to sign it. The way
+ * out is to attach this narrower policy, sign the sweep, and put the original
+ * back — never to widen the standing policy.
+ *
+ * Every rule pins BOTH the chain and the destination. A caller that gets the
+ * destination wrong produces a policy that refuses its own transactions, which
+ * is the failure we want; there is no rule here that would let funds reach any
+ * address other than the one named at build time.
+ *
+ * Amounts are `lte` the balances read immediately beforehand, so the policy can
+ * never authorise more than what is actually in the wallet. The native rule
+ * deliberately does NOT pin an exact value the way buildManagerGasTopUpPolicy
+ * does: a full sweep is `balance − gas`, and gas is not known until signing.
+ */
+export function buildWithdrawalPolicy(
+  destination: string,
+  caps: { usdgBaseUnits: bigint; wethWei: bigint; nativeWei: bigint },
+) {
+  const to = getAddress(destination);
+  const hex = (v: bigint) => `0x${v.toString(16).toUpperCase()}`;
+  const rules: unknown[] = [];
+
+  const erc20Rule = (symbol: string, token: string, cap: bigint) => ({
+    name: `${symbol.slice(0, 18)} withdrawal to operator`,
+    method: 'eth_signTransaction',
+    action: 'ALLOW',
+    conditions: [
+      { field_source: 'ethereum_transaction', field: 'chain_id', operator: 'eq', value: '4663' },
+      { field_source: 'ethereum_transaction', field: 'to', operator: 'eq', value: token },
+      { field_source: 'ethereum_transaction', field: 'value', operator: 'eq', value: '0x0' },
+      {
+        field_source: 'ethereum_calldata', field: 'transfer.to', abi: ERC20_TRANSFER_ABI,
+        operator: 'eq', value: to,
+      },
+      {
+        field_source: 'ethereum_calldata', field: 'transfer.amount', abi: ERC20_TRANSFER_ABI,
+        operator: 'lte', value: hex(cap),
+      },
+    ],
+  });
+
+  // A zero balance gets no rule at all. An ALLOW rule permitting a transfer of
+  // up to zero is not harmless — it is a rule nobody can read the intent of.
+  if (caps.usdgBaseUnits > 0n) rules.push(erc20Rule('USDG', USDG_ADDRESS, caps.usdgBaseUnits));
+  if (caps.wethWei > 0n) rules.push(erc20Rule('WETH', WETH_ADDRESS, caps.wethWei));
+  if (caps.nativeWei > 0n) {
+    rules.push({
+      name: 'Native ETH sweep to operator',
+      method: 'eth_signTransaction',
+      action: 'ALLOW',
+      conditions: [
+        { field_source: 'ethereum_transaction', field: 'chain_id', operator: 'eq', value: '4663' },
+        { field_source: 'ethereum_transaction', field: 'to', operator: 'eq', value: to },
+        { field_source: 'ethereum_transaction', field: 'value', operator: 'lte', value: hex(caps.nativeWei) },
+      ],
+    });
+  }
+  if (rules.length === 0) throw new Error('withdrawal policy would be empty — the wallet holds nothing');
+
+  return { version: '1.0', name: 'PunkLabz operator withdrawal', chain_type: 'ethereum', rules };
+}
+
 export function buildManagerFundingPolicy(traderAddress: string) {
   return {
     version: '1.0',
@@ -338,6 +406,19 @@ export async function prepareManagerFundingPolicy(
     ctx,
     buildManagerFundingPolicy(traderAddress),
     `${runId}-manager-funding-policy`,
+  );
+}
+
+export async function prepareWithdrawalPolicy(
+  ctx: Ctx,
+  destination: string,
+  caps: { usdgBaseUnits: bigint; wethWei: bigint; nativeWei: bigint },
+  runId: string,
+): Promise<{ policyId: string; previousPolicyIds: string[]; ownerId: string; walletAddress: string }> {
+  return attachTemporaryManagerPolicy(
+    ctx,
+    buildWithdrawalPolicy(destination, caps) as ReturnType<typeof buildManagerFundingPolicy>,
+    `${runId}-operator-withdrawal-policy`,
   );
 }
 
