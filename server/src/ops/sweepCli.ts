@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { renderSweep, sweepWalletToOperator } from './sweepToOperator.js';
+import { checkCredentials, renderSweep, sweepWalletToOperator } from './sweepToOperator.js';
 import type { Ctx } from '../live/signing/provisionPrivy.js';
 
 // OPERATOR SWEEP — decommission a Privy wallet by sending everything home.
@@ -50,10 +50,17 @@ async function main(): Promise<void> {
     console.error(`missing: ${missing.join(', ')}`);
     process.exit(2);
   }
-  if (!ctx.authorizationKey) {
-    // Not fatal for a dry run, but it will be the moment we try to PATCH the
-    // policy — say so now rather than after the balances are printed.
-    console.error('WARNING: no authorization key — the policy swap will fail if this wallet has an owner\n');
+  // Diagnose credentials first. Every one of these mistakes otherwise surfaces
+  // as an indistinguishable 401, several steps later.
+  const check = await checkCredentials(ctx);
+  console.log('CREDENTIALS');
+  console.log(`  app secret        ${check.appSecret}`);
+  console.log(`  wallet id         ${check.walletId}`);
+  console.log(`  authorization key ${check.authorizationKey}`);
+  console.log();
+  if (!check.ok) {
+    console.error('cannot proceed — fix the above first.');
+    process.exit(3);
   }
 
   const report = await sweepWalletToOperator({

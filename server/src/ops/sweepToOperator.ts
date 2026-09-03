@@ -1,7 +1,7 @@
 import { createPublicClient, encodeFunctionData, getAddress, http, type Address, type Hex } from 'viem';
 import {
-  USDG_ADDRESS, WETH_ADDRESS, prepareWithdrawalPolicy, restoreManagerPolicies,
-  signPrivyOperatorTransaction, type Ctx,
+  USDG_ADDRESS, WETH_ADDRESS, prepareWithdrawalPolicy, publicKeyFromAuthorizationKey,
+  restoreManagerPolicies, signPrivyOperatorTransaction, type Ctx,
 } from '../live/signing/provisionPrivy.js';
 
 // SWEEPING A PRIVY WALLET BACK TO THE OPERATOR.
@@ -173,6 +173,107 @@ export async function sweepWalletToOperator(opts: {
     }
   }
   return report;
+}
+
+export interface CredentialCheck {
+  ok: boolean;
+  appSecret: string;
+  walletId: string;
+  authorizationKey: string;
+  walletAddress?: string;
+  ownerId?: string;
+}
+
+/**
+ * Diagnose the credentials BEFORE touching anything.
+ *
+ * Three different mistakes all surface as a bare 401 from Privy, and telling
+ * them apart afterwards costs a round trip each time: a wrong app secret, a
+ * wallet id that belongs to another app, and an authorization key that is not
+ * the wallet's owner. The last one is the expensive one — it fails only at the
+ * policy PATCH, several steps in, long after the balances have printed and the
+ * operator has decided this is going to work.
+ *
+ * So: check the app secret with a plain read, then compare the local key's
+ * PUBLIC half against the owner quorum Privy actually has. Comparing public
+ * keys means the private key never leaves the process and is never logged.
+ */
+export async function checkCredentials(ctx: Ctx): Promise<CredentialCheck> {
+  const auth = {
+    Authorization: `Basic ${Buffer.from(`${ctx.appId}:${ctx.appSecret}`).toString('base64')}`,
+    'privy-app-id': ctx.appId,
+  };
+  const out: CredentialCheck = {
+    ok: false, appSecret: 'unknown', walletId: 'unknown', authorizationKey: 'unknown',
+  };
+
+  if (!ctx.appId) { out.appSecret = 'PRIVY_APP_ID is not set'; return out; }
+  if (!ctx.appSecret) { out.appSecret = 'PRIVY_APP_SECRET(_FILE) is not set'; return out; }
+
+  const res = await fetch(
+    `https://api.privy.io/v1/wallets/${encodeURIComponent(ctx.walletId)}`, { headers: auth },
+  );
+  if (res.status === 401 || res.status === 403) {
+    out.appSecret = `REJECTED (${res.status}) — the app id and app secret do not match`;
+    out.walletId = 'not checked';
+    out.authorizationKey = 'not checked';
+    return out;
+  }
+  if (res.status === 404) {
+    out.appSecret = 'accepted';
+    out.walletId = 'NOT FOUND — this wallet id does not belong to this app';
+    return out;
+  }
+  const wallet = await res.json().catch(() => null) as
+    { address?: string; owner_id?: string | null } | null;
+  if (!res.ok || !wallet?.address) {
+    out.appSecret = 'accepted';
+    out.walletId = `unreadable (${res.status})`;
+    return out;
+  }
+  out.appSecret = 'accepted';
+  out.walletId = `ok — ${wallet.address}`;
+  out.walletAddress = wallet.address;
+  out.ownerId = wallet.owner_id ?? undefined;
+
+  if (!wallet.owner_id) {
+    // No owner means the app secret alone can change policy and sign.
+    out.authorizationKey = 'not required — this wallet has no owner';
+    out.ok = true;
+    return out;
+  }
+  if (!ctx.authorizationKey) {
+    out.authorizationKey = `MISSING — wallet owner is ${wallet.owner_id}, so a key is required`;
+    return out;
+  }
+
+  let localPublic: string;
+  try {
+    localPublic = publicKeyFromAuthorizationKey(ctx.authorizationKey);
+  } catch (e) {
+    out.authorizationKey = `UNREADABLE — ${String((e as Error).message).slice(0, 90)}`;
+    return out;
+  }
+
+  const q = await fetch(
+    `https://api.privy.io/v1/key_quorums/${encodeURIComponent(wallet.owner_id)}`, { headers: auth },
+  );
+  const quorum = await q.json().catch(() => null) as
+    { authorization_keys?: { public_key: string }[] } | null;
+  const registered = (quorum?.authorization_keys ?? []).map((k) => k.public_key.replace(/\s/g, ''));
+  const mine = localPublic.replace(/\s/g, '');
+  if (registered.some((k) => k === mine)) {
+    out.authorizationKey = `ok — matches owner quorum ${wallet.owner_id}`;
+    out.ok = true;
+  } else {
+    // The distinguishing bytes start after the shared SPKI header, so show
+    // that slice rather than a prefix every P-256 key has in common.
+    out.authorizationKey =
+      `WRONG KEY — this is not the owner of this wallet.\n` +
+      `      owner quorum ${wallet.owner_id} expects: ${registered[0]?.slice(36, 60) ?? '(none registered)'}…\n` +
+      `      the key you supplied is:                 ${mine.slice(36, 60)}…`;
+  }
+  return out;
 }
 
 async function resolveWalletAddress(ctx: Ctx): Promise<string> {
